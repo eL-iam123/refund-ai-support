@@ -6,19 +6,26 @@
  */
 
 :root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel-2: #1e222b;
-  --line: #2a2f3a;
-  --text: #e6e8ec;
-  --muted: #949cad;
-  --approved: #3fb950;
-  --denied: #f85149;
+  --bg: #0f172a;
+  --panel: #1b2336;
+  --panel-2: #272f42;
+  --line: #475569;
+  --text: #f8fafc;
+  --muted: #94a3b8;
+  --approved: #22c55e;
+  --denied: #ef4444;
   --escalated: #d29922;
   --warn: #db6d28;
-  --accent: #58a6ff;
+  --accent: #22c55e;
   --radius: 10px;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --mono: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: 'Fira Sans', system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Glassmorphism */
+  --glass-bg: rgba(27, 35, 54, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.15);
+  --glass-blur: 16px;
+  --glass-reflection: rgba(255, 255, 255, 0.08);
 }
 
 * { box-sizing: border-box; }
