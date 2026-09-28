@@ -33,7 +33,7 @@ refund button. See [ADR 0001](docs/adr/0001-resolver-is-sole-authority.md).
 ### One command, with Docker
 
 ```bash
-cp .env.example .env        # uncomment one provider key and paste it in
+cp .env.example .env        # optional: add a provider key
 docker compose up --build   # http://localhost:4000 - API, console and shop
 ```
 
@@ -41,9 +41,15 @@ That is the whole setup. The stack seeds 18 scenario fixtures, 20 customers, 25
 orders and a short decision history on first boot, and serves the customer chat,
 the agent console and the storefront from one origin.
 
-A provider key is the one thing that cannot be invented, so it is the one thing
-you have to supply. The server refuses to start without one and names the exact
-variable, rather than accepting traffic it cannot answer.
+**No key is needed to run it.** With no provider key the server starts, reports
+the model as unavailable, and every request that would need a claim escalates to
+a human. A missing model is a degraded queue, which is recoverable; a service
+that refuses to boot has no queue at all.
+
+To get real model output, add a key for whichever provider you prefer — Groq,
+NVIDIA, OpenRouter, Gemini, Anthropic or OpenAI — to `.env` and restart. Or set
+`AI_PROVIDER=local` to run the pattern matcher with no network at all, which is
+useful for a demo and refused when `NODE_ENV=production`.
 
 `docker-compose.yml` ships a placeholder `ADMIN_API_SECRET` so the command above
 works on a clean machine. It is rejected at boot when `NODE_ENV=production`, so
@@ -214,9 +220,10 @@ docker run …` is honoured even if a `.env` was baked into the image.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `AI_PROVIDER` | `groq` | `groq` \| `openrouter` \| `openai` \| `nvidia` |
+| `AI_PROVIDER` | `groq` | `groq` \| `nvidia` \| `openrouter` \| `gemini` \| `anthropic` \| `openai` \| `local` |
 | `AI_MODEL` | per provider | Specific model id, **not** a router alias |
 | `AI_FALLBACK_MODELS` | empty | Comma-separated, tried in order |
+| `GROQ_API_KEY` etc. | none | The key for the selected provider. **Optional** — absent means the model is unavailable, not that the server will not start |
 | `AI_TIMEOUT_MS` | `30000` | Per attempt |
 | `AI_TOTAL_BUDGET_MS` | `45000` | Whole-request ceiling, including retries |
 | `AI_MAX_ATTEMPTS` | `2` | Attempts per model |
@@ -395,8 +402,9 @@ assistant and read the policy without an account.
 Tokens are HMAC-SHA256 over `agent.role.expiry`, signed with
 `ADMIN_API_SECRET`. The secret is required at startup — there is no default and
 no dev bypass, because a default would be a way in. It must be at least 32
-characters, and the container refuses to start without a real provider key, both
-checked at boot rather than at the first customer request.
+characters, and that is checked at boot rather than at the first customer
+request. A missing *provider* key is deliberately not in that list: it degrades
+the queue instead of stopping the service.
 
 `GET /api/admin/audit/verify` is admin-only and re-walks the audit chain on
 demand, naming the id of the row that fails. It returns `200` with `ok: false`
@@ -406,7 +414,7 @@ failed request.
 ## Testing
 
 ```
-345 passed · 8 skipped · 0 network required
+366 passed · 8 skipped · 0 network required
 ```
 
 The 8 skipped are the opt-in live provider suite, which stays dark unless
@@ -477,13 +485,17 @@ one is like this.
   releases it. This deliberately slows refunds, and it means a queue has to be
   staffed. The alternative - approving straight to a payment call - turns a wrong
   decision into an irreversible one.
-- **No mock or offline mode in the running product.** Tests inject a fake
-  analyzer; the application always talks to a real provider. That is why a
-  provider key is required to start.
-- **Fail fast on misconfiguration.** Missing keys, weak secrets and invalid config
-  stop the process at boot instead of surfacing on the first customer request. An
-  empty variable counts as absent, so a missing key is reported as a missing key
-  rather than as a malformed optional.
+- **No simulated model in the running product.** Tests inject a fake analyzer;
+  the application always talks to a real provider. What it will not do is
+  substitute a pattern matcher for a model without saying so: with no key the
+  provider is reported unavailable, every request that needs a claim escalates,
+  and the reason is recorded in the audit trail. `AI_PROVIDER=local` selects the
+  matcher explicitly, and is refused in production.
+- **Degrade loudly, not silently.** A missing key is not misconfiguration to
+  reject at boot; it is a product with no model. Weak secrets, invalid config and
+  `AI_PROVIDER=local` under `NODE_ENV=production` still stop the process, because
+  those are choices rather than absences. An empty variable counts as absent, so
+  a missing key is reported as a missing key rather than as malformed optional.
 - **SQLite, single writer.** The audit chain is sequential by id and the ledger
   assumes one process, so a second replica on the same volume is not a scale-out.
   Everything here is sized for a single-writer deployment.

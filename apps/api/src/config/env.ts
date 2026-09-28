@@ -26,6 +26,8 @@ const EMPTY_IS_ABSENT = [
   'OPENROUTER_API_KEY',
   'OPENAI_API_KEY',
   'NVIDIA_API_KEY',
+  'GEMINI_API_KEY',
+  'ANTHROPIC_API_KEY',
 ] as const;
 
 function normaliseEmptyVars(): void {
@@ -53,11 +55,22 @@ const EnvSchema = z.object({
   WEB_STATIC_DIR: z.string().min(1).optional(),
 
   /**
-   * The model to use. There is deliberately no "mock" or "none" option: the
-   * product always talks to a real provider, and the test suite injects a fake
-   * analyzer instead of switching the application into a different mode.
+   * Which model to use, and how to talk to it.
+   *
+   * A missing key is no longer a boot failure. The server starts, reports the
+   * problem on `/api/health` and in the admin drawer, and every request that
+   * needs a claim is decided without one - which can only escalate. That is a
+   * better degraded mode than refusing to start, because a product that will not
+   * boot cannot queue the requests for a person, and "needs a human" is the only
+   * outcome a missing model is allowed to produce.
+   *
+   * `local` is the deliberate version of the same idea: a pattern matcher, named
+   * as one, for running the product and its test scenarios with no credentials.
+   * It is refused in production below, so it cannot be the accidental answer to
+   * a forgotten key - an absent key degrades to *no claims*, never to *weaker
+   * claims that still look like a model read*.
    */
-  AI_PROVIDER: z.enum(['groq', 'openrouter', 'openai', 'nvidia']).default('groq'),
+  AI_PROVIDER: z.enum(['groq', 'openrouter', 'openai', 'nvidia', 'gemini', 'anthropic', 'local']).default('groq'),
   /** Overrides the provider's default model when set. */
   AI_MODEL: z.string().min(1).optional(),
   AI_FALLBACK_MODELS: z.string().default(''),
@@ -66,6 +79,8 @@ const EnvSchema = z.object({
   OPENROUTER_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   NVIDIA_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: z.string().optional(),
   AI_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   /**
    * Wall clock for one whole `analyze()` call: every candidate, every retry and
@@ -113,32 +128,67 @@ export type Env = z.infer<typeof EnvSchema>;
 
 export type AiProvider = Env['AI_PROVIDER'];
 
+export type ProviderApiKeyEnv =
+  | 'GROQ_API_KEY'
+  | 'OPENROUTER_API_KEY'
+  | 'OPENAI_API_KEY'
+  | 'NVIDIA_API_KEY'
+  | 'GEMINI_API_KEY'
+  | 'ANTHROPIC_API_KEY';
+
+/**
+ * How a provider is talked to.
+ *
+ * Most vendors expose an OpenAI-compatible `/chat/completions`, so they share one
+ * adapter and differ only by base URL and key. Anthropic does not: its Messages
+ * API is a different request shape, a different auth header, and a different way
+ * of asking for JSON. Pretending otherwise by pointing the OpenAI client at
+ * `api.anthropic.com` produces a 404 that reads like a bad key, which is a
+ * genuinely misleading error to hand someone. So the wire format is part of the
+ * configuration and picks the adapter.
+ */
+export type ProviderKind = 'openai_compatible' | 'anthropic' | 'local';
+
 export interface ProviderPreset {
+  readonly kind: ProviderKind;
   readonly baseUrl: string;
-  readonly apiKeyEnv: 'GROQ_API_KEY' | 'OPENROUTER_API_KEY' | 'OPENAI_API_KEY' | 'NVIDIA_API_KEY';
+  /** Null only for `local`, which authenticates to nothing. */
+  readonly apiKeyEnv: ProviderApiKeyEnv | null;
   readonly label: string;
   /** Used when AI_MODEL is unset, so the common case needs no model config. */
   readonly defaultModel: string;
+  /**
+   * Sends `response_format: json_object`. Anthropic has no equivalent knob - it
+   * gets JSON through a tool call, which its adapter does instead - and the
+   * heuristic providers have already proved unreliable with it.
+   */
+  readonly jsonMode: boolean;
 }
 
 const PRESETS: Record<AiProvider, ProviderPreset> = {
   groq: {
+    kind: 'openai_compatible',
     baseUrl: 'https://api.groq.com/openai/v1',
     apiKeyEnv: 'GROQ_API_KEY',
     label: 'groq',
     defaultModel: 'llama-3.3-70b-versatile',
+    jsonMode: true,
   },
   openrouter: {
+    kind: 'openai_compatible',
     baseUrl: 'https://openrouter.ai/api/v1',
     apiKeyEnv: 'OPENROUTER_API_KEY',
     label: 'openrouter',
     defaultModel: 'meta-llama/llama-3.3-70b-instruct',
+    jsonMode: true,
   },
   openai: {
+    kind: 'openai_compatible',
     baseUrl: 'https://api.openai.com/v1',
     apiKeyEnv: 'OPENAI_API_KEY',
     label: 'openai',
     defaultModel: 'gpt-4o-mini',
+    jsonMode: true,
   },
   nvidia: {
     // NVIDIA NIM's OpenAI-compatible endpoint. A key from build.nvidia.com; the
@@ -152,15 +202,54 @@ const PRESETS: Record<AiProvider, ProviderPreset> = {
     // this account can run, this is the one measured returning schema-valid
     // JSON: nemotron-3-super-120b-a12b and nemotron-3.5-lightning both ignored
     // `response_format` and spent the whole token budget on prose.
+    kind: 'openai_compatible',
     baseUrl: 'https://integrate.api.nvidia.com/v1',
     apiKeyEnv: 'NVIDIA_API_KEY',
     label: 'nvidia',
     defaultModel: 'nvidia/nemotron-3-ultra-550b-a55b',
+    jsonMode: true,
+  },
+  gemini: {
+    // Google's OpenAI compatibility layer. It is a real endpoint that speaks the
+    // chat-completions shape, so it reuses the OpenAI adapter rather than
+    // needing a second HTTP client.
+    kind: 'openai_compatible',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    apiKeyEnv: 'GEMINI_API_KEY',
+    label: 'gemini',
+    defaultModel: 'gemini-2.5-flash',
+    jsonMode: true,
+  },
+  anthropic: {
+    // Native Messages API, not a compatibility layer - Anthropic does not have an
+    // OpenAI-shaped endpoint, so the base URL is `/v1` and `AnthropicAnalyzer`
+    // owns the request format. JSON comes back inside a forced tool call.
+    kind: 'anthropic',
+    baseUrl: 'https://api.anthropic.com/v1',
+    apiKeyEnv: 'ANTHROPIC_API_KEY',
+    label: 'anthropic',
+    defaultModel: 'claude-haiku-4-5-20251001',
+    jsonMode: false,
+  },
+  local: {
+    // No key, no network, no model. See the AI_PROVIDER comment and the
+    // production guard in readEnv.
+    kind: 'local',
+    baseUrl: '',
+    apiKeyEnv: null,
+    label: 'local (heuristic)',
+    defaultModel: 'local-heuristic-v1',
+    jsonMode: false,
   },
 };
 
 export function presetFor(provider: AiProvider): ProviderPreset {
   return PRESETS[provider];
+}
+
+/** True when this provider needs a key, i.e. everything except `local`. */
+export function requiresApiKey(provider: AiProvider): boolean {
+  return PRESETS[provider].apiKeyEnv !== null;
 }
 
 /**
@@ -176,36 +265,72 @@ export function presetFor(provider: AiProvider): ProviderPreset {
 const ENV_FILE_CANDIDATES = ['../../.env', '.env'] as const;
 
 /**
- * Loads the first readable env file, then validates. Never throws for a missing file.
+ * Loads the first readable env file, merges it under the real environment, then
+ * validates. Never throws for a missing file.
  *
  * The file supplies defaults; the real environment wins. Node's `loadEnvFile`
  * overwrites anything already set, which is the opposite of what a container or a
  * CI job expects: `docker run -e API_PORT=8080` would be silently ignored in
  * favour of whatever the baked-in `.env` says, and the failure would look like
  * the service ignoring its configuration rather than like a precedence rule.
- * Existing variables are therefore snapshotted and restored after the load.
+ *
+ * `process.env` is mutated to achieve that, because `loadEnvFile` takes no
+ * argument to read from anywhere else, and is then put back exactly as it was.
+ * "Exactly" is the load-bearing word. Restoring only the variables that were
+ * already present leaves behind the ones the file *added*, which then outrank
+ * the next file read - so a second `readEnv` in the same process inherits the
+ * first one's leftovers. The server calls this once and never noticed; the test
+ * suite calls it dozens of times, where it silently decided what a later test
+ * was testing.
  */
 export function readEnv(envFile?: string): Env {
-  const inherited: Readonly<Record<string, string | undefined>> = { ...process.env };
+  const inherited = { ...process.env };
 
-  for (const candidate of envFile === undefined ? ENV_FILE_CANDIDATES : [envFile]) {
-    try {
-      process.loadEnvFile(candidate);
-      break;
-    } catch {
-      // Try the next location; an absent file is expected in Docker.
+  try {
+    for (const candidate of envFile === undefined ? ENV_FILE_CANDIDATES : [envFile]) {
+      try {
+        process.loadEnvFile(candidate);
+        break;
+      } catch {
+        // Try the next location; an absent file is expected in Docker.
+      }
+    }
+
+    // The file supplied the defaults; the real environment now overwrites them,
+    // key by key. Keys only the file knows about are left alone, because they
+    // are the defaults this call exists to apply.
+    for (const [key, value] of Object.entries(inherited)) {
+      if (value !== undefined) {
+        process.env[key] = value;
+      }
+    }
+
+    normaliseEmptyVars();
+    return parseEnv(process.env);
+  } finally {
+    // `process.env` is put back exactly as it was found. Restoring only the
+    // variables that were already present would leave behind the ones the file
+    // added, which then outrank the next file read - so a second `readEnv` in
+    // the same process would inherit the first one's leftovers. The server calls
+    // this once and never noticed; the test suite calls it dozens of times, where
+    // it silently decided what a later test was testing.
+    for (const key of Object.keys(process.env)) {
+      if (!(key in inherited)) {
+        delete process.env[key];
+      }
+    }
+    for (const [key, value] of Object.entries(inherited)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
     }
   }
+}
 
-  for (const [key, value] of Object.entries(inherited)) {
-    if (value !== undefined) {
-      process.env[key] = value;
-    }
-  }
-
-  normaliseEmptyVars();
-
-  const parsed = EnvSchema.safeParse(process.env);
+function parseEnv(source: NodeJS.ProcessEnv): Env {
+  const parsed = EnvSchema.safeParse(source);
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
@@ -226,14 +351,33 @@ export function readEnv(envFile?: string): Env {
   }
 
   const preset = PRESETS[env.AI_PROVIDER];
-  if (!env[preset.apiKeyEnv]) {
+  if (env.NODE_ENV === 'production' && preset.kind === 'local') {
     throw new Error(
-      `AI_PROVIDER=${env.AI_PROVIDER} requires ${preset.apiKeyEnv}, which is not set. ` +
-        'Add it to .env - see the README for how to get a free key.',
+      'AI_PROVIDER=local runs a pattern matcher rather than a language model, so every ' +
+        'request it reads is resolved by heuristics alone. Set a real provider before ' +
+        'starting in production - a missing key is the safe way to run without one, ' +
+        'because it escalates instead of guessing.',
     );
   }
 
   return env;
+}
+
+/**
+ * Why the analyzer is unavailable, or null when it is configured.
+ *
+ * Reported rather than thrown. The caller builds an analyzer that reports the
+ * same problem through the normal provider-failure path, so a missing key is
+ * recorded in the audit trail of every request it touches - which is more useful
+ * than a stack trace at boot that nobody reads after the deploy.
+ */
+export function missingApiKeyFor(env: Env): string | null {
+  const preset = PRESETS[env.AI_PROVIDER];
+  const apiKeyEnv = preset.apiKeyEnv;
+  if (apiKeyEnv === null || env[apiKeyEnv] !== undefined) {
+    return null;
+  }
+  return `${apiKeyEnv} is not set, so ${preset.label} cannot be reached`;
 }
 
 export function corsOrigins(env: Env): string[] {

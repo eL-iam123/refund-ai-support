@@ -3,14 +3,15 @@ import { openMemoryDatabase } from '../db/connection.js';
 import { seedDatabase } from '../db/seed.js';
 import { createAttemptRecorder } from '../db/attemptRecorder.js';
 import { processRefundRequest } from '../orchestrator.js';
-import { OpenAiAnalyzer, toAnalyzerOrder } from '../ai/openaiAnalyzer.js';
-import { presetFor, readEnv, type Env } from '../config/env.js';
+import { toAnalyzerOrder } from '../ai/openaiAnalyzer.js';
+import { createAnalyzer } from '../ai/index.js';
+import { readEnv, type Env } from '../config/env.js';
 import { fileURLToPath } from 'node:url';
 import { ClaimExtractionSchema } from '@refund/shared';
 import { ExtractionOutputSchema } from '../ai/schemas.js';
 import { verifyGrounding } from '../ai/grounding.js';
 import type { OrderRecord } from '../db/records.js';
-import type { AnalyzerResult, ProviderAttempt } from '../ai/analyzer.js';
+import type { AIAnalyzer, AnalyzerResult, ProviderAttempt } from '../ai/analyzer.js';
 import { scenario, TEST_NOW } from './helpers.js';
 
 /**
@@ -48,12 +49,18 @@ const ENV_FILE = fileURLToPath(new URL('../../../../.env', import.meta.url));
  * Built on first use, never at module scope: a skipped describe block still
  * evaluates its body, and the default suite must not require a provider key.
  */
-let cached: { readonly env: Env; readonly analyzer: OpenAiAnalyzer } | null = null;
+let cached: { readonly env: Env; readonly analyzer: AIAnalyzer } | null = null;
 
-function liveAnalyzer(): { readonly env: Env; readonly analyzer: OpenAiAnalyzer } {
-  cached ??= ((): { env: Env; analyzer: OpenAiAnalyzer } => {
+/**
+ * Built through the factory rather than by constructing an adapter directly, so a
+ * live run covers whichever wire format the operator actually selected. Naming
+ * Anthropic in `.env` used to be untestable here for the same reason it was
+ * untestable in the product: only the OpenAI-shaped path had a client.
+ */
+function liveAnalyzer(): { readonly env: Env; readonly analyzer: AIAnalyzer } {
+  cached ??= ((): { env: Env; analyzer: AIAnalyzer } => {
     const env = readEnv(ENV_FILE);
-    return { env, analyzer: new OpenAiAnalyzer(env, presetFor(env.AI_PROVIDER)) };
+    return { env, analyzer: createAnalyzer(env) };
   })();
   return cached;
 }
@@ -109,7 +116,7 @@ const MESSAGES = [
  * break still fails loudly.
  */
 async function analyse(
-  analyzer: OpenAiAnalyzer,
+  analyzer: AIAnalyzer,
   message: string,
 ): Promise<{ readonly result: AnalyzerResult; readonly attempts: ProviderAttempt[] } | null> {
   const attempts: ProviderAttempt[] = [];

@@ -94,7 +94,6 @@ export function composeDeterministicResponse(
       return (
         prefix +
         'A person is reviewing your request and will reply within one business day.' +
-        excluded +
         ' Nothing further is needed from you.'
       );
   }

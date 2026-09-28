@@ -145,17 +145,15 @@ export class OpenAiAnalyzer implements AIAnalyzer {
 
   private readonly client: OpenAI;
   private readonly candidates: readonly string[];
+  private readonly jsonMode: boolean;
 
   constructor(
     private readonly env: Env,
     preset: ProviderPreset,
+    apiKey: string,
   ) {
-    const apiKey = env[preset.apiKeyEnv];
-    if (typeof apiKey !== 'string' || apiKey.length === 0) {
-      throw new Error(`${preset.label}: ${preset.apiKeyEnv} is not set`);
-    }
-
     this.label = preset.label;
+    this.jsonMode = preset.jsonMode;
     this.candidates = modelCandidates(env);
     this.model = this.candidates[0] ?? 'unknown';
     this.client = new OpenAI({
@@ -275,7 +273,10 @@ export class OpenAiAnalyzer implements AIAnalyzer {
           // `json_object` rather than `json_schema`: every OpenAI-compatible
           // endpoint supports the former, while several free models reject the
           // latter outright. Conformance is enforced by Zod below instead.
-          response_format: { type: 'json_object' },
+          // Providers with no such knob are sent nothing at all, because some
+          // reject an unrecognised `response_format` outright rather than
+          // ignoring it.
+          ...(this.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
         },
         { signal: budget },
       );

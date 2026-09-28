@@ -33,6 +33,8 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Has a default so `docker compose up` works as a single command. The API
       # refuses this exact placeholder when NODE_ENV=production, so the default
       # is a convenience for evaluating the product and never a deployed secret.

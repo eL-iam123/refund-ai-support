@@ -5,7 +5,7 @@ import { parseJson } from '../ai/json.js';
 import { ExtractionOutputSchema } from '../ai/schemas.js';
 import { redactSecrets } from '../lib/redact.js';
 import { testEnv } from './helpers.js';
-import { presetFor, readEnv } from '../config/env.js';
+import { missingApiKeyFor, presetFor, readEnv, requiresApiKey } from '../config/env.js';
 import type { OrderRecord } from '../db/records.js';
 
 /**
@@ -98,6 +98,8 @@ describe('provider presets', () => {
     { provider: 'nvidia', envVar: 'NVIDIA_API_KEY', host: 'integrate.api.nvidia.com' },
     { provider: 'openrouter', envVar: 'OPENROUTER_API_KEY', host: 'openrouter.ai' },
     { provider: 'openai', envVar: 'OPENAI_API_KEY', host: 'api.openai.com' },
+    { provider: 'gemini', envVar: 'GEMINI_API_KEY', host: 'generativelanguage.googleapis.com' },
+    { provider: 'anthropic', envVar: 'ANTHROPIC_API_KEY', host: 'api.anthropic.com' },
   ] as const;
 
   for (const testCase of cases) {
@@ -112,15 +114,50 @@ describe('provider presets', () => {
     });
   }
 
-  it('refuses to start when the selected provider has no key', () => {
-    // Rule 7, applied to configuration: a missing key must be loud at boot
-    // rather than a 401 on the first customer request.
+  it('picks the adapter from the wire format, not from the name', () => {
+    // The one thing a preset table gets wrong is assuming a new vendor is
+    // another row. Anthropic does not serve /chat/completions, so it has to
+    // reach a different adapter - a wrong `kind` here is a 404 on a URL that
+    // looks correct, which is the hardest kind of 404 to diagnose.
+    expect(presetFor('groq').kind).toBe('openai_compatible');
+    expect(presetFor('gemini').kind).toBe('openai_compatible');
+    expect(presetFor('anthropic').kind).toBe('anthropic');
+    expect(presetFor('local').kind).toBe('local');
+  });
+
+  it('asks for JSON mode only where the provider has such a knob', () => {
+    // Anthropic constrains output with a forced tool call instead, and a
+    // `response_format` it does not recognise is a 400 rather than something it
+    // quietly ignores.
+    expect(presetFor('groq').jsonMode).toBe(true);
+    expect(presetFor('anthropic').jsonMode).toBe(false);
+  });
+
+  it('needs no key only for the local matcher', () => {
+    // The check behind the graceful-degradation test: `local` is the single
+    // provider that authenticates to nothing, and it is the one case where an
+    // absent key is correct rather than a misconfiguration.
+    expect(presetFor('local').apiKeyEnv).toBeNull();
+    expect(requiresApiKey('local')).toBe(false);
+    expect(requiresApiKey('groq')).toBe(true);
+    expect(requiresApiKey('anthropic')).toBe(true);
+  });
+
+  it('starts without the selected provider having a key', () => {
+    // Rule 7, applied to configuration, and inverted deliberately. A missing key
+    // used to be a boot failure so it could not surface as a 401 on the first
+    // customer - but a service that will not start cannot queue that customer for
+    // a person either. The report is now made through the health endpoint and
+    // per request, and every affected request escalates.
     const saved = { provider: process.env.AI_PROVIDER, key: process.env.GROQ_API_KEY };
     process.env.AI_PROVIDER = 'groq';
     delete process.env.GROQ_API_KEY;
 
     try {
-      expect(() => readEnv('.env.absent')).toThrow(/GROQ_API_KEY/);
+      const env = readEnv('.env.absent');
+
+      expect(env.AI_PROVIDER).toBe('groq');
+      expect(missingApiKeyFor(env)).toBe('GROQ_API_KEY is not set, so groq cannot be reached');
     } finally {
       restore('AI_PROVIDER', saved.provider);
       restore('GROQ_API_KEY', saved.key);

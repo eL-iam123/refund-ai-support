@@ -37,10 +37,12 @@ export function scenario(id: string): Scenario {
 /**
  * The real environment schema, with a placeholder key.
  *
- * A key is required at boot, so the tests supply a dummy one and then never use
- * it: every test injects a fake analyzer, so nothing reaches the network. This
- * is deliberate - it means the tests exercise the same validation and the same
- * provider configuration the server does, rather than a special test-only env.
+ * `readEnv` is called with a path that does not exist so the ambient environment
+ * and the repository's own `.env` cannot decide what a test sees. The key is a
+ * placeholder that nothing ever sends: every test injects a fake analyzer or
+ * stubs `fetch`, so nothing reaches the network. Using the production schema
+ * rather than a test-only object means the tests exercise the same validation
+ * and the same provider configuration the server does.
  */
 export function testEnv(overrides: Partial<Env> = {}): Env {
   const keys = ['NODE_ENV', 'AI_PROVIDER', 'GROQ_API_KEY', 'LOG_LEVEL'] as const;
@@ -52,10 +54,10 @@ export function testEnv(overrides: Partial<Env> = {}): Env {
     process.env.GROQ_API_KEY = 'test-key-not-used';
     process.env.LOG_LEVEL = 'silent';
     return {
-    ...readEnv('.env.test-absent'),
-    ADMIN_API_SECRET: 'test-secret-not-used-anywhere-32-chars-min',
-    ...overrides,
-  };
+      ...readEnv('.env.test-absent'),
+      ADMIN_API_SECRET: TEST_SECRET,
+      ...overrides,
+    };
   } finally {
     for (const [key, value] of saved) {
       if (value === undefined) {

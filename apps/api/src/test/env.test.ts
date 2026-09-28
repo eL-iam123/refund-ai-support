@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readEnv, PLACEHOLDER_SECRET } from '../config/env.js';
+import { missingApiKeyFor, readEnv, PLACEHOLDER_SECRET } from '../config/env.js';
 
 /**
  * Where configuration comes from, and in what order.
@@ -76,14 +76,72 @@ describe('environment precedence', () => {
     expect(readEnv(envFile).ADMIN_API_SECRET).toBe('from-the-environment-32-characters-long');
   });
 
-  it('names the missing provider key rather than failing on a request', () => {
+  it('boots without a provider key rather than refusing to start', () => {
+    // A key that is simply absent is not a misconfiguration to reject, it is a
+    // product with no model. Refusing to start leaves an operator with a dead
+    // service and no queue; the alternative is to run and let every request that
+    // needs a claim escalate, which is the only outcome a missing model is
+    // allowed to produce.
     for (const key of KEYS) {
       delete process.env[key];
     }
     process.env.ADMIN_API_SECRET = 'from-the-environment-32-characters-long';
     writeFileSync(envFile, 'API_PORT=4000\nAI_PROVIDER=groq\n');
 
-    expect(() => readEnv(envFile)).toThrow(/GROQ_API_KEY/);
+    const env = readEnv(envFile);
+
+    expect(env.AI_PROVIDER).toBe('groq');
+    expect(missingApiKeyFor(env)).toBe('GROQ_API_KEY is not set, so groq cannot be reached');
+  });
+
+  it('reports no missing key when the provider is configured', () => {
+    for (const key of KEYS) {
+      delete process.env[key];
+    }
+    process.env.ADMIN_API_SECRET = 'from-the-environment-32-characters-long';
+
+    expect(missingApiKeyFor(readEnv(envFile))).toBeNull();
+  });
+});
+
+describe('AI_PROVIDER=local', () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
+  function fileWith(overrides: Record<string, string>): string {
+    const path = join(tmpdir(), `local-${Math.random().toString(36).slice(2)}.env`);
+    writeFileSync(
+      path,
+      Object.entries({ ADMIN_API_SECRET: 'a'.repeat(48), AI_PROVIDER: 'local', ...overrides })
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n'),
+    );
+    return path;
+  }
+
+  it('needs no key, because it calls nothing', () => {
+    delete process.env.NODE_ENV;
+    const env = readEnv(fileWith({}));
+
+    expect(env.AI_PROVIDER).toBe('local');
+    expect(missingApiKeyFor(env)).toBeNull();
+  });
+
+  it('is refused in production, where a pattern matcher is not a model', () => {
+    // The distinction that matters: an absent key degrades to *no claims*, which
+    // is safe. `local` produces claims from regular expressions, which look like
+    // a model read the message and are not, so it must never be the answer in a
+    // deployment.
+    delete process.env.NODE_ENV;
+    expect(() => readEnv(fileWith({ NODE_ENV: 'production' }))).toThrow(/pattern matcher/);
   });
 });
 
@@ -165,10 +223,10 @@ describe('variables compose passes as empty strings', () => {
     }
   });
 
-  it('names the missing key, not the empty optionals', () => {
+  it('treats an empty optional as absent rather than as a value', () => {
     // `docker compose` forwards every unset variable as ''. The schema used to
     // fail on those first, so a machine with no .env at all was told
-    // "AI_MODEL: Too small" when the real problem was a missing provider key.
+    // "AI_MODEL: Too small" when the real answer was simply "no key configured".
     for (const key of ['NODE_ENV', 'ADMIN_API_SECRET', 'GROQ_API_KEY', 'AI_PROVIDER']) {
       delete process.env[key];
     }
@@ -177,18 +235,25 @@ describe('variables compose passes as empty strings', () => {
     process.env.ADMIN_API_SECRET = 'a'.repeat(48);
     process.env.AI_PROVIDER = 'groq';
 
-    expect(() => readEnv('/nonexistent-for-this-test')).toThrow(/requires GROQ_API_KEY/);
+    const env = readEnv('/nonexistent-for-this-test');
+
+    expect(env.AI_MODEL).toBeUndefined();
+    expect(env.AI_BASE_URL).toBeUndefined();
   });
 
-  it('treats an empty key as absent rather than as a key', () => {
+  it('treats an empty key as absent, not as a usable one', () => {
+    // The distinction that was being lost: `GROQ_API_KEY=''` is not a key that
+    // works, it is a key that is not there, and the analyzer must be built the
+    // same way for both.
     for (const key of ['NODE_ENV', 'ADMIN_API_SECRET', 'GROQ_API_KEY', 'AI_PROVIDER']) {
       delete process.env[key];
     }
     process.env.GROQ_API_KEY = '';
-    process.env.AI_MODEL = '';
     process.env.ADMIN_API_SECRET = 'a'.repeat(48);
     process.env.AI_PROVIDER = 'groq';
 
-    expect(() => readEnv('/nonexistent-for-this-test')).toThrow(/requires GROQ_API_KEY/);
+    expect(missingApiKeyFor(readEnv('/nonexistent-for-this-test'))).toBe(
+      'GROQ_API_KEY is not set, so groq cannot be reached',
+    );
   });
 });
