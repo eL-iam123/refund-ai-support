@@ -1,0 +1,98 @@
+/** Internal record shapes. Dates are real Dates; money is integer cents. */
+
+import type { Decision } from '@refund/shared';
+
+export type OrderStatus = 'delivered' | 'shipped' | 'processing' | 'cancelled';
+export type PaymentState = 'settled' | 'pending' | 'refunded' | 'partially_refunded' | 'chargeback_open';
+export type TrackingStatus = 'delivered' | 'in_transit' | 'not_shipped' | 'exception';
+export type CustomerTier = 'standard' | 'plus' | 'enterprise';
+
+export interface CustomerRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly email: string;
+  readonly tier: CustomerTier;
+  readonly accountCreatedAt: Date;
+  readonly accountAgeDays: number;
+  readonly priorRefundCount: number;
+  readonly refundRequestsLast30Days: number;
+}
+
+export interface OrderItemRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly unitPriceCents: number;
+  readonly quantity: number;
+  readonly finalSale: boolean;
+  readonly digital: boolean;
+  readonly downloaded: boolean;
+}
+
+export interface OrderRecord {
+  readonly id: string;
+  readonly customerId: string;
+  readonly placedAt: Date;
+  readonly deliveredAt: Date | null;
+  /** Age of the order for policy purposes: from delivery if delivered, else from placement. */
+  readonly ageDays: number;
+  readonly status: OrderStatus;
+  readonly paymentState: PaymentState;
+  readonly refundedCents: number;
+  readonly totalCents: number;
+  readonly isSubscription: boolean;
+  readonly trackingStatus: TrackingStatus;
+  readonly signedByCustomer: boolean;
+  readonly conditionAtDelivery: string | null;
+  readonly items: readonly OrderItemRecord[];
+}
+
+export interface PersistedRequest {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly orderId: string | null;
+  readonly message: string;
+  readonly decision: Decision;
+  readonly refundAmountCents: number;
+  readonly eligibleAmountCents: number;
+  readonly summary: string;
+  readonly policyRef: string;
+  readonly traceJson: string;
+  readonly overridesJson: string;
+  readonly eligibleItemIdsJson: string;
+  readonly blockedItemsJson: string;
+  readonly responseText: string;
+  readonly extractionJson: string | null;
+  readonly groundingJson: string | null;
+  readonly injectionJson: string;
+  readonly aiMode: string;
+  readonly llmCalled: number;
+  readonly timingsJson: string;
+  readonly overriddenBy: string | null;
+  readonly overrideNote: string | null;
+  readonly scenarioId: string | null;
+}
+
+export interface AuditEventRecord {
+  readonly id: number;
+  readonly requestId: string;
+  readonly at: string;
+  readonly kind: string;
+  readonly detail: string;
+}
+
+export interface LlmCallRecord {
+  readonly id: number;
+  readonly requestId: string;
+  readonly at: string;
+  readonly purpose: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly attempt: number;
+  readonly ok: number;
+  readonly latencyMs: number;
+  readonly promptTokens: number | null;
+  readonly completionTokens: number | null;
+  readonly error: string | null;
+}

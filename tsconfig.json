@@ -1,0 +1,13 @@
+{
+  "//": "Only exists so build/tool configs at the repo root and in apps/* are visible to the linter's type-aware rules. Packages bring their own tsconfig.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"]
+  },
+  "include": ["eslint.config.js", "apps/*/vite.config.ts", "apps/*/vitest.config.ts"]
+}

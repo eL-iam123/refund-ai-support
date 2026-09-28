@@ -1,0 +1,35 @@
+# Build artifacts, dependencies and local state. Everything here is either
+# reproducible from the lockfile or specific to the machine that built it, and
+# sending any of it to the daemon makes the image depend on stale local state.
+node_modules
+**/node_modules
+dist
+**/dist
+
+# Never let a local .env into an image. The API reads secrets from the
+# environment, and a key baked into a layer stays in the layer forever even if a
+# later one deletes the file.
+.env
+.env.*
+!.env.example
+
+# Local SQLite databases. The container's data belongs on a volume, and a host
+# database copied in would silently overwrite it.
+data
+**/data
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+.git
+.gitignore
+.vscode
+.idea
+**/*.log
+npm-debug.log*
+.DS_Store
+coverage
+**/coverage
+docs
+README.md

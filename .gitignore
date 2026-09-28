@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+
+# Secrets. The API reads these from the environment; a committed key is a
+# published key, and history keeps it after a later deletion.
+.env
+.env.*
+!.env.example
+
+# Local state. The container's database lives on a volume; this is the
+# development copy, and it is not a source artefact.
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/
+.idea/

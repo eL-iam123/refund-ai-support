@@ -1,0 +1,37 @@
+{
+  "name": "@refund/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "seed": "tsx src/db/seed-cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "LIVE_AI_TESTS=1 vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "policy:doc": "tsx src/policy/generateDoc-cli.ts",
+    "token": "tsx src/auth/mintToken-cli.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "11.0.2",
+    "@fastify/cors": "11.3.0",
+    "@fastify/rate-limit": "11.2.0",
+    "@fastify/static": "10.1.5",
+    "@refund/shared": "workspace:*",
+    "better-sqlite3": "13.0.3",
+    "fastify": "5.12.5",
+    "openai": "7.23.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "26.6.3",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
+  }
+}

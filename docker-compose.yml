@@ -1,0 +1,56 @@
+# Single-container deployment: API, staff console and storefront in one image.
+#
+# The three are one origin on purpose, so the storefront's session cookie is
+# first-party. Scaling out is a question for later, but a second replica pointed
+# at the same SQLite volume is not a valid scale-out - the audit chain is
+# sequential by id, and two writers would both believe they held the head.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: refund-assistant:latest
+    restart: unless-stopped
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT_EXTERNAL:-4000}:4000"
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_PATH: /data/refund.sqlite
+      # Same-origin: the API is the only origin, so CORS is only needed for the
+      # Vite dev servers. Empty in production is correct, not an oversight.
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      AI_PROVIDER: ${AI_PROVIDER:-groq}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_FALLBACK_MODELS: ${AI_FALLBACK_MODELS:-}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      # Required. The stack refuses to start without it, because an admin
+      # endpoint reachable without a secret is worse than no admin endpoint.
+      ADMIN_API_SECRET: ${ADMIN_API_SECRET:?ADMIN_API_SECRET must be set}
+    volumes:
+      - refund-data:/data
+    # The SQLite file is the only durable state, so a lost container is not a
+    # lost product - but losing it would lose every audit record, which is the
+    # thing the whole system exists to produce.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # A refund API that will happily process unbounded traffic is not a
+    # protection, it is a queue with no limit. The application rate-limits too;
+    # this is the outer wall.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+volumes:
+  refund-data:

@@ -1,0 +1,31 @@
+{
+  "name": "refund-ai-support",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Policy-controlled AI refund decision system: a deterministic policy engine is the sole authority for every refund decision.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @refund/shared build && pnpm -r --parallel dev",
+    "build": "pnpm --filter @refund/shared build && pnpm -r --filter '!@refund/shared' build",
+    "start": "pnpm --filter @refund/api start",
+    "typecheck": "pnpm --filter @refund/shared build && pnpm -r typecheck",
+    "lint": "eslint .",
+    "test": "pnpm --filter @refund/shared build && pnpm --filter @refund/api test",
+    "test:live": "pnpm --filter @refund/shared build && pnpm --filter @refund/api test:live",
+    "verify": "pnpm typecheck && pnpm lint && pnpm test",
+    "seed": "pnpm --filter @refund/api seed",
+    "policy:doc": "pnpm --filter @refund/shared build && pnpm --filter @refund/api policy:doc"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.11.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.12.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.1"
+  }
+}
