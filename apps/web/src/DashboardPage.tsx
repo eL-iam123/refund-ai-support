@@ -25,8 +25,21 @@ export function DashboardPage(): ReactNode {
 }
 
 function Overview({ stats }: { stats: AdminStatsDto }): ReactNode {
+  const aiLabel = (() => {
+    const mode = stats.aiMode;
+    if (mode.startsWith('unconfigured')) {
+      const match = mode.match(/unconfigured \(([^)]+)\)/);
+      const key = match ? match[1] : 'AI provider key';
+      return `No model — set ${key} to enable AI`;
+    }
+    if (mode.startsWith('local')) {
+      return 'Local pattern matcher (demo)';
+    }
+    return mode;
+  })();
+
   return (
-    <Panel title="Overview" action={<span className="muted">{stats.aiMode}</span>}>
+    <Panel title="Overview" action={<span className="muted">{aiLabel}</span>}>
       <div className="tiles">
         <Tile label="Requests" value={String(stats.total)} />
         <Tile label="Approved" value={String(stats.byDecision.approved ?? 0)} tone="approved" />

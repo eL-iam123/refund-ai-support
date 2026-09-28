@@ -66,6 +66,9 @@ p { margin: 0 0 .6rem; }
   font-family: var(--mono); font-size: .72rem; color: var(--muted);
   border: 1px solid var(--line); border-radius: 999px; padding: .2rem .6rem;
 }
+.provider.warn {
+  border-color: var(--warn); color: var(--warn);
+}
 
 .main { flex: 1; padding: 1.2rem; max-width: 1500px; width: 100%; margin: 0 auto; }
 .stack { display: flex; flex-direction: column; gap: 1rem; }

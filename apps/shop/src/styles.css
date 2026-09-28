@@ -96,9 +96,18 @@ summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
 button {
   font: inherit; cursor: pointer; border: 1px solid var(--accent); background: var(--accent);
   color: #fff; border-radius: 8px; padding: .45rem .9rem; align-self: flex-start;
+  transition: opacity .15s ease, background-color .15s ease, border-color .15s ease;
 }
-button:disabled { opacity: .45; cursor: not-allowed; }
+button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+  background: var(--muted);
+  border-color: var(--muted);
+  color: #e8e5de;
+}
+button:not(:disabled):hover { background: #1a5f4e; }
 button.linkish { background: none; color: var(--muted); border-color: var(--line); }
+button.linkish:hover { color: var(--ink); border-color: var(--accent); }
 button.demo { background: none; color: var(--accent); border-color: var(--line); width: 100%; text-align: left; }
 button.demo:hover { border-color: var(--accent); }
 

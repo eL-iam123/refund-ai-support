@@ -32,9 +32,7 @@ export function App(): ReactNode {
         <nav>
           <NavLink to="/">Customer</NavLink>
           <NavLink to="/admin">Dashboard</NavLink>
-          <NavLink to="/admin/refunds">Refunds</NavLink>
           <NavLink to="/admin/requests">Requests</NavLink>
-          <NavLink to="/admin/scenarios">Scenarios</NavLink>
           <NavLink to="/admin/policy">Policy</NavLink>
           <SignOutControl />
         </nav>
@@ -83,16 +81,45 @@ function SignOutControl(): ReactNode {
   );
 }
 
-/** Shows which provider answered, because "is this a real model?" is the first question. */
+/** Friendly model status badge. */
 function ProviderBadge(): ReactNode {
-  const [mode, setMode] = useState<string>('');
+  const [status, setStatus] = useState<{ label: string; detail?: string | undefined }>({
+    label: 'Loading…',
+  });
 
   useEffect(() => {
     void api
       .health()
-      .then((result) => setMode(result.aiMode))
-      .catch(() => setMode('api unreachable'));
+      .then((result) => {
+        const mode = result.aiMode;
+        if (mode.startsWith('unconfigured')) {
+          // Extract missing key from "unconfigured (KEY missing)"
+          const match = mode.match(/unconfigured \(([^)]+)\)/);
+          const key = match ? match[1] : 'AI provider key';
+          setStatus({ label: 'No model configured', detail: `Set ${key} to enable AI` });
+        } else if (mode.startsWith('local')) {
+          setStatus({ label: 'Local pattern matcher', detail: 'Demo mode — no AI provider' });
+        } else {
+          const parts = mode.split(' (');
+          const provider = parts[0] ?? 'Unknown';
+          const rawModel = parts[1];
+          if (rawModel) {
+            setStatus(() => ({ label: provider, detail: rawModel.replace(')', '') }));
+          } else {
+            setStatus(() => ({ label: provider }));
+          }
+        }
+      })
+      .catch(() => setStatus({ label: 'API unreachable', detail: 'Health check failed' }));
   }, []);
 
-  return <span className="provider">{mode.length > 0 ? mode : 'connecting…'}</span>;
+  const tooltip = status.detail ?? '';
+
+  return (
+    <span className="provider" title={tooltip}>
+      <span className={status.label.startsWith('No model') || status.label.startsWith('API') ? 'warn' : ''}>
+        {status.label}
+      </span>
+    </span>
+  );
 }

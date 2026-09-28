@@ -56,7 +56,7 @@ function Topbar({ session, cartCount }: { session: SessionState; cartCount: numb
       <div className="brand">
         <span className="brand-mark">W</span>
         <span>
-          WORKNOON
+          Refund Store
           <small>goods that behave</small>
         </span>
       </div>
