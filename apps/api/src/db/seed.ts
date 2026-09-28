@@ -17,13 +17,32 @@ export function daysAgo(now: Date, days: number): Date {
 }
 
 export function wipe(db: Db): void {
+  // audit_events has a trigger preventing deletion (append-only for production).
+  // During seed we drop and recreate the table to get a clean state.
   db.exec(`
     DELETE FROM llm_calls;
-    DELETE FROM audit_events;
+    DROP TABLE IF EXISTS audit_events;
     DELETE FROM refund_requests;
     DELETE FROM order_items;
     DELETE FROM orders;
     DELETE FROM customers;
+  `);
+  // Recreate audit_events with the same schema and triggers.
+  db.exec(`
+    CREATE TABLE audit_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id TEXT NOT NULL,
+      at TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      prev_hash TEXT NOT NULL,
+      hash TEXT NOT NULL
+    );
+    CREATE INDEX idx_audit_request ON audit_events(request_id);
+    CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events
+      BEGIN SELECT RAISE(ABORT, 'audit_events is append-only: an event cannot be edited'); END;
+    CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events
+      BEGIN SELECT RAISE(ABORT, 'audit_events is append-only: an event cannot be removed'); END;
   `);
 }
 
