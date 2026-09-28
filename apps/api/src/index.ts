@@ -3,6 +3,7 @@ import { openDatabase } from './db/connection.js';
 import { createLogger } from './lib/logger.js';
 import { buildApp } from './http/app.js';
 import { seedDatabase } from './db/seed.js';
+import { seedRequestHistory } from './db/seedHistory.js';
 import { seedShop } from './shop/seed.js';
 import { purgeExpiredSessions } from './shop/auth.js';
 import { existsSync } from 'node:fs';
@@ -24,6 +25,10 @@ async function main(): Promise<void> {
   if (countRows(db) === 0) {
     const seeded = seedDatabase(db, new Date());
     log.info({ seeded }, 'database.seeded');
+    // A few recorded decisions, so the console opens onto history rather than an
+    // empty table. Replayed from the canonical scenarios, never from a model.
+    const history = seedRequestHistory(db, new Date());
+    log.info({ history }, 'database.seeded.history');
   }
 
   // The storefront catalogue and demo accounts are additive, so they are topped

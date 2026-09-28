@@ -8,6 +8,40 @@ import { INJECTION_ACTIONS } from '@refund/shared';
  * and loudly instead of at the first customer request.
  */
 
+/**
+ * Variables that are optional, but must be non-empty when supplied.
+ *
+ * `docker compose` passes an unset variable through as an empty string rather
+ * than omitting it, so these arrive as `AI_MODEL=''` on a machine that simply has
+ * no `.env`. The schema then failed on the empties first and reported
+ * "AI_MODEL: Too small" when the actual problem was a missing API key - an error
+ * that sends whoever is setting the stack up looking in the wrong place. An empty
+ * value means "not supplied", so it is treated as absent here.
+ */
+const EMPTY_IS_ABSENT = [
+  'AI_MODEL',
+  'AI_BASE_URL',
+  'AI_FALLBACK_MODELS',
+  'GROQ_API_KEY',
+  'OPENROUTER_API_KEY',
+  'OPENAI_API_KEY',
+  'NVIDIA_API_KEY',
+] as const;
+
+function normaliseEmptyVars(): void {
+  for (const key of EMPTY_IS_ABSENT) {
+    if (process.env[key] === '') {
+      delete process.env[key];
+    }
+  }
+}
+
+/**
+ * Published in docker-compose.yml so the stack boots with one command. Rejected
+ * at boot in production; see the check in readEnv.
+ */
+export const PLACEHOLDER_SECRET = 'dev-only-insecure-secret-change-me-0123456789';
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   API_PORT: z.coerce.number().int().min(1).max(65535).default(4000),
@@ -169,6 +203,8 @@ export function readEnv(envFile?: string): Env {
     }
   }
 
+  normaliseEmptyVars();
+
   const parsed = EnvSchema.safeParse(process.env);
   if (!parsed.success) {
     const detail = parsed.error.issues
@@ -178,6 +214,17 @@ export function readEnv(envFile?: string): Env {
   }
 
   const env = parsed.data;
+
+  // The compose file ships a placeholder so `docker compose up` runs as a single
+  // command. A committed default is a way in, so it is only ever allowed to be
+  // the reason a local evaluation starts - never the reason a deployed one does.
+  if (env.NODE_ENV === 'production' && env.ADMIN_API_SECRET === PLACEHOLDER_SECRET) {
+    throw new Error(
+      'ADMIN_API_SECRET is still the bundled placeholder, which is published in the ' +
+        'repository. Set your own before starting in production: openssl rand -hex 32',
+    );
+  }
+
   const preset = PRESETS[env.AI_PROVIDER];
   if (!env[preset.apiKeyEnv]) {
     throw new Error(

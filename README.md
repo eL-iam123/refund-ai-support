@@ -30,6 +30,31 @@ refund button. See [ADR 0001](docs/adr/0001-resolver-is-sole-authority.md).
 
 ## Quick start
 
+### One command, with Docker
+
+```bash
+cp .env.example .env        # uncomment one provider key and paste it in
+docker compose up --build   # http://localhost:4000 - API, console and shop
+```
+
+That is the whole setup. The stack seeds 18 scenario fixtures, 20 customers, 25
+orders and a short decision history on first boot, and serves the customer chat,
+the agent console and the storefront from one origin.
+
+A provider key is the one thing that cannot be invented, so it is the one thing
+you have to supply. The server refuses to start without one and names the exact
+variable, rather than accepting traffic it cannot answer.
+
+`docker-compose.yml` ships a placeholder `ADMIN_API_SECRET` so the command above
+works on a clean machine. It is rejected at boot when `NODE_ENV=production`, so
+claiming to be a deployment means supplying a deployment's secrets:
+
+```bash
+NODE_ENV=production ADMIN_API_SECRET="$(openssl rand -hex 32)" docker compose up
+```
+
+### Without Docker
+
 Requires Node 20+ and pnpm.
 
 ```bash
@@ -378,33 +403,10 @@ demand, naming the id of the row that fails. It returns `200` with `ok: false`
 when the chain is broken, because a broken chain is a finding to read, not a
 failed request.
 
-## Running it
-
-```bash
-export ADMIN_API_SECRET="$(openssl rand -hex 32)"
-export GROQ_API_KEY=...            # or OPENROUTER_API_KEY / OPENAI_API_KEY / NVIDIA_API_KEY
-docker compose up --build          # http://localhost:4000
-```
-
-One container serves the API, the staff console and the storefront. The
-storefront is served from the API process on purpose: its session cookie has to
-be first-party, and a separate domain would make it third-party, which is the
-difference between a cookie that works and one the browser drops. There is
-consequently no nginx stage and no second service.
-
-The SQLite file is the only durable state and lives on the `refund-data` volume.
-Two things follow, and they are limits rather than defaults:
-
-- **Do not scale this out horizontally.** The audit chain is sequential by id and
-  the ledger assumes one writer. A second replica on the same volume would have
-  both processes believing they held the head of the chain.
-- **Back up that volume.** It holds every audit record, which is the thing the
-  system exists to produce. Everything else can be rebuilt from the repository.
-
 ## Testing
 
 ```
-338 passed · 8 skipped · 0 network required
+345 passed · 8 skipped · 0 network required
 ```
 
 The 8 skipped are the opt-in live provider suite, which stays dark unless
@@ -453,6 +455,38 @@ A test regenerates it in memory and compares it to disk, so the published policy
 the enforced policy cannot drift apart. Every decision the API returns carries the
 `policyRef` of the clause that produced it — which is only meaningful because the
 clause exists and says what the rule does.
+
+## Assumptions and trade-offs
+
+Places where a reasonable person would have built it differently, and why this
+one is like this.
+
+- **One container instead of three services.** The storefront is served by the
+  API process, so its session cookie is first-party. Behind a separate domain the
+  same cookie is third-party and the browser drops it, which would mean a login
+  that silently does not work. That is a real cost: you cannot scale the frontend
+  independently, and the image is larger than three small ones would be.
+- **The model proposes; the policy decides.** Every amount, decision and rule
+  trace comes from deterministic code, and the LLM is only ever a source of
+  structured claims that are grounded against the customer's own words. This is
+  the central design choice. The trade-off is real and worth stating plainly: the
+  model can never *help*, so a legitimate claim resting on a reason the rules do
+  not recognise escalates instead of being approved. A system optimised for
+  approval rates would be less correct, not more useful.
+- **Approvals reserve, humans pay.** An approval holds the money and a person
+  releases it. This deliberately slows refunds, and it means a queue has to be
+  staffed. The alternative - approving straight to a payment call - turns a wrong
+  decision into an irreversible one.
+- **No mock or offline mode in the running product.** Tests inject a fake
+  analyzer; the application always talks to a real provider. That is why a
+  provider key is required to start.
+- **Fail fast on misconfiguration.** Missing keys, weak secrets and invalid config
+  stop the process at boot instead of surfacing on the first customer request. An
+  empty variable counts as absent, so a missing key is reported as a missing key
+  rather than as a malformed optional.
+- **SQLite, single writer.** The audit chain is sequential by id and the ledger
+  assumes one process, so a second replica on the same volume is not a scale-out.
+  Everything here is sized for a single-writer deployment.
 
 ## Known limits
 

@@ -25,22 +25,33 @@ import { acknowledgementFor } from './acknowledge.js';
  * refused. It was not - it is still there, and saying so is the difference
  * between one confusing message and two that contradict each other.
  */
-function outstandingSentence(decision: RefundDecision): string {
+function outstandingFor(decision: RefundDecision): string {
   if (decision.outstandingAmountCents <= 0) {
     return '';
   }
-  const amount = formatCents(decision.outstandingAmountCents);
-  return `A refund of ${amount} ${outstandingPhrase(decision.outstandingState)}. `;
+  return `${outstandingSentence(decision.outstandingState, decision.outstandingAmountCents)} `;
 }
 
-function outstandingPhrase(state: RefundDecision['outstandingState']): string {
+/**
+ * Each state gets a whole sentence, not a phrase dropped into a fixed frame.
+ * Assembling "A refund of $X" plus a verb produced "A refund of $100.00 has
+ * already been refunded" - two claims of the same fact, which is the kind of
+ * sentence that makes a customer re-read it.
+ */
+function outstandingSentence(
+  state: RefundDecision['outstandingState'],
+  cents: number,
+): string {
+  const amount = formatCents(cents);
   switch (state) {
     case 'pending':
-      return 'is approved for this order and is waiting to be checked';
+      return `A refund of ${amount} is approved for this order and is waiting to be checked.`;
     case 'settled':
-      return 'has already been refunded';
+      return `${amount} of this order has already been refunded.`;
+    case 'mixed':
+      return `A refund of ${amount} on this order is already being processed.`;
     default:
-      return 'is already being processed';
+      return '';
   }
 }
 
@@ -75,7 +86,7 @@ export function composeDeterministicResponse(
       return (
         prefix +
         `We are not able to refund this order${reference}.${excluded} ` +
-        outstandingSentence(decision) +
+        outstandingFor(decision) +
         'This decision was made automatically under our published refund policy. ' +
         'If you believe we have the details wrong, reply to this message and a person will review it.'
       );

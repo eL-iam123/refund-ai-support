@@ -202,7 +202,21 @@ describe('a denial that is really about the balance', () => {
       'one more',
     );
 
-    expect(text).toContain('has already been refunded');
+    // Asserted as a whole sentence: the previous version of this composed
+    // "A refund of $100.00 has already been refunded", and a substring
+    // assertion on "has already been refunded" passed right through it.
+    expect(text).toContain('$100.00 of this order has already been refunded.');
+    expect(text).not.toContain('refund of $100.00 has already been refunded');
+  });
+
+  it('reads as a sentence when some of the order is settled and some is waiting', () => {
+    const text = composeDeterministicResponse(
+      { ...base, outstandingAmountCents: 25000, outstandingState: 'mixed' },
+      order,
+      'and the rest too',
+    );
+
+    expect(text).toContain('A refund of $250.00 on this order is already being processed.');
   });
 
   it('claims nothing about the order when nothing is outstanding', () => {

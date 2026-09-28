@@ -15,7 +15,11 @@ services:
     ports:
       - "${API_BIND:-127.0.0.1}:${API_PORT_EXTERNAL:-4000}:4000"
     environment:
-      NODE_ENV: production
+      # Defaults to development so `docker compose up` runs as a single command.
+      # Setting this to production turns on the stricter boot checks, which
+      # refuse the bundled placeholder secret below - that is the point: claiming
+      # to be a deployment means supplying a deployment's secrets.
+      NODE_ENV: ${NODE_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_PATH: /data/refund.sqlite
       # Same-origin: the API is the only origin, so CORS is only needed for the
@@ -29,9 +33,10 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
-      # Required. The stack refuses to start without it, because an admin
-      # endpoint reachable without a secret is worse than no admin endpoint.
-      ADMIN_API_SECRET: ${ADMIN_API_SECRET:?ADMIN_API_SECRET must be set}
+      # Has a default so `docker compose up` works as a single command. The API
+      # refuses this exact placeholder when NODE_ENV=production, so the default
+      # is a convenience for evaluating the product and never a deployed secret.
+      ADMIN_API_SECRET: ${ADMIN_API_SECRET:-dev-only-insecure-secret-change-me-0123456789}
     volumes:
       - refund-data:/data
     # The SQLite file is the only durable state, so a lost container is not a
