@@ -6,7 +6,7 @@ import { deny, escalate, pass, type PolicyRule } from '../types.js';
  * Detected during intake but deliberately NOT terminal here: the request is
  * allowed to reach the model so that the resolver can be shown clamping a real
  * proposal, and the untrusted extraction is discarded. See
- * docs/adr/0005-injection-scope-and-limits.md for why that is safe.
+ * docs/adr/0002-injection-scope-and-limits.md for why that is safe.
  *
  * `INJECTION_ACTION` chooses between refusing the request and handing it to a
  * human. Denying is the default, and the one that survives a scanner miss being

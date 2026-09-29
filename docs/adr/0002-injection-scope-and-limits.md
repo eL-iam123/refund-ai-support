@@ -1,4 +1,4 @@
-# 0005 — Injection detection: scope, limits, and why a miss is survivable
+# 0002 — Injection detection: scope, limits, and why a miss is survivable
 
 **Status:** Accepted. Enforced by `apps/api/src/security/injection.ts` and
 `REFUND_POLICY.md §7.1`.

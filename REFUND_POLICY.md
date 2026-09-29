@@ -215,7 +215,7 @@ The request channel is untrusted. These clauses treat the message as data to be 
 
 _Attempts to override policy, force a decision, move an amount, or claim authority are denied._
 
-An attempt to override policy, claim staff authority, force a decision, or move an amount is refused. Detection happens at intake but the request is still allowed to reach the model, so that the audit trail can show the resolver discarding an untrusted proposal rather than the request simply disappearing. See `docs/adr/0005-injection-scope-and-limits.md`.
+An attempt to override policy, claim staff authority, force a decision, or move an amount is refused. Detection happens at intake but the request is still allowed to reach the model, so that the audit trail can show the resolver discarding an untrusted proposal rather than the request simply disappearing. See `docs/adr/0002-injection-scope-and-limits.md`.
 
 The response is configurable through `INJECTION_ACTION`. **`deny`** is the default and refuses the request outright. **`escalate`** routes it to a human instead, on the reasoning that the detector is high-precision rather than high-recall: a false refusal costs a real customer their refund, which is a worse failure than a queued review. Neither setting can approve anything — escalation ranks below approval, and this clause never returns `approve`, so a flagged message is refused or reviewed, never paid.
 

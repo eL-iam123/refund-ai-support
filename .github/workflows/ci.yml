@@ -1,0 +1,42 @@
+name: CI
+
+# The whole guarantee of this repository is that a policy engine, not a model,
+# decides refunds - and that claim is only worth anything if the suite that
+# checks it runs on every change. `pnpm verify` is typecheck, lint and the API
+# test suite; this exists so it is never only ever run by hand.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+# A new push to the same branch makes the previous run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: typecheck, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # No API key and no .env are provided, deliberately. The suite is written
+      # to run without credentials - model calls are faked in tests, and the
+      # configuration tests drive process.env directly - so a green run here is
+      # evidence that a fresh clone works, which is the thing a reviewer does.
+      - name: Verify
+        run: pnpm verify

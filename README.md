@@ -249,12 +249,12 @@ loudly, not at the first customer request.
 A `.env` file supplies **defaults**; the real environment **wins**. `API_PORT=8080
 docker run …` is honoured even if a `.env` was baked into the image.
 
-### The two you must set
+### The two that matter
 
 | Variable | Why |
 |---|---|
 | `ADMIN_API_SECRET` | Signs staff tokens. Without it the server refuses to boot. `openssl rand -hex 32`. Anyone holding it can mint admin tokens, so it is never committed. |
-| `AI_API_KEY` | **The key, whatever provider it is for.** Inferred into a provider from its prefix |
+| `AI_API_KEY` | The model key, whatever provider it is for — the provider is inferred from its prefix. Optional: without it the product runs and escalates. Set `AI_REQUIRED=true` to make it mandatory. |
 **No key is committed to this repository, and that is deliberate.** A key in git
 is a key in every clone, every image layer and every fork, permanently and
 publicly; the honest fix is a key that is not here. Per-provider variables
@@ -384,7 +384,7 @@ a consequence.
 
 The injection scanner is 17 English patterns, documented as high-precision rather than
 high-recall. It is a filter, not a boundary. See
-[ADR 0005](docs/adr/0005-injection-scope-and-limits.md) for why a miss is survivable.
+[ADR 0002](docs/adr/0002-injection-scope-and-limits.md) for why a miss is survivable.
 
 `INJECTION_ACTION=escalate` exists because the scanner will eventually false-positive,
 and a false denial costs a real customer their refund. It routes flagged messages to a
@@ -411,6 +411,12 @@ human instead. Neither setting can approve anything.
 | `POST` | `/api/shop/logout`, `GET /api/shop/me` | session lifecycle |
 | `POST` | `/api/shop/checkout` | cart to order, transactionally |
 | `GET` | `/api/shop/orders` | the signed-in customer's own orders |
+| `GET` | `/api/shop/chat/history`, `/summary` | this customer's own conversation for an order |
+| `GET` | `/api/shop/assistant-status` | whether a model is reachable, no customer data |
+| `GET`, `POST` | `/api/returns` | the signed-in customer's own returns; open one |
+| `GET` | `/api/returns/:id` | one of them, or `404` for anyone else's |
+| `GET` | `/api/admin/returns`, `/api/admin/returns/by-request/:requestId` | the warehouse queue, staff only |
+| `POST` | `/api/admin/returns/:id/label` \| `/ship` \| `/receive` \| `/process` \| `/deny` | drive a return, staff only |
 
 ### Overriding the policy
 
@@ -427,6 +433,58 @@ system, so it is graduated by what the override actually does:
 The amount is always re-derived from the order. There is no field in the request to
 set, and the write path refuses any decision/amount pair that could be read as an
 unauthorised payment — see "Two amounts" above.
+
+### A return is not a refund
+
+The two are separate subsystems on purpose, and neither can cause the other.
+
+A **refund** is a decision about money: the policy (or a person) decides that an
+amount is owed, and the refund ledger reserves it, waits for a human to verify,
+then pays it. Its state lives in `refund_requests` and `refunds`.
+
+A **return** is a record of goods coming back: a parcel is labelled, posted,
+received and processed. Its state lives in `returns` and `return_items`. It moves
+no money at all — `processReturn` touches only the status, the received
+quantities and product stock.
+
+```
+return_requested  ->  return_label_generated  ->  return_shipped
+      |                                                   |
+      |              return_denied  <--------+            |
+      v                                     |            v
+  (any non-terminal state)                  +----  return_received
+                                                          |
+                                                          v
+                                                   return_processed
+```
+
+The separation is enforced rather than described:
+
+- **Nothing on the return path writes to the refund ledger.** A return that
+  reached `return_processed` has touched no refund, whatever state the customer's
+  claim is in. The suite asserts the refund count is unchanged across a full
+  return lifecycle.
+- **`return_processed` and `return_denied` are terminal.** The goods have been
+  dealt with; reopening would mean reconciling two histories by hand.
+- **Lines are addressed by order line id, never product id.** An order can hold
+  two lines of the same product, and a product id would file both under one key —
+  which is how ticking one item returns all of them.
+- **Ownership is checked before anything is read.** Order ids are sequential and
+  guessable and the order id arrives in the body, so a return against someone
+  else's order must be refused *before* its item names are read into a response.
+- **Idempotent on the refund request.** One return per request, so a double-click
+  or a retried client cannot put the same parcel in the warehouse queue twice.
+- **Restocking is capped at what was received**, and resolves the product through
+  the return's own line, so a typo cannot add stock for something nobody sent
+  back. Stock is the one number here that stays quietly wrong until an oversell.
+- **Opened against the order, not against the claim.** A return needs no refund
+  request behind it — a gift return or an exchange is a parcel with no money
+  attached — but when a request is supplied it is linked and used as the
+  idempotency key.
+
+The storefront does not have a returns form. The customer's route is the order
+conversation, which carries the return intent, and the API is exercised by the
+warehouse steps above.
 
 ### Approved is not paid
 
@@ -613,6 +671,10 @@ one is like this.
   this is the most likely source of a wrong amount.
 - Refund decisions are recorded, not executed. There is no payment processor, so
   there is no idempotency key on an outbound transfer and no lock across processes.
+- **The returns API has no staff UI.** The endpoints in the table above are the
+  product surface for the warehouse steps; a staff page to drive them is not
+  built. The routes are tested and exercised, and the reasoning above is the
+  design, but the console does not yet render a returns queue.
 - Single-tenant, single-currency (USD), SQLite. Not a multi-merchant ledger.
 
 ## Licence

@@ -11,7 +11,7 @@ import type { InjectionCategory, InjectionScan, InjectionSignal } from '@refund/
  *
  * The reason a miss is survivable: a request that gets past this scanner still
  * cannot move money, because eligibility, amount and decision are all owned by
- * the policy engine (see docs/adr/0005-injection-scope-and-limits.md).
+ * the policy engine (see docs/adr/0002-injection-scope-and-limits.md).
  */
 
 interface Rule {
