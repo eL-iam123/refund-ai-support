@@ -39,7 +39,7 @@ export function ModelCalls({ calls }: { calls: readonly LlmCall[] }): ReactNode 
               <span className="timing-stage">{call.purpose}</span>
               <span className="timing-ms">{call.latencyMs}ms</span>
               <span className="muted">
-                {call.model} · attempt {call.attempt} · {call.ok === 1 ? 'ok' : 'failed'}
+                attempt {call.attempt} · {call.ok === 1 ? 'ok' : 'failed'}
                 {call.promptTokens === null
                   ? ''
                   : ` · ${call.promptTokens}→${call.completionTokens} tokens`}

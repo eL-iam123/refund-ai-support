@@ -21,9 +21,9 @@ export interface OrderPicker {
  * from being sent to the API after the customer switcher moves on, and it
  * removes the need to reset selection state in an effect.
  */
-export function useOrderPicker(): OrderPicker {
+export function useOrderPicker(preferredOrderId = ''): OrderPicker {
   const [customerId, setCustomerId] = useState<string>('');
-  const [orderId, setOrderId] = useState<string>('');
+  const [orderId, setOrderId] = useState<string>(preferredOrderId);
 
   const loadCustomers = useCallback(async () => (await api.customers()).customers, []);
   const customers = useAsyncData(loadCustomers, 'customers');

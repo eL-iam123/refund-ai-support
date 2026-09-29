@@ -105,11 +105,10 @@ function ScenarioRow({
       <td>{scenario.goal}</td>
       <td className="msg-cell">{truncate(scenario.message, 90)}</td>
       <td className="nowrap">
-        <DecisionBadge decision={scenario.expectedDecision} />
-        {scenario.expectedAmountCents > 0 ? formatCents(scenario.expectedAmountCents) : null}
-        <div className="muted rule-list">{scenario.expectedRules.join(' ')}</div>
-        {scenario.expectsClamp ? <span className="tag tag-warn">expects clamp</span> : null}
-        {scenario.expectsLlmCall ? null : <span className="tag">no model</span>}
+<DecisionBadge decision={scenario.expectedDecision} />
+          {scenario.expectedAmountCents > 0 ? formatCents(scenario.expectedAmountCents) : null}
+          <div className="muted rule-list">{scenario.expectedRules.join(' ')}</div>
+          {scenario.expectsClamp ? <span className="tag tag-warn">expects clamp</span> : null}
       </td>
       <td>
         <button

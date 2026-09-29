@@ -41,7 +41,15 @@ export interface ShopOrder {
   readonly paymentState: string;
   readonly trackingStatus: string;
   readonly totalCents: number;
-  readonly items: readonly { name: string; quantity: number; unitPriceCents: number }[];
+  readonly items: readonly {
+    /** The order line id. A return is filed against this, not against a product. */
+    readonly itemId: string;
+    /** Null when the line's product has since been delisted. Not a return key. */
+    readonly productId: string | null;
+    readonly name: string;
+    readonly quantity: number;
+    readonly unitPriceCents: number;
+  }[];
 }
 
 /** The decision as the refund engine returns it, nested under `decision`. */
@@ -61,6 +69,44 @@ export interface RefundRequest {
   readonly customerId: string;
   readonly decision: Decision;
   readonly responseText: string;
+}
+
+/**
+ * The return lifecycle, as the storefront spells it out.
+ *
+ * Declared here rather than imported because the shopper's mental model is a
+ * five-step story - requested, label, posted, arrived, done - and it is clearer
+ * to write those labels once in the page that shows them than to reach into the
+ * engine's internal vocabulary for a progress bar. The server's own enum is the
+ * authority; this is the presentation of it.
+ */
+export const RETURN_STEPS = [
+  { key: 'return_requested', label: 'Requested', blurb: 'We have your request.' },
+  { key: 'return_label_generated', label: 'Label issued', blurb: 'Print the label and post the parcel.' },
+  { key: 'return_shipped', label: 'In transit', blurb: 'The parcel is on its way to us.' },
+  { key: 'return_received', label: 'Received', blurb: 'The goods are at our warehouse.' },
+  { key: 'return_processed', label: 'Processed', blurb: 'Checked and closed. Any refund is handled separately.' },
+] as const;
+
+export type ReturnStatus = (typeof RETURN_STEPS)[number]['key'] | 'return_denied';
+
+export interface ReturnRecord {
+  readonly id: string;
+  readonly orderId: string;
+  readonly customerId: string;
+  readonly status: ReturnStatus;
+  readonly reason: string;
+  readonly labelUrl: string | null;
+  readonly trackingNumber: string | null;
+  readonly deniedReason: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** One line of a return, as the server names it: an order line and a count. */
+export interface CartLineInput {
+  readonly productId: string;
+  readonly quantity: number;
 }
 
 export class ShopApiError extends Error {
@@ -131,7 +177,93 @@ export const shopApi = {
    */
   requestRefund: (input: { customerId: string; orderId: string; message: string }) =>
     post<{ request: RefundRequest }>('/api/chat/messages', input),
+
+  /** The shopper's own returns, newest first. */
+  returns: (): Promise<{ returns: readonly ReturnRecord[] }> => request('/api/returns'),
+
+  /**
+   * One order's conversation with the assistant.
+   *
+   * No `customerId` is sent: the session decides whose history this is. The
+   * client cannot widen the scope of this call, which is the only way a history
+   * endpoint is safe to expose to a browser.
+   */
+  chatHistory: (orderId: string): Promise<{ orderId: string; turns: readonly ChatTurn[] }> =>
+    request(`/api/shop/chat/history?orderId=${encodeURIComponent(orderId)}`),
+
+  /** Message counts per order, for the "3 messages" badge on the order picker. */
+  chatSummary: (): Promise<{ counts: readonly { orderId: string; count: number }[] }> =>
+    request('/api/shop/chat/summary'),
+
+  /**
+   * Whether a model is actually behind the assistant right now.
+   *
+   * Public and free of customer data. It exists because a page that behaves
+   * identically with and without a model is indistinguishable from a model that
+   * is not being called - which is exactly the state a missing API key produces,
+   * and exactly the state a reviewer would otherwise report as "the AI does not
+   * work".
+   */
+  assistantStatus: (): Promise<{ aiMode: string; aiAvailable: boolean; aiNote: string }> =>
+    request('/api/shop/assistant-status'),
+
+  /**
+   * Opens a return.
+   *
+   * No `customerId`: the server takes the customer from the session cookie, and
+   * the ledger checks the order belongs to them. A field here would be another
+   * thing the page has to get right before the server can start ignoring it.
+   *
+   * Lines are addressed by order line id, not product id. Two lines of one
+   * order can name the same product, and a product id would file both under one
+   * key - which is how ticking one item ends up returning all of them.
+   */
+  createReturn: (input: { orderId: string; reason: string; items: readonly ReturnLineInput[] }) =>
+    post<{ return: ReturnRecord }>('/api/returns', input),
 };
+
+/** One line of a return request: an order line and how many of it. */
+export interface ReturnLineInput {
+  readonly itemId: string;
+  readonly quantity: number;
+}
+
+/**
+ * One entry in a thread.
+ *
+ * `request` is the customer asking something and the answer they were given - a
+ * cut-down `RefundRequestDto`, not the whole thing, because the stored request
+ * also carries the policy trace, the raw extraction and the timing breakdown,
+ * which are staff data and have no business in a shopper's browser.
+ *
+ * `update` is the assistant reporting what a person later did about that request.
+ * It has no `message` and no decision, because the customer did not send one and
+ * no new decision was reached - which is why the two are told apart in the type
+ * rather than by the renderer checking for an empty message.
+ */
+export type ChatTurn =
+  | {
+      readonly kind: 'request';
+      readonly requestId: string;
+      readonly message: string;
+      readonly responseText: string;
+      /**
+       * The refund decision vocabulary, declared locally for the reason above.
+       * `pass` is deliberately absent: it is an order-status value, not something a
+       * refund request can be decided as, and a chat turn can only ever be one of
+       * these three.
+       */
+      readonly decision: 'approved' | 'denied' | 'escalated';
+      readonly refundAmountCents: number;
+      readonly createdAt: string;
+    }
+  | {
+      readonly kind: 'update';
+      readonly id: string;
+      readonly requestId: string;
+      readonly body: string;
+      readonly createdAt: string;
+    };
 
 /** Money is rendered from integer cents, never from a float. */
 export function money(cents: number): string {

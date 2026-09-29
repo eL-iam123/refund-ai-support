@@ -122,8 +122,13 @@ describe('identifying which order a request is about', () => {
   it('refuses another customer\'s order id without confirming it exists', async () => {
     // The response must be identical whether the order belongs to someone else
     // or does not exist at all, or this endpoint becomes an order-id oracle.
+    //
+    // The two messages are worded differently on purpose. Identical text would
+    // make the second call a duplicate of the first, and the duplicate gate
+    // answers it with the earlier request - which would make the two summaries
+    // match for a reason that has nothing to do with the oracle.
     const foreign = await submit({ orderId: STRANGER_ORDER, message: 'I want a refund please.' });
-    const invented = await submit({ orderId: 'ORD-000000', message: 'I want a refund please.' });
+    const invented = await submit({ orderId: 'ORD-000000', message: 'Could I get a refund on that order?' });
 
     expect(foreign.orderId).toBeNull();
     expect(invented.orderId).toBeNull();

@@ -35,6 +35,11 @@ export function UnavailableAnalyzer(reason: string, missingKey: string): AIAnaly
   return {
     label: 'unconfigured',
     model,
+    available: false,
+    // The reason already names the variable, which is what makes this safe to
+    // show a shopper: it is a hint to an operator about their own deployment, not
+    // anything about the database.
+    unavailableReason: reason,
     analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AnalyzerResult> {
       observer({
         model,

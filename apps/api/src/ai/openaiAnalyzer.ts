@@ -142,6 +142,12 @@ interface TokenUsage {
 export class OpenAiAnalyzer implements AIAnalyzer {
   readonly label: string;
   readonly model: string;
+  // Constructed only with a non-empty key - `createAnalyzer` returns
+  // `UnavailableAnalyzer` before reaching here otherwise - so a live provider
+  // is available by construction. Availability of a *call* is still decided at
+  // request time, where a 429 or a timeout is a real outcome worth recording.
+  readonly available = true;
+  readonly unavailableReason = null;
 
   private readonly client: OpenAI;
   private readonly candidates: readonly string[];

@@ -41,14 +41,19 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 
 CREATE TABLE IF NOT EXISTS order_items (
-  id               TEXT PRIMARY KEY,
-  order_id         TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  name             TEXT NOT NULL,
-  unit_price_cents INTEGER NOT NULL,
-  quantity         INTEGER NOT NULL,
-  final_sale       INTEGER NOT NULL DEFAULT 0,
-  digital          INTEGER NOT NULL DEFAULT 0,
-  downloaded       INTEGER NOT NULL DEFAULT 0
+    id               TEXT PRIMARY KEY,
+    order_id         TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    -- Which product this line was. Nullable, and backfilled by name for orders
+    -- that predate the column. It exists so a return line can be put back into
+    -- stock without a human naming a product id: stock is the one number in
+    -- this system that is wrong in a way nobody notices until it is not.
+    product_id       TEXT REFERENCES products(id),
+    name             TEXT NOT NULL,
+    unit_price_cents INTEGER NOT NULL,
+    quantity         INTEGER NOT NULL,
+    final_sale       INTEGER NOT NULL DEFAULT 0,
+    digital          INTEGER NOT NULL DEFAULT 0,
+    downloaded       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
 
@@ -59,6 +64,11 @@ CREATE TABLE IF NOT EXISTS refund_requests (
   order_id                TEXT,
   message                 TEXT NOT NULL,
   message_sha256          TEXT NOT NULL,
+  -- Normalised-message hash used to recognise a repeat report. Added by
+  -- migration 8. Distinct from the sha256 column above, which hashes the exact
+  -- bytes as part of the tamper-evident record: that one proves the text was
+  -- not edited, this one answers "did they already say this".
+  message_fingerprint     TEXT,
   decision                TEXT NOT NULL,
   refund_amount_cents     INTEGER NOT NULL,
   -- The order-derived eligible amount, added by migration 1. Kept separately

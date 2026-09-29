@@ -79,6 +79,7 @@ describe('the invariant is enforced by the write path', () => {
       orderId: 'ORD-1001',
       message: 'The mug arrived broken.',
       messageSha256: createHash('sha256').update('The mug arrived broken.', 'utf8').digest('hex'),
+      messageFingerprint: '0'.repeat(64),
       decision: 'approved',
       refundAmountCents: 10000,
       eligibleAmountCents: 10000,

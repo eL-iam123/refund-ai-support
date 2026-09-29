@@ -59,6 +59,8 @@ function fixedAnalyzer(behaviour: { readonly extraction: Partial<ClaimExtraction
   return {
     label: 'fake (test)',
     model: 'fake-fixed-v1',
+    available: true,
+    unavailableReason: null,
     analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AnalyzerResult> {
       recordOk(observer, 'fake-fixed-v1');
       return Promise.resolve({
@@ -80,6 +82,10 @@ function unavailableAnalyzer(message: string): AIAnalyzer {
   return {
     label: 'fake (test)',
     model: 'fake-unavailable-v1',
+    // Mirrors the real `UnavailableAnalyzer`: the reason is the message, and the
+    // status endpoint that reports it is exercised by the same contract.
+    available: false,
+    unavailableReason: message,
     analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AnalyzerResult> {
       recordOk(observer, 'fake-unavailable-v1');
       return Promise.reject(new AiUnavailableError(message));

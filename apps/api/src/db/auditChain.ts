@@ -123,6 +123,64 @@ export function listAuditEvents(db: Db, requestId: string): AuditEvent[] {
   return rows.map(hydrate);
 }
 
+/**
+ * The global event list for the admin log screen.
+ *
+ * Deliberately capped and paged. The chain is append-only and every request
+ * writes several rows, so an unpaged `SELECT *` grows without bound and the
+ * verification that a reviewer came to run is the thing that falls over.
+ *
+ * Filters are parameterised rather than interpolated, and the allowed column for
+ * ordering is checked against a fixed list, so the order-by cannot become an
+ * injection point. The filters compose with AND because an operator narrowing a
+ * log is answering several questions at once ("model calls that failed, this
+ * week") and an OR would return the rows they did not ask for.
+ */
+export function listAuditEventsPage(
+  db: Db,
+  filter: { readonly kind: string | null; readonly requestId: string | null; readonly since: string | null; readonly q: string | null; readonly limit: number; readonly offset: number },
+): { readonly events: readonly AuditEvent[]; readonly total: number } {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (filter.kind !== null) {
+    where.push('kind = ?');
+    params.push(filter.kind);
+  }
+  if (filter.requestId !== null) {
+    where.push('request_id = ?');
+    params.push(filter.requestId);
+  }
+  if (filter.since !== null) {
+    where.push('at >= ?');
+    params.push(filter.since);
+  }
+  if (filter.q !== null) {
+    where.push('(detail LIKE ? OR request_id LIKE ?)');
+    params.push(`%${filter.q}%`, `%${filter.q}%`);
+  }
+  const clause = where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`;
+
+  const total = (
+    db.prepare(`SELECT COUNT(*) AS n FROM audit_events ${clause}`).get(...params) as { n: number }
+  ).n;
+  // Newest first, with `id` as the tie-break so two events written in the same
+  // millisecond keep a stable order across pages.
+  const rows = db
+    .prepare(
+      `SELECT id, request_id, at, kind, detail, prev_hash, hash FROM audit_events ${clause} ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`,
+    )
+    .all(...params, filter.limit, filter.offset) as AuditRow[];
+
+  return { events: rows.map(hydrate), total };
+}
+
+/** The distinct event kinds, for the log screen's filter chips. */
+export function auditEventKinds(db: Db): string[] {
+  return (
+    db.prepare('SELECT DISTINCT kind FROM audit_events ORDER BY kind').all() as { kind: string }[]
+  ).map((row) => row.kind);
+}
+
 export type ChainVerdict =
   | { readonly ok: true; readonly checked: number; readonly headHash: string }
   | {

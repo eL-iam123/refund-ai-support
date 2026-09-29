@@ -6,14 +6,22 @@ import {
   type CreateRefundRequest,
   type GroundingResult,
   type RefundDecision,
+  type RefundRequestDto,
 } from '@refund/shared';
 import type { AppContext } from '../context.js';
 import { processRefundRequest, type ProcessResult } from '../../orchestrator.js';
-import { findRequestById, type NewRequestRow } from '../../db/requestRepository.js';
+import { findRequestById, messageFingerprint, type NewRequestRow } from '../../db/requestRepository.js';
 import { persistDecision } from '../../db/persistDecision.js';
+import {
+  duplicateResponseText,
+  findDuplicateReport,
+  recordDuplicateAttempt,
+  type DuplicateReport,
+} from '../../retrieval/duplicates.js';
 import { toRequestDto } from '../serialize.js';
 import { HttpError, badRequest } from '../errors.js';
 import { resolveShopSession, SESSION_COOKIE } from '../../shop/auth.js';
+import type { Db } from '../../db/connection.js';
 
 /**
  * POST /api/chat/messages
@@ -53,7 +61,24 @@ export function registerChatRoutes(app: FastifyInstance, ctx: AppContext): void 
     // Building the row from `body.data` here would store the claimed customer
     // while deciding on the real one, which is the worst of both.
     const resolved: CreateRefundRequest = { ...body.data, customerId: claimedCustomer };
-    const input = toProcessInput(resolved, ctx.now());
+    const now = ctx.now();
+
+    /**
+     * The duplicate gate, before the model and before the resolver.
+     *
+     * Placed here rather than inside the pipeline because the pipeline's output
+     * is a decision, and anything the pipeline returns is persisted as one. A
+     * duplicate that reached it would be a second decision on the second
+     * request row, and an approved decision reserves money - so "recognise the
+     * duplicate" has to happen somewhere that can decline to produce a row at
+     * all. The customer gets their existing request back instead.
+     */
+    const duplicate = findDuplicateReport(ctx.db, resolved.customerId, resolved.message, now, ctx.env.DUPLICATE_WINDOW_HOURS);
+    if (duplicate !== null) {
+      return reply.code(200).send(suppressedDuplicate(ctx.db, duplicate, now));
+    }
+
+    const input = toProcessInput(resolved, now);
     const result = await processRefundRequest(ctx.db, ctx.pipeline, input);
     const row = buildRow(input.requestId, resolved, result, ctx.now());
 
@@ -91,6 +116,44 @@ interface ProcessInputFields {
   readonly now: Date;
 }
 
+/**
+ * The 200 body for a suppressed repeat.
+ *
+ * The `request` is the request they already have, re-read from storage rather
+ * than rebuilt, so a human override applied since the first submission is what
+ * the customer is shown. The `duplicate` block is separate and additive because
+ * the storefront has to say *why* the same answer came back - a page that
+ * silently re-renders an earlier decision looks broken, and the one thing worse
+ * than a duplicate is a duplicate the customer does not know about.
+ *
+ * 200 rather than 201: nothing was created, and a client that retries on 201
+ * semantics would be creating the loop this gate exists to stop.
+ */
+function suppressedDuplicate(db: Db, duplicate: DuplicateReport, now: Date): {
+  request: RefundRequestDto;
+  duplicate: { ofRequestId: string; firstReportedAt: string; firstDecision: string };
+} {
+  recordDuplicateAttempt(db, duplicate.original.id, duplicate, now);
+  const stored = findRequestById(db, duplicate.original.id);
+  if (stored === null) {
+    // The audit event points at a row that vanished. Refusing to answer is
+    // better than answering from a null: the customer retries and the gate
+    // stops matching once the row is gone.
+    throw new HttpError(500, 'internal_error', 'the earlier request this repeats is no longer readable');
+  }
+  return {
+    request: {
+      ...toRequestDto(stored),
+      responseText: duplicateResponseText(duplicate.original, stored.decision),
+    },
+    duplicate: {
+      ofRequestId: duplicate.original.id,
+      firstReportedAt: duplicate.original.createdAt,
+      firstDecision: stored.decision,
+    },
+  };
+}
+
 function toProcessInput(data: CreateRefundRequest, now: Date): ProcessInputFields {
   return {
     requestId: randomUUID(),
@@ -117,6 +180,10 @@ function buildRow(
     // Lets an auditor prove the stored message was not edited after the
     // decision was made, without keeping a second copy of it anywhere.
     messageSha256: sha256(input.message),
+    // Derived from the message here, not accepted from the caller. A caller that
+    // supplies its own fingerprint can make two different messages collide, and
+    // a duplicate check that can be defeated by choosing a hash is decoration.
+    messageFingerprint: messageFingerprint(input.message),
     ...decisionColumns(result.decision),
     responseText: result.responseText,
     extractionJson: toJson(result.extraction),

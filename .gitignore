@@ -21,3 +21,9 @@ npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+
+# Local agent worktrees. `.kilo/worktrees/` holds a full nested checkout of this
+# repository, and because it carries its own `.git` it is not excluded by any of
+# the rules above. Untracked is not the same as ignored: `git add -A` would stage
+# a second copy of the entire source tree, and lint would typecheck both copies.
+.kilo/

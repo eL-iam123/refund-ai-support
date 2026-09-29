@@ -25,7 +25,7 @@ export function ModelClaim({ request }: { request: RefundRequestDto }): ReactNod
   }
 
   return (
-    <Panel title="Model claim" action={<span className="muted">{request.aiMode}</span>}>
+    <Panel title="Model claim">
       <dl className="kv">
         <dt>Reason</dt>
         <dd>{request.extraction.reason}</dd>

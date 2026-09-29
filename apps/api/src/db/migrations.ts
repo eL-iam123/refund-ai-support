@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { GENESIS_HASH, eventHash } from './auditChain.js';
 
@@ -36,7 +37,15 @@ function hasTable(db: Db, table: string): boolean {
   return row !== undefined;
 }
 
-/** True when `table` already has `column`, so a step can be replayed safely. */
+/**
+ * True when `table` already has `column`, so a step can be replayed safely.
+ *
+ * `PRAGMA table_info` returns no rows for a table that does not exist, so this
+ * reports false for a missing table and a missing column alike. A migration
+ * that checks only this would go on to `ALTER TABLE` a table that was never
+ * created - which turns a database that predates the feature into a database
+ * that cannot start. Check `hasTable` first.
+ */
 function hasColumn(db: Db, table: string, column: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   return columns.some((entry) => entry.name === column);
@@ -251,7 +260,214 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    name: 'returns workflow',
+    up: (db) => {
+      // Physical goods coming back. Deliberately separate from the refund
+      // tables: a return moves a box, a refund moves money, and the two are
+      // neither the same event nor guaranteed to happen. Somebody can return
+      // something with no intention of being repaid, and can be refused a refund
+      // for a reason that has nothing to do with the parcel.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS returns (
+          id              TEXT PRIMARY KEY,
+          -- Nullable, and unique when present. A customer can send goods back
+          -- without ever having asked for money - a gift return, an exchange, a
+          -- "this is fine, I just do not want it" - so a return cannot require a
+          -- refund request to exist first. Where one does exist it is recorded,
+          -- because that is the request the restock and any refund hang off.
+          -- SQLite treats NULLs as distinct in a unique index, so "at most one
+          -- return per request" holds without also forcing a request onto every
+          -- return.
+          request_id      TEXT REFERENCES refund_requests(id) ON DELETE CASCADE,
+          order_id        TEXT NOT NULL REFERENCES orders(id),
+          customer_id     TEXT NOT NULL REFERENCES customers(id),
+          status          TEXT NOT NULL CHECK (
+                            status IN ('return_requested', 'return_label_generated', 'return_shipped', 'return_received', 'return_processed', 'return_denied')
+                          ),
+          reason          TEXT NOT NULL,
+          tracking_number TEXT,
+          carrier         TEXT,
+          label_url       TEXT,
+          shipped_at      TEXT,
+          received_at     TEXT,
+          processed_at    TEXT,
+          denied_at       TEXT,
+          denied_reason   TEXT,
+          created_at      TEXT NOT NULL,
+          updated_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_returns_order ON returns(order_id);
+        CREATE INDEX IF NOT EXISTS idx_returns_customer ON returns(customer_id);
+        CREATE INDEX IF NOT EXISTS idx_returns_status ON returns(status);
+        -- The idempotency key for "one return per refund request". A partial
+        -- index, because the guarantee is only meaningful where there is a
+        -- request to be unique against.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_returns_request ON returns(request_id)
+          WHERE request_id IS NOT NULL;
+      `);
+
+      // The lines actually in the box. Name and price are snapshotted from the
+      // order at the moment the return is opened, so the return still reads
+      // correctly if the catalogue is renamed or repriced later.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS return_items (
+          id            TEXT PRIMARY KEY,
+          return_id     TEXT NOT NULL REFERENCES returns(id) ON DELETE CASCADE,
+          item_id       TEXT NOT NULL REFERENCES order_items(id),
+          name          TEXT NOT NULL,
+          quantity      INTEGER NOT NULL CHECK (quantity > 0),
+          unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+          received_quantity INTEGER NOT NULL DEFAULT 0,
+          received_condition TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_return_items_return ON return_items(return_id);
+        CREATE INDEX IF NOT EXISTS idx_return_items_item ON return_items(item_id);
+      `);
+    },
+  },
+  {
+    version: 7,
+    name: 'order_items.product_id',
+    up: (db) => {
+      // Which product each purchased line was. Added so restocking a return is
+      // a join rather than a human naming an id: the only reachable product is
+      // the one on the order, so stock cannot be credited to something nobody
+      // sent back.
+      //
+      // Backfilled by name where it is unambiguous. Name is not identity - two
+      // products can share one - so an ambiguous or unrecognised line is left
+      // NULL rather than guessed at. `processReturn` refuses to restock a NULL
+      // one and says so, which is the honest outcome: the warehouse restocks that
+      // line by hand instead of the database inventing a mapping.
+      // The table may not exist at all: a database created before the shop
+      // existed has `refund_requests` and `audit_events` and nothing else, and
+      // `PRAGMA table_info` on a missing table returns no rows - so the column
+      // check alone would fall through to an `ALTER TABLE` that cannot run.
+      if (!hasTable(db, 'order_items') || hasColumn(db, 'order_items', 'product_id')) {
+        return;
+      }
+      db.exec('ALTER TABLE order_items ADD COLUMN product_id TEXT REFERENCES products(id)');
+
+      const candidates = db
+        .prepare('SELECT id, name FROM products GROUP BY name HAVING COUNT(*) = 1')
+        .all() as readonly { id: string; name: string }[];
+      const update = db.prepare('UPDATE order_items SET product_id = ? WHERE name = ?');
+      for (const product of candidates) {
+        update.run(product.id, product.name);
+      }
+    },
+  },
+  {
+    version: 8,
+    name: 'refund_requests.message_fingerprint',
+    up: (db) => {
+      // A normalised hash of the message, used to recognise a repeat report.
+      //
+      // Separate from `message_sha256`, which hashes the message byte for byte
+      // as part of the tamper-evident record. Reusing it here would make the
+      // duplicate check exact-match only, so a customer who retypes the same
+      // complaint - the single most common way this happens - would not be
+      // recognised as having already asked. The two hashes are answering
+      // different questions and must not be collapsed into one.
+      //
+      // Backfilled from the message, so existing history is covered by the check
+      // the moment the migration runs rather than only for new requests.
+      if (!hasTable(db, 'refund_requests') || hasColumn(db, 'refund_requests', 'message_fingerprint')) {
+        return;
+      }
+      db.exec('ALTER TABLE refund_requests ADD COLUMN message_fingerprint TEXT');
+
+      // Older databases predate the stored message. A row with no text cannot be
+      // fingerprinted, and a NULL fingerprint is not a match, so it is simply
+      // never treated as a duplicate - which is the right answer, since the
+      // alternative would be inventing a hash over an empty string and matching
+      // every message-less row to every other.
+      if (!hasColumn(db, 'refund_requests', 'message')) {
+        return;
+      }
+
+      const rows = db
+        .prepare('SELECT id, message FROM refund_requests WHERE message_fingerprint IS NULL')
+        .all() as readonly { id: string; message: string }[];
+      const update = db.prepare('UPDATE refund_requests SET message_fingerprint = ? WHERE id = ?');
+      for (const row of rows) {
+        update.run(fingerprintOf(row.message), row.id);
+      }
+
+      // Not UNIQUE, and not indexed here alone: a customer may legitimately
+      // make the same claim twice - after a denial, or after a new fact - and
+      // the policy decides whether the second one stands. The index serves the
+      // lookup by (customer, fingerprint, time) and leaves the ruling to R-15.
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_refund_requests_fingerprint ON refund_requests (customer_id, message_fingerprint, created_at)',
+      );
+    },
+  },
+  {
+    version: 9,
+    name: 'customer_updates',
+    up: (db) => {
+      // What the customer is told after a person acts on their request.
+      //
+      // Not a column on `refund_requests`, because one request can be acted on
+      // more than once: approved, then settled, then queried about. Each of those
+      // is a separate thing the customer needs to hear, in the order it happened.
+      // A single "last update" column would keep the newest and lose the rest,
+      // which is exactly the history someone is most likely to want.
+      //
+      // The body is written once, at the moment of the action, and never
+      // recomputed. Read-side composition would mean the words a customer was
+      // shown in March depend on code written in September, and an audit that
+      // cannot reproduce the message it sent is not an audit.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS customer_updates (
+          id           TEXT PRIMARY KEY,
+          created_at   TEXT NOT NULL,
+          customer_id  TEXT NOT NULL,
+          order_id     TEXT,
+          request_id   TEXT NOT NULL,
+          kind         TEXT NOT NULL,
+          body         TEXT NOT NULL
+        );
+      `);
+      // The thread read is by customer and order; the write is by request, so
+      // both get an index rather than one and a scan.
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_customer_updates_thread ON customer_updates (customer_id, order_id, created_at)',
+      );
+      db.exec('CREATE INDEX IF NOT EXISTS idx_customer_updates_request ON customer_updates (request_id)');
+    },
+  },
 ];
+
+/**
+ * The duplicate-detection fingerprint of a message.
+ *
+ * Case-folded, punctuation removed, whitespace collapsed, digits kept. A
+ * difference in capitalisation, an extra space, or a stray full stop is not a
+ * different complaint; a different order number or amount is. Digits stay for
+ * that reason - the numbers in a message are usually the part that makes it
+ * about a specific thing.
+ *
+ * Duplicated here rather than imported so the migration is a frozen artifact:
+ * a migration that imported today's helper would silently re-interpret history
+ * if that helper ever changed. The rule is the fingerprint as it was defined
+ * when the column was introduced.
+ */
+function fingerprintOf(message: string): string {
+  return createHash('sha256')
+    .update(
+      message
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, '')
+        .replace(/\s+/gu, ' ')
+        .trim(),
+      'utf8',
+    )
+    .digest('hex');
+}
 
 /**
  * Hashes every existing event in order, oldest first.
@@ -291,17 +507,20 @@ function currentVersion(db: Db): number {
 /**
  * Applies every pending step, each in its own transaction so a failure leaves
  * the recorded version consistent with what is actually in the file.
+ *
+ * The list is applied in the order it is written, and `user_version` is a plain
+ * counter, so a step inserted above a version that has already been applied is
+ * silently skipped forever. That is worth a check that can actually fail: the
+ * original guard compared each version against `LATEST_VERSION`, which is the
+ * maximum of the same list, so it was true by construction and never rejected
+ * anything. Comparing against the previous entry catches a step written out of
+ * order, which is how the returns step once ended up ahead of the audit chain it
+ * depended on.
  */
 export function migrate(db: Db, log?: (message: string) => void): number {
   const from = currentVersion(db);
+  assertOrdered();
   const pending = MIGRATIONS.filter((m) => m.version > from);
-
-  if (pending.length > 0) {
-    const older = pending.filter((m) => m.version <= LATEST_VERSION);
-    if (older.length !== pending.length) {
-      throw new Error('migration list is not ordered by version');
-    }
-  }
 
   for (const migration of pending) {
     db.transaction(() => {
@@ -312,4 +531,28 @@ export function migrate(db: Db, log?: (message: string) => void): number {
   }
 
   return currentVersion(db);
+}
+
+/**
+ * Fails the process on a list that would apply out of order, on a duplicate
+ * version, or on a gap. Gaps are refused because a missing number is nearly
+ * always a botched edit rather than a deliberate skip, and a deliberate skip
+ * should be spelled out in a comment instead of a hole.
+ */
+function assertOrdered(): void {
+  const seen = new Set<number>();
+  let previous = 0;
+  for (const migration of MIGRATIONS) {
+    if (seen.has(migration.version)) {
+      throw new Error(`migration ${migration.version} ("${migration.name}") is declared twice`);
+    }
+    if (migration.version !== previous + 1) {
+      throw new Error(
+        `migration ${migration.version} ("${migration.name}") does not follow ${previous}; ` +
+          'steps are applied in the order written, so a gap or a reordering will be skipped forever',
+      );
+    }
+    seen.add(migration.version);
+    previous = migration.version;
+  }
 }

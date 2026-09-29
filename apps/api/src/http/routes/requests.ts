@@ -23,6 +23,8 @@ import { findOrder } from '../../db/orderRepository.js';
 import { RuleEvaluationSchema } from '@refund/shared';
 import { FULLY_REFUNDED } from '../../policy/constants.js';
 import { authoriseRefund, releaseRefundsForRequest } from '../../db/refundLedger.js';
+import { recordCustomerUpdate } from '../../db/customerUpdates.js';
+import { followUpFor } from '../../response/followUp.js';
 import { formatCents } from '../../lib/money.js';
 
 /**
@@ -217,8 +219,45 @@ function applyOverride(
       }
     }
     insertAuditEvent(ctx.db, requestId, at, 'human_override', detail);
+
+    notifyCustomer(ctx, requestId, previousDecision);
   });
 
   apply();
   return { kind: 'human_override', detail, at };
+}
+
+/**
+ * Tells the customer what the person just decided.
+ *
+ * In the same transaction as the decision, and that placement is the point. An
+ * override that succeeded and then failed to write its follow-up would leave a
+ * person having reviewed a claim and the customer never learning the outcome -
+ * the worst state to discover a week later, because nothing in the system looks
+ * broken. Either both are durable or neither happened.
+ *
+ * Reads the request back rather than trusting the arguments, so the message
+ * describes the decision that was actually stored and not the one that was
+ * asked for.
+ */
+function notifyCustomer(ctx: AppContext, requestId: string, previousDecision: string): void {
+  const updated = findRequestById(ctx.db, requestId);
+  if (updated === null) {
+    return;
+  }
+  recordCustomerUpdate(ctx.db, {
+    customerId: updated.customerId,
+    orderId: updated.orderId,
+    requestId,
+    kind: 'human_decision',
+    body: followUpFor({
+      kind: 'human_decision',
+      orderId: updated.orderId,
+      previousDecision,
+      decision: updated.decision,
+      amountCents: updated.refundAmountCents,
+      paidCents: 0,
+    }),
+    now: ctx.now(),
+  });
 }

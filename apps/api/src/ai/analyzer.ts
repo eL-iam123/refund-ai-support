@@ -74,6 +74,24 @@ export interface AIAnalyzer {
   /** The model that will be tried first. */
   readonly model: string;
   /**
+   * Whether a call to a real provider is configured.
+   *
+   * Not the same as "will this call succeed" - a configured key can still fail,
+   * rate-limit or return unusable output, and all three of those are handled at
+   * call time. This answers the narrower question of whether there is a key at
+   * all, so a deployment can be told "no model configured" at boot rather than
+   * discovering it one escalating request at a time.
+   */
+  readonly available: boolean;
+  /**
+   * Why it is unavailable, naming the environment variable to set.
+   *
+   * Null when available. Shown to the storefront, because "the assistant is not
+   * working" and "the assistant is working with no model behind it" are
+   * different problems with different fixes.
+   */
+  readonly unavailableReason: string | null;
+  /**
    * Reads the customer's message and returns a structured claim.
    *
    * Rejects with `AiUnavailableError` when no configured model produced

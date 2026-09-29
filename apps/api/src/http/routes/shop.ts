@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { AppContext } from '../context.js';
+import { aiModeLabel, type AppContext } from '../context.js';
 import { badRequest, UnauthorizedError } from '../errors.js';
 import {
   authenticate,
@@ -13,6 +13,7 @@ import {
   type ShopUser,
 } from '../../shop/auth.js';
 import { checkout, listOrdersForCustomer, listProducts } from '../../shop/catalogue.js';
+import { conversationCounts, conversationForOrder } from '../../retrieval/conversation.js';
 
 /**
  * Storefront endpoints, mounted under `/api/shop`.
@@ -22,6 +23,25 @@ import { checkout, listOrdersForCustomer, listProducts } from '../../shop/catalo
  * makes the storefront safe to point at live data: the only way to name a
  * customer is to be signed in as them.
  */
+
+const ChatHistoryQuery = z.object({
+  orderId: z.string().trim().min(1, 'orderId is required').max(120),
+  // Bounded so one order with a long thread cannot return an unbounded payload
+  // on every page load. The API returns the most recent N, oldest-first.
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+/**
+ * What the storefront says when no key is configured.
+ *
+ * Short enough to sit in a panel, and complete enough to act on: choose a
+ * provider, put its key in `.env` under the name that provider uses, restart.
+ * The README section is named rather than linked by anchor because anchors move.
+ */
+const NO_API_KEY_NOTE =
+  'No API key is set. To turn the model on, set AI_PROVIDER in .env to the provider you want ' +
+  '(groq, openai, anthropic, gemini, nvidia or openrouter), set that provider\'s API key in .env ' +
+  'under its own name, and restart the server. README.md, "Configuration", has the details.';
 
 const RegisterSchema = z.object({
   email: z.string().min(3).max(200),
@@ -121,6 +141,28 @@ export function registerShopRoutes(app: FastifyInstance, ctx: AppContext): void 
     return user === null ? { user: null } : { user };
   });
 
+  /**
+   * Whether a model is actually behind the assistant.
+   *
+   * Public, because it exposes no customer data - only whether a key is present
+   * and which provider is configured. It exists so the storefront can say "no
+   * model configured" out loud instead of behaving exactly as it does when a
+   * model *is* answering, which is otherwise indistinguishable.
+   *
+   * The note is written for whoever is looking at the storefront, which is not
+   * always the operator. It says *what is missing* and *where to set it* instead
+   * of naming a variable, because `GROQ_API_KEY is not set` tells a reader
+   * nothing they can act on unless they already know which provider is selected
+   * and where its key goes - and the two are the first things a new deployment
+   * gets wrong. The variable name is still available to an operator on the
+   * request record itself, where a precise diagnostic is what is wanted.
+   */
+  app.get('/api/shop/assistant-status', () => ({
+    aiMode: aiModeLabel(ctx.pipeline),
+    aiAvailable: ctx.pipeline.analyzer.available,
+    aiNote: ctx.pipeline.analyzer.available ? '' : NO_API_KEY_NOTE,
+  }));
+
   app.get('/api/shop/orders', (request) => {
     const user = currentUser(request, ctx);
     if (user === null) {
@@ -137,5 +179,51 @@ export function registerShopRoutes(app: FastifyInstance, ctx: AppContext): void 
     }
     const order = checkout(ctx.db, user.customerId, body.lines, ctx.now());
     return reply.code(201).send({ order });
+  });
+
+  registerChatHistoryRoutes(app, ctx);
+}
+
+/**
+ * Reading back a conversation.
+ *
+ * Split out because the shop's route table is already long enough, and because
+ * these two are the only endpoints on it whose subject is a *thread* rather than
+ * an order or a product.
+ *
+ * Neither takes a `customerId`. The session decides whose history this is, so
+ * there is no parameter a caller could set to widen the scope - the safest
+ * query in the system stops being the safest the moment a field is added that
+ * says who to ask about.
+ */
+function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext): void {
+  app.get('/api/shop/chat/history', (request) => {
+    const user = currentUser(request, ctx);
+    if (user === null) {
+      throw new UnauthorizedError('sign in to see your conversations');
+    }
+    const query = ChatHistoryQuery.safeParse(request.query);
+    if (!query.success) {
+      throw badRequest(
+        'invalid history filter',
+        query.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+      );
+    }
+    return {
+      orderId: query.data.orderId,
+      turns: conversationForOrder(ctx.db, user.customerId, query.data.orderId, ctx.now(), query.data.limit),
+    };
+  });
+
+  /** How many messages each of the shopper's orders has, for the order picker. */
+  app.get('/api/shop/chat/summary', (request) => {
+    const user = currentUser(request, ctx);
+    // No session is not an error here: the order picker is on the page for
+    // signed-out visitors too, and an empty count list is the honest answer.
+    if (user === null) {
+      return { counts: [] };
+    }
+    const counts = conversationCounts(ctx.db, user.customerId);
+    return { counts: [...counts].map(([orderId, count]) => ({ orderId, count })) };
   });
 }

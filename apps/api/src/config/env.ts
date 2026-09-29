@@ -19,6 +19,7 @@ import { INJECTION_ACTIONS } from '@refund/shared';
  * value means "not supplied", so it is treated as absent here.
  */
 const EMPTY_IS_ABSENT = [
+  'AI_REQUIRED',
   'AI_MODEL',
   'AI_BASE_URL',
   'AI_FALLBACK_MODELS',
@@ -71,6 +72,26 @@ const EnvSchema = z.object({
    * claims that still look like a model read*.
    */
   AI_PROVIDER: z.enum(['groq', 'openrouter', 'openai', 'nvidia', 'gemini', 'anthropic', 'local']).default('groq'),
+  /**
+   * Refuse to start without a working model, instead of degrading.
+   *
+   * The default degraded mode above is the right one for a demo and for an
+   * operator mid-fix: the product stays up and queues work for a person. It is
+   * the wrong one for a deployment that is supposed to *be* the model, because
+   * there the failure is invisible from the outside - every request still
+   * succeeds, escalates, and a person does the work the model was paid to do.
+   * Nothing logs an error that anyone reads, and the bill for the model is being
+   * paid for nothing.
+   *
+   * So this is the switch between the two, and it defaults to on in production:
+   * a deployment that cannot reach its model should not be serving traffic, and
+   * production already refuses `local` for the same reason. A string rather than
+   * a boolean because the environment is text - `z.coerce.boolean()` reads the
+   * non-empty string "false" as true, which is the wrong answer with no warning.
+   *
+   * Unset means: required in production, tolerated in development.
+   */
+  AI_REQUIRED: z.enum(['true', 'false']).optional(),
   /** Overrides the provider's default model when set. */
   AI_MODEL: z.string().min(1).optional(),
   AI_FALLBACK_MODELS: z.string().default(''),
@@ -114,6 +135,20 @@ const EnvSchema = z.object({
    * tokens, and the request is stored verbatim before anything looks at it.
    */
   MAX_MESSAGE_LENGTH: z.coerce.number().int().positive().default(4000),
+
+  /**
+   * How far back a repeat of the same complaint counts as the same report.
+   *
+   * Bounded below at a minute, because a zero-width window would mean the check
+   * never fires and the setting would look like it worked while doing nothing.
+   * Bounded above, because a duplicate check that remembers forever eventually
+   * stops recognising a new claim as new - a customer told "you already asked"
+   * six months after a denial has been given no way to appeal.
+   *
+   * 72 hours is the default because that spans a weekend: the commonest repeat is
+   * someone who sent it Friday, saw nothing, and sent it again Monday.
+   */
+  DUPLICATE_WINDOW_HOURS: z.coerce.number().int().min(0.02).max(24 * 90).default(72),
   /**
    * HMAC key for staff tokens. Required and undefaulted on purpose: a server that
    * cannot verify a signature must not fall back to trusting the caller, so
@@ -360,7 +395,51 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
     );
   }
 
+  assertModelIsReachable(env);
   return env;
+}
+
+/** Whether this process must refuse to start without a usable model. */
+export function isAiRequired(env: Env): boolean {
+  return env.AI_REQUIRED === 'true' || (env.AI_REQUIRED === undefined && env.NODE_ENV === 'production');
+}
+
+/**
+ * The boot guarantee: a process that is required to have a model does not start
+ * without one.
+ *
+ * Only checked when required. The other mode - boot anyway, escalate everything -
+ * is deliberate and defended above, and it is the right default for a demo and
+ * for an operator mid-fix. This is the switch for when the process *is* the
+ * model, where quietly degrading is the same as being down while looking healthy.
+ */
+function assertModelIsReachable(env: Env): void {
+  if (!isAiRequired(env)) {
+    return;
+  }
+  const preset = PRESETS[env.AI_PROVIDER];
+
+  // `local` first. It is a working analyzer, so the missing-key check passes it,
+  // and the error a reader would otherwise get is a confusing "no key variable
+  // configured" for a provider that never wanted a key in the first place.
+  if (preset.kind === 'local') {
+    throw new Error(
+      'AI_REQUIRED is on, but AI_PROVIDER=local is a pattern matcher rather than a ' +
+        'language model. Set AI_PROVIDER to a real provider and its key, or unset ' +
+        'AI_REQUIRED to run in the degraded mode that escalates instead of guessing.',
+    );
+  }
+
+  const missing = missingApiKeyFor(env);
+  if (missing === null) {
+    return;
+  }
+  throw new Error(
+    `${missing}. AI_REQUIRED is on, so the server will not start without a model - a ` +
+      'deployment that cannot reach one cannot answer a customer, and starting anyway ' +
+      'only turns a visible failure into an invisible one. Set the key in your .env (see ' +
+      'the Configuration section of the README) and start again.',
+  );
 }
 
 /**

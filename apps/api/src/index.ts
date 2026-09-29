@@ -1,4 +1,4 @@
-import { readEnv } from './config/env.js';
+import { readEnv, isAiRequired, missingApiKeyFor } from './config/env.js';
 import { openDatabase } from './db/connection.js';
 import { createLogger } from './lib/logger.js';
 import { buildApp } from './http/app.js';
@@ -22,6 +22,23 @@ async function main(): Promise<void> {
   const log = createLogger(env.LOG_LEVEL);
   const db = openDatabase(env.DATABASE_PATH);
 
+  // Said once, loudly, and only when it is actually true. The degraded mode is
+  // deliberate and defensible - requests still get answered, and anything the
+  // model would have read is escalated to a person rather than guessed at. What
+  // is not defensible is it being invisible: a deployment can look perfectly
+  // healthy while paying for a model it never reaches. `readEnv` has already
+  // refused to start for this when the process is required to have one, so
+  // reaching here means someone chose the degraded mode, and they should know
+  // they chose it.
+  const missingKey = missingApiKeyFor(env);
+  if (missingKey !== null) {
+    log.error(
+      { provider: env.AI_PROVIDER, required: isAiRequired(env) },
+      `ai.unavailable: ${missingKey}. Every request that needs a claim will escalate to a ` +
+        'person instead of being read by a model. Set the key to restore it.',
+    );
+  }
+
   if (countRows(db) === 0) {
     const seeded = seedDatabase(db, new Date());
     log.info({ seeded }, 'database.seeded');
@@ -40,7 +57,7 @@ async function main(): Promise<void> {
     log.info({ expired }, 'shop.sessions.purged');
   }
 
-  const app = buildApp({ env, db, staticDir: webDistDir(), shopDir: shopDistDir() });
+  const app = buildApp({ env, db, staticDir: webDistDir() });
 
   const shutdown = (signal: string): void => {
     log.info({ signal }, 'shutdown.start');
@@ -63,16 +80,7 @@ function countRows(db: ReturnType<typeof openDatabase>): number {
 }
 
 /**
- * The storefront, mounted at `/shop/`. Same deal as the staff console: present
- * in the single-container image, absent in development where Vite serves it.
- */
-function shopDistDir(): string {
-  const dir = fileURLToPath(new URL('../../shop/dist/', import.meta.url));
-  return existsSync(dir) ? dir : '/nonexistent';
-}
-
-/**
- * Present in the single-container image, absent in development.
+ * The client, served from the same origin as the API.
  *
  * `fileURLToPath` rather than `URL.pathname`: pathname is percent-encoded, so a
  * checkout under a path containing a space would resolve to a directory that

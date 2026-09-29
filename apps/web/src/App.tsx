@@ -1,125 +1,143 @@
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { NavLink, Route, Routes } from 'react-router-dom';
-import { api } from './api';
+import { type ReactNode } from 'react';
+import { Route, Routes, useNavigate } from 'react-router-dom';
 import { ChatPage } from './ChatPage';
 import { DashboardPage } from './DashboardPage';
+import { AdminLayout, ShopperLayout } from './layouts';
 import { PolicyPage } from './PolicyPage';
 import { RefundsPage } from './RefundsPage';
 import { RequestDetailPage } from './RequestDetailPage';
 import { RequestsPage } from './RequestsPage';
 import { ScenariosPage } from './ScenariosPage';
 import { StaffGate } from './StaffGate';
-import { clearStaffToken, onStaffTokenChange, staffToken } from './auth';
+import { useAsyncData, useSession, Spinner } from './shop/hooks';
+import { addToCart, cartLines, refillCart, clearCart, type CartLine } from './shop/cartStore';
+import { shopApi, type Product } from './shop/api';
+import { AccountPage } from './shop/Account';
+import { Cart } from './shop/Cart';
+import { Catalogue } from './shop/Catalogue';
+import { Orders } from './shop/Orders';
 
 /**
- * Two surfaces, one origin.
+ * The shop and the staff console, in one bundle and two layouts.
  *
- * `/` is what a customer sees. `/admin` is what a reviewer sees, and it is the
- * only place the rule trace is exposed - the same decision, with the reasoning
- * attached, reachable from the customer's own "why?" link.
+ * The storefront and the assistant are the same app on purpose: someone buys a
+ * lamp, decides it is faulty, and complains about it, all in one tab. So the
+ * shop, cart, orders, account and assistant share a topbar and a
+ * httpOnly session cookie, and "report an issue" is a route change carrying the
+ * order across rather than a second sign-in.
+ *
+ * The staff pages are here because it is one demo binary, and they are under
+ * `/admin` behind `StaffGate` with a header of their own. The shopper's nav has
+ * no link to any of it: an admin link on a shop page is a link a customer can
+ * follow into a sign-in prompt they have no reason to see.
  */
 export function App(): ReactNode {
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">RD</span>
-          <span>
-            Refund Desk
-            <small>the policy decides; the model only explains</small>
-          </span>
-        </div>
-        <nav>
-          <NavLink to="/">Customer</NavLink>
-          <NavLink to="/admin">Dashboard</NavLink>
-          <NavLink to="/admin/requests">Requests</NavLink>
-          <NavLink to="/admin/policy">Policy</NavLink>
-          <SignOutControl />
-        </nav>
-        <ProviderBadge />
-      </header>
+    <Routes>
+      <Route element={<ShopperLayout />}>
+        <Route path="/" element={<ShopRoute />} />
+        <Route path="/cart" element={<CartRoute />} />
+        <Route path="/orders" element={<OrdersRoute />} />
+        <Route path="/account" element={<AccountRoute />} />
+        <Route path="/help" element={<ChatPage />} />
+        <Route path="*" element={<p className="empty">No such page.</p>} />
+      </Route>
 
-      <main className="main">
-        <Routes>
-          <Route path="/" element={<ChatPage />} />
-          <Route path="/admin" element={<StaffGate><DashboardPage /></StaffGate>} />
-          <Route
-            path="/admin/refunds"
-            element={<StaffGate><RefundsPage /></StaffGate>}
-          />
-          <Route
-            path="/admin/requests"
-            element={<StaffGate><RequestsPage /></StaffGate>}
-          />
-          <Route
-            path="/admin/requests/:id"
-            element={<StaffGate><RequestDetailPage /></StaffGate>}
-          />
-          <Route
-            path="/admin/scenarios"
-            element={<StaffGate><ScenariosPage /></StaffGate>}
-          />
-          <Route path="/admin/policy" element={<PolicyPage />} />
-          <Route path="*" element={<p className="empty">No such page.</p>} />
-        </Routes>
-      </main>
+      <Route
+        path="/admin"
+        element={
+          <StaffGate>
+            <AdminLayout />
+          </StaffGate>
+        }
+      >
+        <Route index element={<DashboardPage />} />
+        <Route path="refunds" element={<RefundsPage />} />
+        <Route path="requests" element={<RequestsPage />} />
+        <Route path="requests/:id" element={<RequestDetailPage />} />
+        <Route path="scenarios" element={<ScenariosPage />} />
+        <Route path="policy" element={<PolicyPage />} />
+      </Route>
+    </Routes>
+  );
+}
+
+/** How many of a given product are already in the cart. */
+function quantityIn(lines: readonly CartLine[]): (productId: string) => number {
+  return (productId) => lines.find((line) => line.productId === productId)?.quantity ?? 0;
+}
+
+/** The catalogue is session-independent, so it is fetched once and shared. */
+function useCatalogue(): { products: readonly Product[]; loading: boolean; error: string | null } {
+  const catalogue = useAsyncData(() => shopApi.products().then((result) => result.products), ['products']);
+  return {
+    products: catalogue.data ?? [],
+    loading: catalogue.data === null,
+    error: catalogue.error,
+  };
+}
+
+function ShopRoute(): ReactNode {
+  const { products, loading, error } = useCatalogue();
+  return (
+    <div className="stack">
+      <div>
+        <h1>Everything here is worth testing</h1>
+        <p className="lede">
+          Each product exists to make the refund assistant show a different behaviour. Buy
+          something, then tell it what went wrong.
+        </p>
+      </div>
+      {error !== null ? <p className="error">{error}</p> : null}
+      {loading ? <Spinner /> : <Catalogue products={products} onAdd={addToCart} inCart={quantityIn(cartLines())} />}
     </div>
   );
 }
 
-/** Only rendered when a session exists, so the button has something to end. */
-function SignOutControl(): ReactNode {
-  const token = useSyncExternalStore(onStaffTokenChange, staffToken, () => null);
-
-  if (token === null) {
-    return null;
+function CartRoute(): ReactNode {
+  const { products, loading } = useCatalogue();
+  const session = useSession();
+  const navigate = useNavigate();
+  if (loading) {
+    return <Spinner />;
   }
   return (
-    <button type="button" className="linkish" onClick={clearStaffToken}>
-      Sign out
-    </button>
+    <Cart
+      products={products}
+      lines={cartLines()}
+      signedIn={session.user !== null}
+      onClear={clearCart}
+      onPlaced={() => void navigate('/orders')}
+    />
   );
 }
 
-/** Friendly model status badge. */
-function ProviderBadge(): ReactNode {
-  const [status, setStatus] = useState<{ label: string; detail?: string | undefined }>({
-    label: 'Loading…',
-  });
-
-  useEffect(() => {
-    void api
-      .health()
-      .then((result) => {
-        const mode = result.aiMode;
-        if (mode.startsWith('unconfigured')) {
-          // Extract missing key from "unconfigured (KEY missing)"
-          const match = mode.match(/unconfigured \(([^)]+)\)/);
-          const key = match ? match[1] : 'AI provider key';
-          setStatus({ label: 'No model configured', detail: `Set ${key} to enable AI` });
-        } else if (mode.startsWith('local')) {
-          setStatus({ label: 'Local pattern matcher', detail: 'Demo mode — no AI provider' });
-        } else {
-          const parts = mode.split(' (');
-          const provider = parts[0] ?? 'Unknown';
-          const rawModel = parts[1];
-          if (rawModel) {
-            setStatus(() => ({ label: provider, detail: rawModel.replace(')', '') }));
-          } else {
-            setStatus(() => ({ label: provider }));
-          }
-        }
-      })
-      .catch(() => setStatus({ label: 'API unreachable', detail: 'Health check failed' }));
-  }, []);
-
-  const tooltip = status.detail ?? '';
-
+function OrdersRoute(): ReactNode {
+  const session = useSession();
+  const navigate = useNavigate();
+  const orders = useAsyncData(() => shopApi.orders(), ['orders']);
+  if (orders.data === null) {
+    return <Spinner />;
+  }
   return (
-    <span className="provider" title={tooltip}>
-      <span className={status.label.startsWith('No model') || status.label.startsWith('API') ? 'warn' : ''}>
-        {status.label}
-      </span>
-    </span>
+    <Orders
+      orders={orders.data.orders}
+      signedIn={session.user !== null}
+      onRefill={refillCart}
+      onBrowse={() => void navigate('/')}
+    />
+  );
+}
+
+function AccountRoute(): ReactNode {
+  const session = useSession();
+  return (
+    <AccountPage
+      session={session}
+      onSignedIn={() => {
+        // The session changed, so anything keyed to it is re-read on next mount.
+        void session.refresh();
+      }}
+    />
   );
 }

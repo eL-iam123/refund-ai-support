@@ -21,25 +21,43 @@ export function DashboardPage(): ReactNode {
   if (state.status === 'loading') {
     return <Loading label="Loading stats…" />;
   }
-  return <Overview stats={state.value} />;
+  return (
+    <>
+      <AiStatusBanner stats={state.value} />
+      <Overview stats={state.value} />
+    </>
+  );
+}
+
+/**
+ * Whether a model is actually behind this, said where a reviewer will see it.
+ *
+ * Every other number on this page is a result, and all of them keep arriving
+ * perfectly when the model is unreachable - the policy still decides, requests
+ * still get answered, the dashboard still fills in. That is the trap: nothing
+ * here looks broken, so a deployment can be paying for a model it never reaches
+ * and the only evidence is that a lot of requests escalated. This is the one
+ * element on the page that reports the health of the thing doing the reading
+ * rather than the outcome of the reading.
+ */
+function AiStatusBanner({ stats }: { stats: AdminStatsDto }): ReactNode {
+  if (stats.aiAvailable) {
+    return null;
+  }
+  return (
+    <div className="error-note" role="alert">
+      <strong>No model is connected.</strong>{' '}
+      {stats.aiUnavailableReason ?? 'The configured provider has no API key.'} Requests are not
+      being read by a model - they are escalated to a person instead, which is the safe outcome but
+      not the one you are paying for. Set the provider key in <code>.env</code> and restart; see
+      the Configuration section of the README.
+    </div>
+  );
 }
 
 function Overview({ stats }: { stats: AdminStatsDto }): ReactNode {
-  const aiLabel = (() => {
-    const mode = stats.aiMode;
-    if (mode.startsWith('unconfigured')) {
-      const match = mode.match(/unconfigured \(([^)]+)\)/);
-      const key = match ? match[1] : 'AI provider key';
-      return `No model — set ${key} to enable AI`;
-    }
-    if (mode.startsWith('local')) {
-      return 'Local pattern matcher (demo)';
-    }
-    return mode;
-  })();
-
   return (
-    <Panel title="Overview" action={<span className="muted">{aiLabel}</span>}>
+    <Panel title="Overview">
       <div className="tiles">
         <Tile label="Requests" value={String(stats.total)} />
         <Tile label="Approved" value={String(stats.byDecision.approved ?? 0)} tone="approved" />

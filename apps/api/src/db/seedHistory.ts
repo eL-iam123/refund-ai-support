@@ -38,6 +38,19 @@ function createdAt(now: Date, daysAgo: number, hour: number): string {
   return at.toISOString();
 }
 
+/** Seeded rows carry a real fingerprint so a seeded customer re-asking is recognised as a repeat. */
+function messageFingerprint(message: string): string {
+  return createHash('sha256')
+    .update(
+      message
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, '')
+        .replace(/\s+/gu, ' ')
+        .trim(),
+    )
+    .digest('hex');
+}
+
 function messageHash(message: string): string {
   return createHash('sha256').update(message).digest('hex');
 }
@@ -69,6 +82,7 @@ function rowFor(scenario: Scenario, requestId: string, createdAt: string): NewRe
     refundAmountCents: scenario.expectedAmountCents,
     eligibleAmountCents: scenario.expectedAmountCents,
     messageSha256: messageHash(scenario.message),
+    messageFingerprint: messageFingerprint(scenario.message),
     summary: `${scenario.goal} (${scenario.id})`,
     policyRef: 'REFUND_POLICY.md',
     traceJson: JSON.stringify(trace),

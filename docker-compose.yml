@@ -26,6 +26,11 @@ services:
       # Vite dev servers. Empty in production is correct, not an oversight.
       CORS_ORIGIN: ${CORS_ORIGIN:-}
       AI_PROVIDER: ${AI_PROVIDER:-groq}
+      # Unset means "required in production, tolerated in development", so a
+      # reviewer who clones this and runs `docker compose up` gets a working
+      # product without credentials, and a deployment that has to be the model
+      # cannot start without one. Set to true to demand a key here too.
+      AI_REQUIRED: ${AI_REQUIRED:-}
       AI_MODEL: ${AI_MODEL:-}
       AI_FALLBACK_MODELS: ${AI_FALLBACK_MODELS:-}
       AI_BASE_URL: ${AI_BASE_URL:-}

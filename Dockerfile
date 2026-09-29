@@ -26,7 +26,6 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
-COPY apps/shop/package.json apps/shop/
 COPY packages/shared/package.json packages/shared/
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm install --frozen-lockfile
@@ -38,13 +37,11 @@ COPY tsconfig.base.json tsconfig.json ./
 COPY packages/shared packages/shared
 COPY apps/api apps/api
 COPY apps/web apps/web
-COPY apps/shop apps/shop
 # The API resolves the two client builds by walking up from its own dist
 # directory, so the workspace layout has to be reproduced in the image.
 RUN pnpm build \
     && test -f apps/api/dist/index.js \
-    && test -f apps/web/dist/index.html \
-    && test -f apps/shop/dist/index.html
+    && test -f apps/web/dist/index.html
 
 # --- prod-deps: the runtime install, without devDependencies ------------------
 # A separate install rather than a prune of the build stage: pruning a pnpm
@@ -60,7 +57,6 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
-COPY apps/shop/package.json apps/shop/
 COPY packages/shared/package.json packages/shared/
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     pnpm install --frozen-lockfile --prod
@@ -82,17 +78,14 @@ RUN apt-get update \
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=prod-deps /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=prod-deps /app/apps/web/node_modules ./apps/web/node_modules
-COPY --from=prod-deps /app/apps/shop/node_modules ./apps/shop/node_modules
 COPY --from=prod-deps /app/packages/shared/node_modules ./packages/shared/node_modules
 COPY package.json pnpm-lock.yaml ./
 COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
-COPY apps/shop/package.json apps/shop/
 COPY packages/shared/package.json packages/shared/
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist
 COPY --from=build /app/apps/web/dist ./apps/web/dist
-COPY --from=build /app/apps/shop/dist ./apps/shop/dist
 # Policy and audit source, so a reviewer can read the rules that produced a
 # decision without checking out the repository the container was built from.
 COPY REFUND_POLICY.md ./

@@ -161,6 +161,13 @@ export function LocalAnalyzer(): AIAnalyzer {
   return {
     label: 'local (heuristic)',
     model: MODEL,
+    // Available, but never described as a model. The storefront's status line
+    // says "no model configured" for a keyless deployment and "Model: local
+    // (heuristic)" for this, which keeps the two visibly distinct - substituting
+    // a pattern matcher for a provider while showing the same healthy status is
+    // exactly the silent degradation this class exists to avoid.
+    available: true,
+    unavailableReason: null,
     analyze(input, observer) {
       return Promise.resolve(analyzeWithHeuristics(input, observer));
     },

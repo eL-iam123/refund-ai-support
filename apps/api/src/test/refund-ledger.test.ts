@@ -76,6 +76,7 @@ function approvedRequestRow(fixture: Fixture, amountCents: number, requestId = R
     orderId: fixture.orderId,
     message: 'fixture claim',
     messageSha256: '0'.repeat(64),
+    messageFingerprint: '0'.repeat(64),
     decision: 'approved',
     refundAmountCents: amountCents,
     eligibleAmountCents: amountCents,

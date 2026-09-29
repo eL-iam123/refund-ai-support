@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { describe, money, shopApi, type Product, type ShopOrder } from './api';
 import { CartSummary } from './Account';
-import type { CartLine } from './hooks';
+import type { CartLine } from './cartStore';
 
 /**
  * Cart and checkout.

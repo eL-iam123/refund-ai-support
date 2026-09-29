@@ -56,7 +56,15 @@ export interface ShopOrder {
   readonly paymentState: string;
   readonly trackingStatus: string;
   readonly totalCents: number;
-  readonly items: readonly { name: string; quantity: number; unitPriceCents: number }[];
+  readonly items: readonly {
+    /** The order line. A return is filed against this, not against a product. */
+    readonly itemId: string;
+    /** Null when the line's product has since left the catalogue. */
+    readonly productId: string | null;
+    readonly name: string;
+    readonly quantity: number;
+    readonly unitPriceCents: number;
+  }[];
 }
 
 const MAX_QUANTITY = 10;
@@ -192,53 +200,11 @@ export function checkout(db: Db, customerId: string, lines: readonly CartLine[],
   const orderId = `ORD-${randomUUID()}`;
 
   return db.transaction((): ShopOrder => {
-    let total = 0;
-    const priced: { product: Product; quantity: number }[] = [];
-
-    for (const line of requested) {
-      const product = findProduct(db, line.productId);
-      if (product === null) {
-        throw new ShopAuthError(`no such product: ${line.productId}`);
-      }
-      if (product.stock < line.quantity) {
-        throw new ShopAuthError(`only ${product.stock} of ${product.name} left`);
-      }
-      total += product.priceCents * line.quantity;
-      priced.push({ product, quantity: line.quantity });
-    }
-
-    db.prepare(
-      `INSERT INTO orders (
-         id, customer_id, placed_at, delivered_at, status, payment_state, refunded_cents,
-         is_subscription, tracking_status, signed_by_customer, condition_at_delivery
-       ) VALUES (?, ?, ?, NULL, 'placed', 'paid', 0, ?, 'processing', 0, NULL)`,
-    ).run(orderId, customerId, now.toISOString(), priced.some((l) => l.product.isSubscription) ? 1 : 0);
-
-    for (const { product, quantity } of priced) {
-      db.prepare(
-        `INSERT INTO order_items (
-           id, order_id, name, unit_price_cents, quantity, final_sale, digital, downloaded
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-      ).run(
-        `ITM-${randomUUID()}`,
-        orderId,
-        product.name,
-        product.priceCents,
-        quantity,
-        product.finalSale ? 1 : 0,
-        product.digital ? 1 : 0,
-      );
-      // The `stock >= ?` guard makes overselling impossible even if some future
-      // path reaches this loop without the merge above: the update simply
-      // matches no rows, and the whole transaction rolls back.
-      const decremented = db
-        .prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?')
-        .run(quantity, product.id, quantity);
-      if (decremented.changes !== 1) {
-        throw new ShopAuthError(`${product.name} just sold out`);
-      }
-
-    }
+    const priced = priceCart(db, requested);
+    insertOrder(db, orderId, customerId, priced, now);
+    // Collected as they are inserted, because the line id is generated here and
+    // the response has to name the same rows the next return request will.
+    const items = priced.map((line) => insertOrderItem(db, orderId, line));
 
     return {
       id: orderId,
@@ -246,17 +212,89 @@ export function checkout(db: Db, customerId: string, lines: readonly CartLine[],
       status: 'placed',
       paymentState: 'paid',
       trackingStatus: 'processing',
-      totalCents: total,
-      items: priced.map(({ product, quantity }) => ({
-        name: product.name,
-        quantity,
-        unitPriceCents: product.priceCents,
-      })),
+      totalCents: priced.reduce((sum, line) => sum + line.product.priceCents * line.quantity, 0),
+      items,
     };
   })();
 }
 
+interface PricedLine {
+  readonly product: Product;
+  readonly quantity: number;
+}
+
+/** Resolves every requested line to a real product with stock behind it. */
+function priceCart(db: Db, requested: readonly CartLine[]): PricedLine[] {
+  return requested.map((line) => {
+    const product = findProduct(db, line.productId);
+    if (product === null) {
+      throw new ShopAuthError(`no such product: ${line.productId}`);
+    }
+    if (product.stock < line.quantity) {
+      throw new ShopAuthError(`only ${product.stock} of ${product.name} left`);
+    }
+    return { product, quantity: line.quantity };
+  });
+}
+
+function insertOrder(db: Db, orderId: string, customerId: string, priced: readonly PricedLine[], now: Date): void {
+  const isSubscription = priced.some((line) => line.product.isSubscription) ? 1 : 0;
+  db.prepare(
+    `INSERT INTO orders (
+       id, customer_id, placed_at, delivered_at, status, payment_state, refunded_cents,
+       is_subscription, tracking_status, signed_by_customer, condition_at_delivery
+     ) VALUES (?, ?, ?, NULL, 'placed', 'paid', 0, ?, 'processing', 0, NULL)`,
+  ).run(orderId, customerId, now.toISOString(), isSubscription);
+}
+
+/**
+ * Inserts one order line and decrements stock, or throws and unwinds the order.
+ *
+ * The `stock >= ?` guard makes overselling impossible even if some future path
+ * reaches this without `mergeLines` first: the update simply matches no rows,
+ * and the surrounding transaction rolls the whole order back.
+ */
+function insertOrderItem(
+  db: Db,
+  orderId: string,
+  line: PricedLine,
+): { readonly itemId: string; readonly productId: string; readonly name: string; readonly quantity: number; readonly unitPriceCents: number } {
+  const itemId = `ITM-${randomUUID()}`;
+  const { product, quantity } = line;
+
+  db.prepare(
+    `INSERT INTO order_items (
+       id, order_id, product_id, name, unit_price_cents, quantity, final_sale, digital, downloaded
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+  ).run(
+    itemId,
+    orderId,
+    product.id,
+    product.name,
+    product.priceCents,
+    quantity,
+    product.finalSale ? 1 : 0,
+    product.digital ? 1 : 0,
+  );
+
+  const decremented = db
+    .prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?')
+    .run(quantity, product.id, quantity);
+  if (decremented.changes !== 1) {
+    throw new ShopAuthError(`${product.name} just sold out`);
+  }
+
+  return {
+    itemId,
+    productId: product.id,
+    name: product.name,
+    quantity,
+    unitPriceCents: product.priceCents,
+  };
+}
+
 interface OrderItemRow {
+  id: string;
   name: string;
   quantity: number;
   unit_price_cents: number;
@@ -274,7 +312,9 @@ export function listOrdersForCustomer(db: Db, customerId: string): readonly Shop
     tracking_status: string;
   }[];
 
-  const itemsFor = db.prepare('SELECT name, quantity, unit_price_cents FROM order_items WHERE order_id = ?');
+  const itemsFor = db.prepare(
+    'SELECT id, name, quantity, unit_price_cents FROM order_items WHERE order_id = ?',
+  );
   return orders.map((order) => {
     const items = itemsFor.all(order.id) as OrderItemRow[];
     return {
@@ -285,10 +325,33 @@ export function listOrdersForCustomer(db: Db, customerId: string): readonly Shop
       trackingStatus: order.tracking_status,
       totalCents: items.reduce((sum, item) => sum + item.unit_price_cents * item.quantity, 0),
       items: items.map((item) => ({
+        // The order line's own id, not the catalogue product id.
+        //
+        // These are different things and conflating them is a real bug: a line
+        // is a row in *this* order, and it is the unit a return is filed
+        // against. `productId` is a best-effort back-reference to the catalogue,
+        // resolved by name, and it is null for a delisted product - so a page
+        // that keys a selection by `productId` has two failure modes, both
+        // bad. Two lines that name the same product share one key, so ticking
+        // either ticks both; and an order that names a product twice cannot be
+        // returned at all, because the second line is unreachable.
+        itemId: item.id,
+        // `order_items` snapshots the name, not the product id, so a historical
+        // line is matched back to the catalogue by name for "buy again". A
+        // missing match is reported honestly as a null id rather than guessed:
+        // the client then leaves that line out of the refill instead of
+        // re-ordering whatever happens to share a name.
+        productId: productIdFor(db, item.name),
         name: item.name,
         quantity: item.quantity,
         unitPriceCents: item.unit_price_cents,
       })),
     };
   });
+}
+
+/** Resolves a catalogue product by its name, or null if it has been delisted. */
+function productIdFor(db: Db, name: string): string | null {
+  const row = db.prepare('SELECT id FROM products WHERE name = ?').get(name) as { id: string } | undefined;
+  return row?.id ?? null;
 }

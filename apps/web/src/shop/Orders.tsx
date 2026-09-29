@@ -1,170 +1,205 @@
 import { useState, type ReactNode } from 'react';
-import { describe, money, shopApi, type Decision, type ShopOrder } from './api';
+import { useNavigate } from 'react-router-dom';
+import { AlertCircle, RefreshCw } from 'lucide-react';
+import { money, type ShopOrder } from './api';
+import { REASONS, reasonFor } from './issueReasons';
+import type { CartLine } from './cartStore';
 
 /**
- * Checkout and order history.
+ * Order history, and the two things a shopper wants from it.
  *
- * The important part of this page is `ReportProblem`: it posts to the real
- * `/api/chat/messages` endpoint, so a shopper testing the storefront is
- * exercising the same grounding, rule and money logic as the staff console, on
- * an order that genuinely exists.
+ * Both actions exist because the storefront is the only way to get a real order
+ * to test a refund against. "Buy again" refills the cart with the same lines,
+ * and "report an issue" carries the order into the assistant.
+ *
+ * The handoff is a query string rather than router state. That is a small thing
+ * with a real consequence: router state dies on a refresh, so a shopper who
+ * picked a reason, landed in the assistant, realised they meant to add the
+ * delivery date, and pressed reload would arrive at a blank composer with no
+ * explanation. A URL survives that, and can be pasted to a colleague.
  */
 export function Orders({
   orders,
-  user,
-  onBought,
+  signedIn,
+  onRefill,
+  onBrowse,
 }: {
   orders: readonly ShopOrder[];
-  user: string | null;
-  onBought: () => void;
+  signedIn: boolean;
+  onRefill: (lines: readonly CartLine[]) => void;
+  onBrowse: () => void;
 }): ReactNode {
-  if (user === null) {
-    return <p className="muted">Sign in to see your orders.</p>;
+  if (!signedIn) {
+    return (
+      <section className="card">
+        <h1>Your orders</h1>
+        <p className="muted">Sign in to see what you have bought.</p>
+        <button type="button" onClick={onBrowse}>
+          Back to the shop
+        </button>
+      </section>
+    );
   }
   if (orders.length === 0) {
     return (
-      <p className="muted">
-        You have not bought anything yet. <button type="button" onClick={onBought}>Browse the shop</button>
-      </p>
+      <section className="card">
+        <h1>Your orders</h1>
+        <p className="muted">Nothing yet.</p>
+        <button type="button" onClick={onBrowse}>
+          Start shopping
+        </button>
+      </section>
     );
   }
-
   return (
-    <div className="orders">
+    <div className="stack">
+      <h1>Your orders</h1>
       {orders.map((order) => (
-        <OrderCard key={order.id} order={order} customerId={user} />
+        <OrderCard key={order.id} order={order} onRefill={onRefill} />
       ))}
     </div>
   );
 }
 
-function OrderCard({ order, customerId }: { order: ShopOrder; customerId: string }): ReactNode {
+/** When it was bought and where it got to. Facts, not status vocabulary. */
+function OrderMeta({ order }: { order: ShopOrder }): ReactNode {
   return (
-    <article className="card wide">
+    <p className="muted small">
+      Placed {new Date(order.placedAt).toLocaleDateString()} · payment {order.paymentState} ·
+      delivery {order.trackingStatus}
+    </p>
+  );
+}
+
+function OrderCard({
+  order,
+  onRefill,
+}: {
+  order: ShopOrder;
+  onRefill: (lines: readonly CartLine[]) => void;
+}): ReactNode {
+  const navigate = useNavigate();
+  const [reporting, setReporting] = useState(false);
+
+  /**
+   * Only lines that still map to a catalogue product are refilled. A product
+   * that has since been delisted keeps its history but cannot be re-bought, and
+   * saying so is better than silently re-ordering something else.
+   *
+   * The filter is what narrows the type too, so the `as string` below is
+   * narrowing a type the compiler has already been told is safe rather than
+   * asserting past a null it has not checked.
+   */
+  const buyable = order.items.filter((item) => item.productId !== null);
+  const gone = order.items.length - buyable.length;
+
+  const refill = (): void =>
+    onRefill(
+      buyable.map((item) => ({
+        productId: item.productId === null ? '' : item.productId,
+        quantity: item.quantity,
+      })),
+    );
+
+  return (
+    <article className="card">
       <header className="row">
-        <h3 className="mono">{order.id.slice(0, 22)}…</h3>
-        <span className={`pill pill-${order.status}`}>{order.status}</span>
-        <span className="num">{money(order.totalCents)}</span>
+        <span className={`pill pill-${order.status}`}>{order.status.replace(/_/g, ' ')}</span>
+        <strong className="num">{money(order.totalCents)}</strong>
       </header>
-      <p className="muted">
-        placed {new Date(order.placedAt).toLocaleDateString()} · payment {order.paymentState} ·
-        tracking {order.trackingStatus}
-      </p>
+      <p className="mono small">{order.id}</p>
+      <OrderMeta order={order} />
+
       <ul className="lines">
-        {order.items.map((item) => (
-          <li key={item.name}>
+        {order.items.map((item, index) => (
+          <li key={`${item.name}-${index}`}>
             <span>
-              {item.name} &times; {item.quantity}
+              {item.name} <span className="muted">x{item.quantity}</span>
             </span>
             <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
           </li>
         ))}
       </ul>
-      <ReportProblem order={order} customerId={customerId} />
+
+      <div className="row">
+        <button type="button" className="btn-secondary" disabled={buyable.length === 0} onClick={refill}>
+          <RefreshCw size={16} /> Buy again
+        </button>
+        <button type="button" className="btn-primary" onClick={() => setReporting(true)}>
+          <AlertCircle size={16} /> Report an issue
+        </button>
+      </div>
+      {gone > 0 ? <p className="muted small">{gone} item(s) no longer in the catalogue.</p> : null}
+
+      {reporting ? (
+        <IssuePicker
+          order={order}
+          onCancel={() => setReporting(false)}
+          onSubmit={(issueId) => {
+            setReporting(false);
+            void navigate(`/help?order=${encodeURIComponent(order.id)}&issue=${encodeURIComponent(issueId)}`);
+          }}
+        />
+      ) : null}
     </article>
   );
 }
 
 /**
- * The refund request form.
+ * Picking a reason is enough to continue.
  *
- * `customerId` is sent because the endpoint requires it, and the server replaces
- * it with the signed-in customer when a session cookie is present. The warning
- * below is not decoration: without a session, that field is believed, which is
- * the one thing a tester should know before poking at the public chat endpoint.
+ * The button used to stay greyed out until a message was typed as well, which
+ * read as a broken picker: you choose "arrived damaged", the button does
+ * nothing, and there is no hint that the real requirement was a free-text box
+ * underneath it. So the choice is the whole form, and the wording it produces
+ * is a draft on the next screen that the shopper can still edit.
  */
-function ReportProblem({ order, customerId }: { order: ShopOrder; customerId: string }): ReactNode {
-  const [open, setOpen] = useState(false);
-  const [message, setMessage] = useState('');
-  const [decision, setDecision] = useState<Decision | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  if (!open) {
-    return (
-      <button type="button" onClick={() => setOpen(true)}>
-        Report a problem with this order
-      </button>
-    );
-  }
+function IssuePicker({
+  order,
+  onCancel,
+  onSubmit,
+}: {
+  order: ShopOrder;
+  onCancel: () => void;
+  onSubmit: (issueId: string) => void;
+}): ReactNode {
+  const [selected, setSelected] = useState<string>('');
 
   return (
     <form
-      className="report"
+      className="issue-picker"
       onSubmit={(event) => {
         event.preventDefault();
-        setBusy(true);
-        setError(null);
-        void shopApi
-          .requestRefund({ customerId, orderId: order.id, message })
-          .then((response) => setDecision(response.request.decision))
-          .catch((cause: unknown) => setError(describe(cause)))
-          .finally(() => setBusy(false));
+        // Guarded rather than trusted: `selected` is client state, and a form
+        // submit with nothing chosen would otherwise navigate to `issue=`.
+        if (reasonFor(selected) !== undefined) {
+          onSubmit(selected);
+        }
       }}
     >
-      <label htmlFor={`problem-${order.id}`}>What went wrong?</label>
-      <textarea
-        id={`problem-${order.id}`}
-        rows={3}
-        value={message}
-        placeholder="The lamp arrived with a cracked shade."
-        onChange={(event) => setMessage(event.target.value)}
-      />
+      <h2 className="label">What is wrong with {order.id}?</h2>
+      <div className="issue-list">
+        {REASONS.map((issue) => (
+          <label key={issue.id} className="issue-option">
+            <input
+              type="radio"
+              name={`issue-${order.id}`}
+              value={issue.id}
+              checked={selected === issue.id}
+              onChange={() => setSelected(issue.id)}
+            />
+            <span>{issue.label}</span>
+          </label>
+        ))}
+      </div>
       <div className="row">
-        <button type="submit" disabled={busy || message.trim().length === 0}>
-          {busy ? 'Checking…' : 'Ask for a refund'}
+        <button type="submit" className="btn-primary" disabled={selected.length === 0}>
+          Continue
         </button>
-        <button type="button" className="linkish" onClick={() => setOpen(false)}>
+        <button type="button" className="btn-secondary" onClick={onCancel}>
           Cancel
         </button>
       </div>
-      {decision !== null && <DecisionPanel decision={decision} />}
-      {error !== null && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-      <p className="muted small">
-        Sent to the same decision engine the staff console uses, on this real order. A refusal names
-        the rule that refused it.
-      </p>
     </form>
   );
-}
-
-function DecisionPanel({ decision }: { decision: Decision }): ReactNode {
-  return (
-    <div className={`decision decision-${decision.decision}`}>
-      <p className="row">
-        <strong className={`pill pill-${decision.decision}`}>{decision.decision}</strong>
-        <span className="mono small">{decision.policyRef}</span>
-        <span className="num">{amountLine(decision)}</span>
-      </p>
-      <p className="small muted">{decision.summary}</p>
-      {decision.decision === 'approved' ? (
-        <p className="small muted">
-          Approved, and held against your order so nothing else can be claimed on it. A member of
-          the team checks it before the money is sent — nothing is paid out automatically, and you
-          will see the payment on this order once they have.
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * The one number a shopper actually cares about.
- *
- * An approval says what has been *agreed*, not what has been paid: the amount
- * waits on a human check before any money moves, and copy that said "refunded"
- * would be promising a payment the system has not made. Anything other than an
- * approval says plainly that nothing is payable and how much was at stake,
- * because "declined, $0.00" on its own reads like an error rather than a
- * decision.
- */
-function amountLine(decision: Decision): string {
-  if (decision.decision === 'approved') {
-    return `${money(decision.refundAmountCents)} approved, awaiting payment`;
-  }
-  return `nothing payable · ${money(decision.eligibleAmountCents)} was at stake`;
 }

@@ -2,6 +2,8 @@ import { authHeaders } from './auth';
 import type {
   RefundDto,
   AdminStatsDto,
+  AuditChainDto,
+  AuditEventDto,
   CustomerDto,
   OverrideDecision,
   OrderDto,
@@ -105,11 +107,42 @@ function post<T>(path: string, body: unknown): Promise<T> {
   return request<T>(path, { method: 'POST', body: JSON.stringify(body) });
 }
 
-export const api = {
-  health: (): Promise<{ status: string; aiMode: string }> => request('/api/health'),
+/** Where a return's current status leads. Terminal states are absent by design. */
+/** Where a return's current status leads. Terminal states are absent by design. */
+export interface DuplicateNotice {
+  /** The request that already existed, which is the one that was returned. */
+  readonly ofRequestId: string;
+  readonly firstReportedAt: string;
+  readonly firstDecision: string;
+}
 
+export interface AuditFilter {
+  readonly kind?: string;
+  readonly requestId?: string;
+  readonly since?: string;
+  readonly q?: string;
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
+/** One page of the audit log, plus the verdict over the whole chain. */
+export interface AuditPage {
+  readonly events: readonly AuditEventDto[];
+  readonly total: number;
+  readonly kinds: readonly string[];
+  readonly audit: AuditChainDto;
+}
+
+export const api = {
+  health: (): Promise<{ status: string }> => request('/api/health'),
+
+  /**
+   * Sends a message. `duplicate` is present only when the server recognised a
+   * repeat and returned the earlier request instead of creating one - a 200
+   * rather than a 201 in that case, so the two are not interchangeable.
+   */
   sendMessage: (input: { customerId: string; orderId: string | null; message: string }) =>
-    post<{ request: RefundRequestDto }>('/api/chat/messages', input),
+    post<{ request: RefundRequestDto; duplicate?: DuplicateNotice }>('/api/chat/messages', input),
 
   listRequests: (params: RequestFilter = {}) =>
     request<{ requests: RefundRequestSummaryDto[] }>(`/api/requests${queryString(params)}`),
@@ -140,7 +173,35 @@ export const api = {
 
   releaseRefund: (id: string, reason: string): Promise<{ refund: RefundDto }> =>
     post(`/api/refunds/${id}/release`, { reason }),
+
+  /**
+   * The audit trail, with the chain verdict from the same read.
+   *
+   * Not split into "fetch events" and "verify chain" calls: a log that shows
+   * rows from one moment and an integrity badge from another can be wrong in the
+   * dangerous direction, appearing intact over rows written after the check.
+   */
+  audit: (filter: AuditFilter = {}): Promise<AuditPage> =>
+    request(`/api/admin/audit${auditQueryString(filter)}`),
 };
+
+function auditQueryString(filter: AuditFilter): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of [
+    ['kind', filter.kind],
+    ['requestId', filter.requestId],
+    ['since', filter.since],
+    ['q', filter.q],
+    ['limit', filter.limit],
+    ['offset', filter.offset],
+  ] as const) {
+    if (value !== undefined && value !== null && String(value).length > 0) {
+      search.set(key, String(value));
+    }
+  }
+  const encoded = search.toString();
+  return encoded.length > 0 ? `?${encoded}` : '';
+}
 
 function queryString(params: RequestFilter): string {
   const search = new URLSearchParams();

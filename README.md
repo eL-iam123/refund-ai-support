@@ -1,4 +1,4 @@
-# WORKNOON — Refund AI Support
+# Refund AI Support
 
 A customer-support refund agent for a fictional electronics retailer. Customers
 describe a problem in their own words; the system decides whether to refund, refuse,
@@ -167,9 +167,14 @@ apps/api            Fastify 5 + SQLite (better-sqlite3)
   src/shop/         storefront accounts, catalogue, checkout
   src/http/         routes, serialization, error mapping
   src/response/     deterministic customer replies
-apps/web            React 19 + Vite + react-router 7   (staff console, token-gated)
-apps/shop           React 19 + Vite                     (storefront, /shop)
+apps/web            React 19 + Vite + react-router 7   (storefront and staff console)
 ```
+
+One client, not two. The storefront and the staff console are different audiences
+with different trust levels, but they are the same origin and the same code - the
+console is behind a token gate, the shop behind a session cookie - and splitting
+them into separate apps only bought a second build, a second deploy and a second
+thing to fall out of date with the first.
 
 ### The pipeline
 
@@ -212,27 +217,77 @@ Four separate mechanisms, not one convention:
 
 ## Configuration
 
+**This section is the setup instructions.** `.env` deliberately holds only the
+values you change and a line saying "see README.md" — prose in a file that
+gets copied, pasted and merged tends to rot silently, and a stale comment in
+`.env` is worse than no comment at all.
+
 Validated once at boot with Zod: a misconfigured deployment fails immediately and
 loudly, not at the first customer request.
 
 A `.env` file supplies **defaults**; the real environment **wins**. `API_PORT=8080
 docker run …` is honoured even if a `.env` was baked into the image.
 
+### The two you must set
+
+| Variable | Why |
+|---|---|
+| `ADMIN_API_SECRET` | Signs staff tokens. Without it the server refuses to boot. `openssl rand -hex 32`. Anyone holding it can mint admin tokens, so it is never committed. |
+| `AI_PROVIDER` | Which model to call. `groq` \| `nvidia` \| `openrouter` \| `gemini` \| `anthropic` \| `openai` \| `local` |
+
+Then the key for the provider you chose — `GROQ_API_KEY`, `NVIDIA_API_KEY`, and so
+on. **No key is committed to this repository, and that is deliberate.** A key in
+git is a key in every clone, every image layer and every fork, permanently and
+publicly; the honest fix is a key that is not here.
+
+**A missing key is not an error by default.** The server starts, the assistant
+has no model behind it, every request that needs a claim escalates to a person,
+and the storefront and the staff console both say so plainly. It never falls back
+to guessing: a queued service that escalates is recoverable, a service that
+quietly approves on keyword matches is not.
+
+That default is right for evaluating the product and for an operator mid-fix, and
+wrong for a deployment that is supposed to *be* the model — there, every request
+still succeeds, still escalates, and the dashboard still looks healthy while
+nothing is being read. So there is a switch:
+
+| `AI_REQUIRED` | Effect |
+| --- | --- |
+| unset | Required in production, tolerated in development |
+| `true` | Refuse to start unless the selected provider has a key |
+| `false` | Boot and escalate, even in production |
+
+Set `AI_REQUIRED=true` and a missing key stops the process with a message naming
+the variable and where to set it, rather than becoming a queue nobody is reading.
+It never makes a failure quieter than it already is: the degraded mode already
+logs an error at startup, shows a red banner on the staff dashboard, and records
+the reason against every request it touches.
+
+```
+AI_REQUIRED=true
+```
+
+Nothing else needs setting to run. Every variable below has a default.
+
+### Everything else
+
 | Variable | Default | Notes |
 |---|---|---|
-| `AI_PROVIDER` | `groq` | `groq` \| `nvidia` \| `openrouter` \| `gemini` \| `anthropic` \| `openai` \| `local` |
-| `AI_MODEL` | per provider | Specific model id, **not** a router alias |
-| `AI_FALLBACK_MODELS` | empty | Comma-separated, tried in order |
-| `GROQ_API_KEY` etc. | none | The key for the selected provider. **Optional** — absent means the model is unavailable, not that the server will not start |
+| `AI_MODEL` | per provider | Specific model id, **not** a router alias — see below |
+| `AI_FALLBACK_MODELS` | empty | Comma-separated, tried in order. Failover across models beats retrying one: a rate-limited model usually stays rate-limited |
 | `AI_TIMEOUT_MS` | `30000` | Per attempt |
-| `AI_TOTAL_BUDGET_MS` | `45000` | Whole-request ceiling, including retries |
+| `AI_TOTAL_BUDGET_MS` | `45000` | Whole-request ceiling, including retries and the repair pass. This is the number a customer actually waits, so keep it above the worst observed call |
 | `AI_MAX_ATTEMPTS` | `2` | Attempts per model |
+| `AI_MAX_TOKENS` | `700` | ~5x a valid extraction. Higher is not safer: a model that ignores JSON mode spends the budget on prose and returns nothing parseable |
 | `AI_SHARE_ORDER_FACTS` | `false` | See below |
-| `INJECTION_ACTION` | `deny` | `deny` \| `escalate` |
-| `ADMIN_API_SECRET` | none | **Required.** `openssl rand -hex 32` |
-| `MAX_MESSAGE_LENGTH` | `4000` | Enforced on the request, not by the shared schema |
+| `INJECTION_ACTION` | `deny` | `deny` \| `escalate`. What a detected policy-override attempt does |
+| `MAX_MESSAGE_LENGTH` | `4000` | Enforced on the request, not by the shared schema — it is a token-cost control, so it belongs to the deployment |
+| `DUPLICATE_WINDOW_HOURS` | `72` | How far back a repeat of the same complaint counts as the same report. 72h spans a weekend, which is the commonest case: sent Friday, heard nothing, sent again Monday |
+| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW` | `30` / `1 minute` | |
 | `DATABASE_PATH` | `./data/refund.sqlite` | |
 | `CORS_ORIGIN` | localhost:5173,8080 | Comma-separated |
+| `API_PORT` / `API_HOST` / `LOG_LEVEL` / `NODE_ENV` | `4000` / `0.0.0.0` / `info` / `development` | |
+| `WEB_STATIC_DIR` | unset | Only for serving a built client from the API. Unset in dev, where Vite serves it |
 
 ### Two amounts, and only one of them is money
 
@@ -262,8 +317,19 @@ Measured against this pipeline:
 | `llama-3.3-70b-versatile` (Groq) | fast, schema-valid |
 | `gpt-4o-mini` (OpenAI) | fast, schema-valid |
 
+Name a specific model, not a router. OpenRouter's `openrouter/free` was measured
+returning an empty body, and a 2775-character chain of thought truncating mid-JSON,
+because it routes to whatever is healthy and many of those ignore
+`response_format: json_object`. The adapter fails over safely, so this costs a wasted
+round trip rather than correctness — but there is no reason to pay it.
+
 Budget for seconds, not milliseconds. A real generation here is ~11s, which is why
 `AI_TOTAL_BUDGET_MS` sits above the worst observed call.
+
+To see the model working without an account, set `AI_PROVIDER=local`. That is a
+pattern matcher with no key and no network: it exists so the project can be
+demonstrated with nothing configured, and it is refused when `NODE_ENV=production`,
+because a refund approved by a regex is not a decision anyone can audit.
 
 ### `AI_SHARE_ORDER_FACTS`
 
@@ -496,6 +562,13 @@ one is like this.
   `AI_PROVIDER=local` under `NODE_ENV=production` still stop the process, because
   those are choices rather than absences. An empty variable counts as absent, so
   a missing key is reported as a missing key rather than as malformed optional.
+  The one thing that would make a missing key invisible is a deployment paying
+  for a model it never reaches, so `AI_REQUIRED` turns that into a failed boot,
+  and a key is never committed to make the failure go away.
+- **No secret in the repository.** `ADMIN_API_SECRET` and every model key are
+  supplied by the operator. `.env` is gitignored, `.env.example` documents the
+  shape without values, and the compose file reads the key from the environment
+  at container start rather than baking it into a layer.
 - **SQLite, single writer.** The audit chain is sequential by id and the ledger
   assumes one process, so a second replica on the same volume is not a scale-out.
   Everything here is sized for a single-writer deployment.

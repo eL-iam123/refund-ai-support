@@ -3,7 +3,13 @@ import type { LightMyRequestResponse } from 'fastify';
 import { appHarness, scenario, testEnv, TEST_NOW, type AppHarness } from './helpers.js';
 import { seedShop } from '../shop/seed.js';
 import { resolveShopSession, SESSION_COOKIE } from '../shop/auth.js';
-import { checkout, listOrdersForCustomer, listProducts } from '../shop/catalogue.js';
+import {
+  checkout,
+  listOrdersForCustomer,
+  listProducts,
+  type Product,
+  type ShopOrder,
+} from '../shop/catalogue.js';
 import type { RefundDecision } from '@refund/shared';
 
 /**
@@ -20,18 +26,6 @@ import type { RefundDecision } from '@refund/shared';
 interface ErrorBody {
   readonly error: string;
   readonly message: string;
-}
-
-interface Product {
-  readonly id: string;
-  readonly priceCents: number;
-  readonly stock: number;
-}
-
-interface ShopOrder {
-  readonly id: string;
-  readonly totalCents: number;
-  readonly items: readonly { name: string; quantity: number; unitPriceCents: number }[];
 }
 
 describe('storefront', () => {
@@ -294,7 +288,7 @@ describe('storefront', () => {
       // These flags are what the policy rules read, so losing them at checkout
       // would silently turn a final-sale item into a refundable one.
       const { cookie } = await signUp('flags@shop.test');
-      const product = (listProducts(harness.db) as readonly Product[]).find((p) => p.id === 'PRD-JACKET-01');
+      const product = (listProducts(harness.db)).find((p) => p.id === 'PRD-JACKET-01');
       expect(product).toBeDefined();
 
       const { order } = (
@@ -313,14 +307,14 @@ describe('storefront', () => {
 
     it('decrements stock so an item cannot be oversold', async () => {
       const { cookie } = await signUp('stock@shop.test');
-      const before = (listProducts(harness.db) as readonly Product[]).find((p) => p.id === 'PRD-MUG-01');
+      const before = (listProducts(harness.db)).find((p) => p.id === 'PRD-MUG-01');
 
       await call('POST', '/api/shop/checkout', {
         cookie,
         payload: { lines: [{ productId: 'PRD-MUG-01', quantity: 3 }] },
       });
 
-      const after = (listProducts(harness.db) as readonly Product[]).find((p) => p.id === 'PRD-MUG-01');
+      const after = (listProducts(harness.db)).find((p) => p.id === 'PRD-MUG-01');
       expect(after?.stock).toBe((before?.stock ?? 0) - 3);
     });
 
@@ -461,6 +455,72 @@ describe('storefront', () => {
       expect(response.json<{ request: { customerId: string } }>().request.customerId).toBe(
         fixture.customer.key,
       );
+    });
+  });
+
+  describe('order lines are individually addressable', () => {
+    /**
+     * The bug this pins down was a selection that moved every checkbox at once.
+     *
+     * The page keyed its selection by product id, which the shop resolves from
+     * the order line's *name*. Two lines naming the same product therefore shared
+     * one key: ticking either ticked both, and the customer returned five things
+     * when they meant to return one. The fix is that lines are addressed by
+     * `order_items.id`, so the only way to have two lines share a key is for the
+     * database to hand out the same primary key twice.
+     */
+    it('gives every line its own id, even when an order names a product twice', async () => {
+      const { cookie } = await signUp('repeat-buyer@shop.test');
+      const products = listProducts(harness.db).slice(0, 2);
+
+      const { order } = (
+        await call('POST', '/api/shop/checkout', {
+          cookie,
+          payload: { lines: products.map((product) => ({ productId: product.id, quantity: 1 })) },
+        })
+      ).json<{ order: ShopOrder }>();
+
+      const ids = order.items.map((item) => item.itemId);
+      expect(ids).toHaveLength(2);
+      expect(new Set(ids).size).toBe(2);
+      expect(ids.every((id) => id.length > 0)).toBe(true);
+    });
+
+    it('addresses lines that share a product, so one can be returned without the other', async () => {
+      const { cookie } = await signUp('two-lines@shop.test');
+      // One product, two separate lines. `checkout` merges these, so the lines
+      // are written directly - the shape a historical order or an import leaves
+      // behind, and the shape that broke the selection.
+      const product = listProducts(harness.db)[0] as Product;
+      const orderId = 'ORD-REPEAT-LINES';
+      harness.db
+        .prepare(
+          `INSERT INTO orders (id, customer_id, placed_at, delivered_at, status, payment_state,
+             refunded_cents, is_subscription, tracking_status, signed_by_customer, condition_at_delivery)
+           VALUES (?, (SELECT id FROM customers WHERE email = ?), ?, ?, 'delivered', 'captured',
+             0, 0, 'delivered', 1, 'good')`,
+        )
+        .run(orderId, 'two-lines@shop.test', TEST_NOW.toISOString(), TEST_NOW.toISOString());
+
+      const insertLine = harness.db.prepare(
+        `INSERT INTO order_items (id, order_id, product_id, name, unit_price_cents, quantity, final_sale, digital, downloaded)
+         VALUES (?, ?, ?, ?, ?, 1, 0, 0, 0)`,
+      );
+      insertLine.run('ITM-REPEAT-A', orderId, product.id, product.name, product.priceCents);
+      insertLine.run('ITM-REPEAT-B', orderId, product.id, product.name, product.priceCents);
+
+      const listed = (
+        await call('GET', '/api/shop/orders', { cookie })
+      ).json<{ orders: ShopOrder[] }>();
+      const order = listed.orders.find((candidate) => candidate.id === orderId);
+
+      expect(order).toBeDefined();
+      const lines = order?.items ?? [];
+      expect(lines).toHaveLength(2);
+      // Same product behind both, distinct lines in front. This is exactly the
+      // pair that used to collapse into one selectable row.
+      expect(lines[0]?.productId).toBe(lines[1]?.productId);
+      expect(lines[0]?.itemId).not.toBe(lines[1]?.itemId);
     });
   });
 

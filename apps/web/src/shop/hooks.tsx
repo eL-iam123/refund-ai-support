@@ -93,37 +93,6 @@ export function useAsyncData<T>(
   return { data, error, reload: useCallback(() => setNonce((n) => n + 1), []) };
 }
 
-export interface CartLine {
-  readonly productId: string;
-  readonly quantity: number;
-}
-
-export function useCart(): {
-  lines: readonly CartLine[];
-  add: (productId: string) => void;
-  clear: () => void;
-  count: number;
-} {
-  const [lines, setLines] = useState<readonly CartLine[]>([]);
-
-  const add = useCallback((productId: string): void => {
-    setLines((current) => {
-      const existing = current.find((line) => line.productId === productId);
-      if (existing === undefined) {
-        return [...current, { productId, quantity: 1 }];
-      }
-      return current.map((line) =>
-        line.productId === productId ? { ...line, quantity: Math.min(10, line.quantity + 1) } : line,
-      );
-    });
-  }, []);
-
-  const clear = useCallback((): void => setLines([]), []);
-
-  const count = lines.reduce((sum, line) => sum + line.quantity, 0);
-  return { lines, add, clear, count };
-}
-
 export function Spinner(): ReactNode {
   return <p className="muted">Loading…</p>;
 }

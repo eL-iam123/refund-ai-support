@@ -3,8 +3,7 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import cookie from '@fastify/cookie';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { corsOrigins, type Env } from '../config/env.js';
 import { createLogger, type Logger } from '../lib/logger.js';
 import type { Db } from '../db/connection.js';
@@ -15,6 +14,7 @@ import { registerRequestRoutes } from './routes/requests.js';
 import { registerCatalogRoutes } from './routes/catalog.js';
 import { registerShopRoutes } from './routes/shop.js';
 import { registerRefundRoutes } from './routes/refunds.js';
+import { registerReturnsRoutes } from './routes/returns.js';
 import { toErrorResponse, toHttpError } from './errors.js';
 import { registerAuth } from '../auth/guards.js';
 
@@ -23,10 +23,8 @@ export interface BuildAppOptions {
   readonly db: Db;
   /** Overridden in tests so vitest output stays readable. */
   readonly logger?: Logger;
-  /** Directory holding the built staff console, served at `/` when present. */
+  /** Directory holding the built client, served at `/` when present. */
   readonly staticDir?: string;
-  /** Directory holding the built storefront, served at `/shop/` when present. */
-  readonly shopDir?: string;
   /** Injected so tests share the scenario fixtures' fixed "now". */
   readonly now?: () => Date;
   /**
@@ -90,8 +88,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerCatalogRoutes(app, ctx);
   registerShopRoutes(app, ctx);
   registerRefundRoutes(app, ctx);
+  registerReturnsRoutes(app, ctx);
 
-  registerNotFound(app, options.staticDir, options.shopDir);
+  registerNotFound(app, options.staticDir);
   return app;
 }
 
@@ -101,51 +100,22 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
  * conditional: without a built client there is nothing to fall back to, and
  * a browser hitting a missing route should see JSON rather than a bare 404.
  */
-function registerNotFound(
-  app: FastifyInstance,
-  staticDir: string | undefined,
-  shopDir: string | undefined,
-): void {
-  // Both clients are served by the API process in the single-container
-  // deployment; in development Vite serves them and proxies /api here. Serving
-  // the storefront from the same origin is what keeps its session cookie
-  // first-party, which is the whole reason it lives here rather than behind a
-  // separate domain.
+function registerNotFound(app: FastifyInstance, staticDir: string | undefined): void {
+  // One client, one origin. The storefront and the assistant are the same bundle
+  // behind the same topbar, so the session cookie that ties an order to a refund
+  // is first-party and there is no second deployment to keep in step.
   if (staticDir !== undefined && existsSync(staticDir)) {
     void app.register(fastifyStatic, { root: staticDir, wildcard: false });
     app.log.info({ staticDir }, 'static.serving');
   }
-  if (shopDir !== undefined && existsSync(shopDir)) {
-    // `decorateReply: false` so this second registration does not overwrite the
-    // `sendFile` helper installed by the first one.
-    void app.register(fastifyStatic, {
-      root: shopDir,
-      prefix: '/shop/',
-      wildcard: false,
-      decorateReply: false,
-    });
-    app.log.info({ shopDir }, 'shop.serving');
-  }
 
-  const hasConsole = staticDir !== undefined && existsSync(staticDir);
-  // Read once: the SPA shell is immutable for the life of the process, and
-  // `sendFile` cannot address a prefixed root, so the fallback is served from
-  // memory rather than guessed at.
-  const shopShell =
-    shopDir !== undefined && existsSync(shopDir)
-      ? readFileSync(join(shopDir, 'index.html'), 'utf8')
-      : null;
+  const hasClient = staticDir !== undefined && existsSync(staticDir);
 
   app.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith('/api/')) {
       return reply.code(404).send({ error: 'not_found', message: `no route for ${request.url}` });
     }
-    // Checked before the console because a bare `/shop` carries no trailing
-    // slash, and the static prefix would not match it.
-    if (shopShell !== null && (request.url === '/shop' || request.url.startsWith('/shop/'))) {
-      return reply.type('text/html; charset=utf-8').send(shopShell);
-    }
-    if (hasConsole) {
+    if (hasClient) {
       // Client-side routing: any non-API path is the app's own index.html.
       return reply.sendFile('index.html');
     }

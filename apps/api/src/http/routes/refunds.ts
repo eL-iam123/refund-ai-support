@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import { verifyAuditChain } from '../../db/auditChain.js';
+import { auditEventKinds, listAuditEventsPage, verifyAuditChain, type ChainVerdict } from '../../db/auditChain.js';
 import { insertAuditEvent } from '../../db/requestRepository.js';
 import { staffOnly } from '../../auth/guards.js';
 import type { Principal } from '../../auth/tokens.js';
@@ -15,8 +15,25 @@ import {
   REFUND_STATUSES,
   type RefundRecord,
 } from '../../db/refundLedger.js';
+import { findRequestById } from '../../db/requestRepository.js';
+import { recordCustomerUpdate } from '../../db/customerUpdates.js';
+import { followUpFor } from '../../response/followUp.js';
 import { toRefundDto } from '../serialize.js';
-import type { RefundDto } from '@refund/shared';
+import { ListAuditQuerySchema, type AuditChainDto, type RefundDto } from '@refund/shared';
+
+/**
+ * Flattens the chain verdict for the wire.
+ *
+ * The domain type is a discriminated union because that is the honest shape
+ * internally - a failure has a broken row and a reason, a success does not. The
+ * DTO keeps the same information but always present, so a client can render
+ * "checked N rows" without first checking which variant it got.
+ */
+function toChainDto(verdict: ChainVerdict): AuditChainDto {
+  return verdict.ok
+    ? { ok: true, checked: verdict.checked, headHash: verdict.headHash, brokenAtId: null, reason: null }
+    : { ok: false, checked: verdict.checked, headHash: null, brokenAtId: verdict.brokenAtId, reason: verdict.reason };
+}
 
 const RefundIdParams = z.object({ id: z.string().trim().min(1).max(120) });
 
@@ -73,6 +90,44 @@ function audit(ctx: AppContext, requestId: string, at: string, kind: string, det
 }
 
 /**
+ * Tells the customer what just happened to their money.
+ *
+ * Written in the same transaction as the ledger entry it describes, for the same
+ * reason the ledger entry is: a payout that moved with no message to the customer
+ * is a support ticket waiting to happen, and one that sent a message describing
+ * a payout that did not happen is worse.
+ *
+ * The amount comes from the refund record, never from the route, so the message
+ * cannot claim a figure the ledger did not.
+ */
+function notifyCustomer(
+  ctx: AppContext,
+  requestId: string,
+  kind: 'refund_sent' | 'refund_withdrawn',
+  amountCents: number,
+): void {
+  const request = findRequestById(ctx.db, requestId);
+  if (request === null) {
+    return;
+  }
+  recordCustomerUpdate(ctx.db, {
+    customerId: request.customerId,
+    orderId: request.orderId,
+    requestId,
+    kind,
+    body: followUpFor({
+      kind,
+      orderId: request.orderId,
+      previousDecision: request.decision,
+      decision: request.decision,
+      amountCents: request.refundAmountCents,
+      paidCents: amountCents,
+    }),
+    now: ctx.now(),
+  });
+}
+
+/**
  * The verification queue and the identity behind it.
  *
  * Who the console is acting as comes from the same token the server attributes
@@ -100,6 +155,39 @@ function registerRefundReadRoutes(app: FastifyInstance, ctx: AppContext): void {
       ctx.log.error({ brokenAtId: verdict.brokenAtId, reason: verdict.reason }, 'audit.chain.broken');
     }
     return { audit: verdict };
+  });
+
+  /**
+   * The whole trail, for the admin log screen.
+   *
+   * Lives beside `/api/admin/audit/verify` on purpose: both are answers to
+   * "what happened, and can I trust that log", and splitting them across route
+   * files made it easy to update one and forget the other.
+   *
+   * The verdict travels with the events rather than being a second request,
+   * because a log page that renders rows from one moment and a verdict from
+   * another can show "intact" above rows that were written after the check.
+   */
+  app.get('/api/admin/audit', { preHandler: staffOnly(ctx.env.ADMIN_API_SECRET, 'admin', ctx.now) }, (request: FastifyRequest) => {
+    const query = parseOr(ListAuditQuerySchema.safeParse(request.query), 'audit filter');
+    const verdict = verifyAuditChain(ctx.db);
+    if (!verdict.ok) {
+      ctx.log.error({ brokenAtId: verdict.brokenAtId, reason: verdict.reason }, 'audit.chain.broken');
+    }
+    const page = listAuditEventsPage(ctx.db, {
+      kind: query.kind ?? null,
+      requestId: query.requestId ?? null,
+      since: query.since ?? null,
+      q: query.q ?? null,
+      limit: query.limit,
+      offset: query.offset,
+    });
+    return {
+      events: page.events,
+      total: page.total,
+      kinds: auditEventKinds(ctx.db),
+      audit: toChainDto(verdict),
+    };
   });
 
   app.get('/api/refunds', { preHandler: staff }, (request: FastifyRequest) => {
@@ -132,7 +220,10 @@ function settle(ctx: AppContext, id: string, agent: string): { refund: RefundDto
   // that settled with no trace of who authorised it is unreviewable.
   const at = now.toISOString();
   const detail = `${settled.amountCents} cents settled for request ${settled.requestId}`;
-  ctx.db.transaction(() => audit(ctx, settled.requestId, at, 'refund_settled', detail))();
+  ctx.db.transaction(() => {
+    audit(ctx, settled.requestId, at, 'refund_settled', detail);
+    notifyCustomer(ctx, settled.requestId, 'refund_sent', settled.amountCents);
+  })();
 
   ctx.log.info({ refundId: settled.id, agent, amountCents: settled.amountCents }, 'refund.settled');
   return { refund: toRefundDto(settled), auditEvent: { kind: 'refund_settled', detail, at } };
@@ -158,7 +249,10 @@ function release(ctx: AppContext, id: string, body: unknown): { refund: RefundDt
     throw toConflict(error);
   }
 
-  audit(ctx, released.requestId, now.toISOString(), 'refund_released', `${released.amountCents} cents released: ${reason.reason}`);
+  ctx.db.transaction(() => {
+    audit(ctx, released.requestId, now.toISOString(), 'refund_released', `${released.amountCents} cents released: ${reason.reason}`);
+    notifyCustomer(ctx, released.requestId, 'refund_withdrawn', 0);
+  })();
   ctx.log.info({ refundId: released.id, amountCents: released.amountCents }, 'refund.released');
   return { refund: toRefundDto(released) };
 }

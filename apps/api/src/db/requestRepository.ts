@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Db } from './connection.js';
 import { appendAuditEvent } from './auditChain.js';
 import { queryAll, queryOne } from './sql.js';
@@ -14,6 +15,13 @@ export interface NewRequestRow {
   readonly orderId: string | null;
   readonly message: string;
   readonly messageSha256: string;
+  /**
+   * Normalised-message hash. Derived from `message` here rather than accepted
+   * from the caller, because a caller-supplied fingerprint is a caller-supplied
+   * duplicate check - two requests could be made to collide on purpose by
+   * passing the same value, which is the exact case the check exists to catch.
+   */
+  readonly messageFingerprint: string;
   /**
    * The decision union rather than `string`, so the coherence check below is
    * applied to a value the compiler already knows is a decision - and so a typo
@@ -40,13 +48,13 @@ export interface NewRequestRow {
 
 const INSERT_SQL = `
 INSERT INTO refund_requests (
-  id, created_at, customer_id, order_id, message, message_sha256,
+  id, created_at, customer_id, order_id, message, message_sha256, message_fingerprint,
   decision, refund_amount_cents, eligible_amount_cents, summary, policy_ref,
   trace_json, overrides_json, eligible_item_ids_json, blocked_items_json,
   response_text, extraction_json, grounding_json, injection_json,
   ai_mode, llm_called, timings_json, scenario_id
 ) VALUES (
-  @id, @createdAt, @customerId, @orderId, @message, @messageSha256,
+  @id, @createdAt, @customerId, @orderId, @message, @messageSha256, @messageFingerprint,
   @decision, @refundAmountCents, @eligibleAmountCents, @summary, @policyRef,
   @traceJson, @overridesJson, @eligibleItemIdsJson, @blockedItemsJson,
   @responseText, @extractionJson, @groundingJson, @injectionJson,
@@ -172,6 +180,105 @@ export function listRequests(db: Db, filter: ListFilter): PersistedRequest[] {
     filter.limit,
   );
   return rows.map(hydrate);
+}
+
+/**
+ * A prior request from the same customer that looks like this one.
+ *
+ * This exists to stop one customer asking the same question twice and getting
+ * two decisions. Both halves of that matter, and they are the reason the lookup
+ * is this narrow:
+ *
+ *  - `fingerprint` is compared, not the raw text. A customer who retypes the
+ *    same complaint with different spacing, or who hits send twice, produces
+ *    two different strings for one problem. Normalising first is what makes the
+ *    check catch the second send instead of only catching a byte-identical one.
+ *  - The window is a parameter because "the same message again tomorrow" and
+ *    "the same message again next month" are different situations. The first is
+ *    a double-click; the second may be a legitimate new claim after the first
+ *    was denied, and silently swallowing it would be the wrong answer.
+ *
+ * Ordered newest first so the caller can quote the request the customer most
+ * recently made, and limited to the few nearest matches so a long history
+ * cannot turn an intake check into a full-table scan.
+ */
+export interface DuplicateMatch {
+  readonly id: string;
+  readonly orderId: string | null;
+  readonly decision: string;
+  readonly createdAt: string;
+  readonly message: string;
+  readonly refundAmountCents: number;
+}
+
+export function findDuplicateRequests(
+  db: Db,
+  customerId: string,
+  fingerprint: string,
+  sinceIso: string,
+  limit: number,
+): readonly DuplicateMatch[] {
+  // A duplicate is judged on the message. Scoping by order as well would be
+  // stricter, but a customer who names no order in either message is describing
+  // the same situation, and requiring an order match would let them bypass the
+  // check simply by leaving the order out.
+  const rows = queryAll<{
+    id: string;
+    order_id: string | null;
+    decision: string;
+    created_at: string;
+    message: string;
+    refund_amount_cents: number;
+  }>(
+    db.prepare(
+      `SELECT id, order_id, decision, created_at, message, refund_amount_cents
+         FROM refund_requests
+        WHERE customer_id = ?
+          AND message_fingerprint = ?
+          AND created_at >= ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?`,
+    ),
+    customerId,
+    fingerprint,
+    sinceIso,
+    limit,
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    orderId: row.order_id,
+    decision: row.decision,
+    createdAt: row.created_at,
+    message: row.message,
+    refundAmountCents: row.refund_amount_cents,
+  }));
+}
+
+/**
+ * Reduces a message to something two submissions of the same complaint share.
+ *
+ * Case-folded, stripped of punctuation, and whitespace-collapsed, because the
+ * differences between a double send and a genuine second claim are exactly
+ * those - the words are the same. Digits are kept: an order number, an amount,
+ * or a date in the text is usually the part that makes it a distinct claim, and
+ * dropping them would merge two genuinely different complaints about different
+ * orders into one.
+ *
+ * The output is only ever compared, never stored or shown, so a hash is
+ * sufficient - the message itself is already in the row.
+ */
+export function messageFingerprint(message: string): string {
+  return createHash('sha256')
+    .update(
+      message
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, '')
+        .replace(/\s+/gu, ' ')
+        .trim(),
+      'utf8',
+    )
+    .digest('hex');
 }
 
 /**

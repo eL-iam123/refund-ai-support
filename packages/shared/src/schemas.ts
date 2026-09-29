@@ -90,6 +90,51 @@ export const ListRequestsQuerySchema = z.object({
 });
 export type ListRequestsQuery = z.infer<typeof ListRequestsQuerySchema>;
 
+/**
+ * The admin log filter.
+ *
+ * `since` is a plain ISO instant rather than a "7d"/"24h" shorthand: the string
+ * that reaches SQLite has to be comparable against the stored `at` values with
+ * no conversion step, and a shorthand would put that conversion somewhere it
+ * could be forgotten.
+ */
+export const ListAuditQuerySchema = z.object({
+  kind: z.string().max(60).optional(),
+  requestId: z.string().max(80).optional(),
+  since: z.string().max(40).optional(),
+  q: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
+});
+export type ListAuditQuery = z.infer<typeof ListAuditQuerySchema>;
+
+export const AuditEventDtoSchema = z.object({
+  id: z.number().int(),
+  requestId: z.string(),
+  at: z.string(),
+  kind: z.string(),
+  detail: z.string(),
+  prevHash: z.string(),
+  hash: z.string(),
+});
+export type AuditEventDto = z.infer<typeof AuditEventDtoSchema>;
+
+/**
+ * The chain verdict, as a flat object rather than a union.
+ *
+ * `brokenAtId` and `reason` are nullable rather than absent on success, so a
+ * client can read the same two keys either way instead of narrowing on `ok`
+ * first and risking a property read on the wrong shape.
+ */
+export const AuditChainDtoSchema = z.object({
+  ok: z.boolean(),
+  checked: z.number().int(),
+  headHash: z.string().nullable(),
+  brokenAtId: z.number().int().nullable(),
+  reason: z.string().nullable(),
+});
+export type AuditChainDto = z.infer<typeof AuditChainDtoSchema>;
+
 // --- Outbound ---------------------------------------------------------------
 
 export const RuleEvaluationSchema = z.object({
@@ -286,6 +331,64 @@ export const AdminStatsSchema = z.object({
   humanOverrides: z.number().int(),
   aiMode: z.string(),
   averageLatencyMs: z.number().nonnegative(),
+
+  /**
+   * Whether a model is actually configured.
+   *
+   * Reported separately from `aiMode` because a mode label is not an answer to
+   * "is it working": a deployment with no key still produces an `aiMode`, and
+   * that label is the whole reason the dashboard can look healthy while nothing
+   * is being called.
+   */
+  aiAvailable: z.boolean(),
+  aiUnavailableReason: z.string().nullable(),
+
+  /** Money the system has promised but not paid. */
+  pendingVerification: z.object({
+    count: z.number().int(),
+    amountCents: z.number().int(),
+  }),
+  /** Money actually paid out. */
+  settled: z.object({
+    count: z.number().int(),
+    amountCents: z.number().int(),
+  }),
+  /** Reservations given back, with the reason, for the "why is this still claimable" question. */
+  released: z.object({
+    count: z.number().int(),
+    amountCents: z.number().int(),
+  }),
+
+  /** How long the pipeline actually takes, not just its mean. */
+  latency: z.object({
+    averageMs: z.number().nonnegative(),
+    p95Ms: z.number().nonnegative(),
+    maxMs: z.number().nonnegative(),
+  }),
+
+  /** Model attempts by outcome, so a 100% success rate is visibly 100%. */
+  llm: z.object({
+    attempts: z.number().int(),
+    failed: z.number().int(),
+    averageMs: z.number().nonnegative(),
+    promptTokens: z.number().int(),
+    completionTokens: z.number().int(),
+    providers: z.array(z.object({ provider: z.string(), attempts: z.number().int(), failed: z.number().int() })),
+  }),
+
+  /** Which rules are actually deciding things. A rule that never fires is a rule to delete. */
+  topRules: z.array(z.object({ ruleId: z.string(), fired: z.number().int() })),
+
+  /** Requests per day, oldest first, for the sparkline. */
+  daily: z.array(z.object({ day: z.string(), total: z.number().int(), approved: z.number().int(), denied: z.number().int(), escalated: z.number().int() })),
+
+  /** What the model proposed versus what the policy decided. The disagreement count. */
+  clampRate: z.object({
+    /** Requests where the resolver overruled the model's proposed decision or amount. */
+    clamped: z.number().int(),
+    /** Requests where the model suggested approving and the policy denied. */
+    modelSaidYesPolicySaidNo: z.number().int(),
+  }),
 });
 export type AdminStatsDto = z.infer<typeof AdminStatsSchema>;
 
@@ -317,3 +420,126 @@ export const ErrorResponseSchema = z.object({
 export type ErrorResponseDto = z.infer<typeof ErrorResponseSchema>;
 
 export { PRECEDENCE };
+
+// --- Return Workflow -----------------------------------------------------------
+
+export const ReturnStatusSchema = z.enum([
+  'return_requested',
+  'return_label_generated',
+  'return_shipped',
+  'return_received',
+  'return_processed',
+  'return_denied',
+]);
+export type ReturnStatusDto = z.infer<typeof ReturnStatusSchema>;
+
+export const CreateReturnRequestSchema = z.object({
+  orderId: z.string().min(1, 'orderId is required'),
+  // Optional link to a refund request the customer already made. Omitted for a
+  // return that is not asking for money - a gift return, an exchange, a change
+  // of mind. When present it is the idempotency key.
+  requestId: z.string().min(1).optional(),
+  items: z.array(z.object({
+    itemId: z.string(),
+    quantity: z.number().int().positive(),
+  })).min(1, 'at least one item is required'),
+  reason: z.string().min(1, 'reason is required').max(2000),
+});
+export type CreateReturnRequest = z.infer<typeof CreateReturnRequestSchema>;
+
+export const ReturnItemSchema = z.object({
+  itemId: z.string(),
+  name: z.string(),
+  quantity: z.number().int().positive(),
+  unitPriceCents: z.number().int().nonnegative(),
+});
+export type ReturnItemDto = z.infer<typeof ReturnItemSchema>;
+
+export const ReturnSchema = z.object({
+  id: z.string(),
+  requestId: z.string().nullable(),
+  orderId: z.string(),
+  customerId: z.string(),
+  status: ReturnStatusSchema,
+  items: z.array(z.object({
+    itemId: z.string(),
+    name: z.string(),
+    quantity: z.number().int().positive(),
+    unitPriceCents: z.number().int().nonnegative(),
+  })),
+  reason: z.string(),
+  trackingNumber: z.string().nullable(),
+  carrier: z.string().nullable(),
+  labelUrl: z.string().nullable(),
+  shippedAt: z.string().nullable(),
+  receivedAt: z.string().nullable(),
+  processedAt: z.string().nullable(),
+  deniedAt: z.string().nullable(),
+  deniedReason: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ReturnDto = z.infer<typeof ReturnSchema>;
+
+export const GenerateReturnLabelSchema = z.object({
+  returnId: z.string(),
+  carrier: z.enum(['usps', 'ups', 'fedex']).default('usps'),
+});
+export type GenerateReturnLabel = z.infer<typeof GenerateReturnLabelSchema>;
+
+export const MarkReturnShippedSchema = z.object({
+  returnId: z.string(),
+  trackingNumber: z.string().min(1),
+  carrier: z.enum(['usps', 'ups', 'fedex']),
+});
+export type MarkReturnShipped = z.infer<typeof MarkReturnShippedSchema>;
+
+export const MarkReturnReceivedSchema = z.object({
+  returnId: z.string(),
+  receivedItems: z.array(z.object({
+    itemId: z.string(),
+    quantity: z.number().int().positive(),
+    condition: z.enum(ITEM_CONDITIONS),
+  })).min(1),
+});
+export type MarkReturnReceived = z.infer<typeof MarkReturnReceivedSchema>;
+
+export const ProcessReturnSchema = z.object({
+  returnId: z.string(),
+  // Keyed by order line, not by product. The server resolves line -> product
+  // through the return itself, so the only product that can be credited with
+  // stock is the one the customer actually sent back.
+  restockItems: z.array(z.object({
+    itemId: z.string().min(1),
+    quantity: z.number().int().nonnegative(),
+  })).default([]),
+});
+export type ProcessReturn = z.infer<typeof ProcessReturnSchema>;
+
+export const DenyReturnSchema = z.object({
+  returnId: z.string(),
+  reason: z.string().min(1).max(2000),
+});
+export type DenyReturn = z.infer<typeof DenyReturnSchema>;
+
+export const ReturnSummarySchema = z.object({
+  id: z.string(),
+  orderId: z.string(),
+  customerId: z.string(),
+  status: ReturnStatusSchema,
+  itemCount: z.number().int().positive(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  labelUrl: z.string().nullable(),
+  trackingNumber: z.string().nullable(),
+});
+export type ReturnSummaryDto = z.infer<typeof ReturnSummarySchema>;
+
+export const ListReturnsQuerySchema = z.object({
+  status: ReturnStatusSchema.optional(),
+  customerId: z.string().optional(),
+  orderId: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+export type ListReturnsQuery = z.infer<typeof ListReturnsQuerySchema>;
+
