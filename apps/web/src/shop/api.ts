@@ -71,37 +71,6 @@ export interface RefundRequest {
   readonly responseText: string;
 }
 
-/**
- * The return lifecycle, as the storefront spells it out.
- *
- * Declared here rather than imported because the shopper's mental model is a
- * five-step story - requested, label, posted, arrived, done - and it is clearer
- * to write those labels once in the page that shows them than to reach into the
- * engine's internal vocabulary for a progress bar. The server's own enum is the
- * authority; this is the presentation of it.
- */
-export const RETURN_STEPS = [
-  { key: 'return_requested', label: 'Requested', blurb: 'We have your request.' },
-  { key: 'return_label_generated', label: 'Label issued', blurb: 'Print the label and post the parcel.' },
-  { key: 'return_shipped', label: 'In transit', blurb: 'The parcel is on its way to us.' },
-  { key: 'return_received', label: 'Received', blurb: 'The goods are at our warehouse.' },
-  { key: 'return_processed', label: 'Processed', blurb: 'Checked and closed. Any refund is handled separately.' },
-] as const;
-
-export type ReturnStatus = (typeof RETURN_STEPS)[number]['key'] | 'return_denied';
-
-export interface ReturnRecord {
-  readonly id: string;
-  readonly orderId: string;
-  readonly customerId: string;
-  readonly status: ReturnStatus;
-  readonly reason: string;
-  readonly labelUrl: string | null;
-  readonly trackingNumber: string | null;
-  readonly deniedReason: string | null;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
 
 /** One line of a return, as the server names it: an order line and a count. */
 export interface CartLineInput {
@@ -178,9 +147,6 @@ export const shopApi = {
   requestRefund: (input: { customerId: string; orderId: string; message: string }) =>
     post<{ request: RefundRequest }>('/api/chat/messages', input),
 
-  /** The shopper's own returns, newest first. */
-  returns: (): Promise<{ returns: readonly ReturnRecord[] }> => request('/api/returns'),
-
   /**
    * One order's conversation with the assistant.
    *
@@ -207,26 +173,22 @@ export const shopApi = {
   assistantStatus: (): Promise<{ aiMode: string; aiAvailable: boolean; aiNote: string }> =>
     request('/api/shop/assistant-status'),
 
-  /**
-   * Opens a return.
-   *
-   * No `customerId`: the server takes the customer from the session cookie, and
-   * the ledger checks the order belongs to them. A field here would be another
-   * thing the page has to get right before the server can start ignoring it.
-   *
-   * Lines are addressed by order line id, not product id. Two lines of one
-   * order can name the same product, and a product id would file both under one
-   * key - which is how ticking one item ends up returning all of them.
-   */
-  createReturn: (input: { orderId: string; reason: string; items: readonly ReturnLineInput[] }) =>
-    post<{ return: ReturnRecord }>('/api/returns', input),
 };
 
-/** One line of a return request: an order line and how many of it. */
-export interface ReturnLineInput {
-  readonly itemId: string;
-  readonly quantity: number;
-}
+/**
+ * Note for whoever adds a returns UI next.
+ *
+ * `POST /api/returns` exists on the server and is deliberately not called from
+ * here. The shopper experience for a return is the order conversation, which
+ * carries the intent and needs no form, so a second surface would be a second
+ * way to file the same thing. When it is wanted, two details are load-bearing
+ * and both are easy to get wrong:
+ *
+ * - send no `customerId`; the session cookie decides whose return this is.
+ * - address lines by order line id, not product id. One order can hold two
+ *   lines of the same product, and a product id files both under one key - which
+ *   is how ticking one item ends up returning all of them.
+ */
 
 /**
  * One entry in a thread.

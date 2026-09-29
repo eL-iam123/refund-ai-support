@@ -25,7 +25,12 @@ services:
       # Same-origin: the API is the only origin, so CORS is only needed for the
       # Vite dev servers. Empty in production is correct, not an oversight.
       CORS_ORIGIN: ${CORS_ORIGIN:-}
-      AI_PROVIDER: ${AI_PROVIDER:-groq}
+      # AI_API_KEY is the only thing that has to be set to use a model. The
+      # provider is worked out from the key, so a Groq, OpenAI, Gemini or
+      # Anthropic key all work here unchanged. AI_PROVIDER is for the case where
+      # the key is not one of those - a compatible endpoint of your own.
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_PROVIDER: ${AI_PROVIDER:-}
       # Unset means "required in production, tolerated in development", so a
       # reviewer who clones this and runs `docker compose up` gets a working
       # product without credentials, and a deployment that has to be the model

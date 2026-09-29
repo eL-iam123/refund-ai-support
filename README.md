@@ -33,7 +33,6 @@ refund button. See [ADR 0001](docs/adr/0001-resolver-is-sole-authority.md).
 ### One command, with Docker
 
 ```bash
-cp .env.example .env        # optional: add a provider key
 docker compose up --build   # http://localhost:4000 - API, console and shop
 ```
 
@@ -41,15 +40,37 @@ That is the whole setup. The stack seeds 18 scenario fixtures, 20 customers, 25
 orders and a short decision history on first boot, and serves the customer chat,
 the agent console and the storefront from one origin.
 
-**No key is needed to run it.** With no provider key the server starts, reports
-the model as unavailable, and every request that would need a claim escalates to
-a human. A missing model is a degraded queue, which is recoverable; a service
-that refuses to boot has no queue at all.
+**To use a real model, paste your key into `.env` and restart.** That is the
+entire procedure:
 
-To get real model output, add a key for whichever provider you prefer — Groq,
-NVIDIA, OpenRouter, Gemini, Anthropic or OpenAI — to `.env` and restart. Or set
-`AI_PROVIDER=local` to run the pattern matcher with no network at all, which is
-useful for a demo and refused when `NODE_ENV=production`.
+```bash
+cp .env.example .env
+echo 'AI_API_KEY=paste_your_key_here' >> .env
+docker compose up
+```
+
+The provider is worked out from the key, so a Groq, NVIDIA, Gemini, Anthropic,
+OpenRouter or OpenAI key all work with no other setting:
+
+| Your key starts with | Provider used |
+| --- | --- |
+| `gsk_` | Groq (free tier) |
+| `nvapi-` | NVIDIA (free tier) |
+| `AIza` | Gemini (free tier) |
+| `sk-or-v1-` | OpenRouter (free tier) |
+| `sk-ant-` | Anthropic |
+| `sk-` | OpenAI |
+
+`AI_PROVIDER` is only for a provider's own compatible endpoint, and
+`AI_PROVIDER=local` runs the pattern matcher with no network at all — useful for
+a demo, and refused when `NODE_ENV=production`.
+
+**No key is needed to run the product.** With no key the server starts, reports
+the model as unavailable on the staff dashboard, and every request that would
+need a claim escalates to a human. A missing model is a degraded queue, which is
+recoverable; a service that refuses to boot has no queue at all. Set
+`AI_REQUIRED=true` for a deployment that must not run that way — see
+[Configuration](#configuration).
 
 `docker-compose.yml` ships a placeholder `ADMIN_API_SECRET` so the command above
 works on a clean machine. It is rejected at boot when `NODE_ENV=production`, so
@@ -158,7 +179,7 @@ and exercises the real policy engine, resolver, and database.
 ```
 packages/shared     Zod schemas, rule/outcome contracts, 18 conformance scenarios
 apps/api            Fastify 5 + SQLite (better-sqlite3)
-  src/policy/       the 16 rules, the gates, the resolver  <- authority lives here
+  src/policy/       the 17 rules, the gates, the resolver  <- authority lives here
   src/ai/           analyzer adapter, prompts, grounding   <- proposes only
   src/security/     injection scanner
   src/retrieval/    order identification and item scoping
@@ -233,12 +254,12 @@ docker run …` is honoured even if a `.env` was baked into the image.
 | Variable | Why |
 |---|---|
 | `ADMIN_API_SECRET` | Signs staff tokens. Without it the server refuses to boot. `openssl rand -hex 32`. Anyone holding it can mint admin tokens, so it is never committed. |
-| `AI_PROVIDER` | Which model to call. `groq` \| `nvidia` \| `openrouter` \| `gemini` \| `anthropic` \| `openai` \| `local` |
-
-Then the key for the provider you chose — `GROQ_API_KEY`, `NVIDIA_API_KEY`, and so
-on. **No key is committed to this repository, and that is deliberate.** A key in
-git is a key in every clone, every image layer and every fork, permanently and
-publicly; the honest fix is a key that is not here.
+| `AI_API_KEY` | **The key, whatever provider it is for.** Inferred into a provider from its prefix |
+**No key is committed to this repository, and that is deliberate.** A key in git
+is a key in every clone, every image layer and every fork, permanently and
+publicly; the honest fix is a key that is not here. Per-provider variables
+(`GROQ_API_KEY`, `NVIDIA_API_KEY`, and so on) still work for a setup that keeps
+its keys separate, and take second place to `AI_API_KEY` when both are set.
 
 **A missing key is not an error by default.** The server starts, the assistant
 has no model behind it, every request that needs a claim escalates to a person,
@@ -273,6 +294,7 @@ Nothing else needs setting to run. Every variable below has a default.
 
 | Variable | Default | Notes |
 |---|---|---|
+| `AI_PROVIDER` | per provider | Overrides the provider inferred from the key. `local` runs the pattern matcher |
 | `AI_MODEL` | per provider | Specific model id, **not** a router alias — see below |
 | `AI_FALLBACK_MODELS` | empty | Comma-separated, tried in order. Failover across models beats retrying one: a rate-limited model usually stays rate-limited |
 | `AI_TIMEOUT_MS` | `30000` | Per attempt |

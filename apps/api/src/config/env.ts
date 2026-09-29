@@ -20,6 +20,8 @@ import { INJECTION_ACTIONS } from '@refund/shared';
  */
 const EMPTY_IS_ABSENT = [
   'AI_REQUIRED',
+  'AI_API_KEY',
+  'AI_PROVIDER',
   'AI_MODEL',
   'AI_BASE_URL',
   'AI_FALLBACK_MODELS',
@@ -71,7 +73,7 @@ const EnvSchema = z.object({
    * a forgotten key - an absent key degrades to *no claims*, never to *weaker
    * claims that still look like a model read*.
    */
-  AI_PROVIDER: z.enum(['groq', 'openrouter', 'openai', 'nvidia', 'gemini', 'anthropic', 'local']).default('groq'),
+  AI_PROVIDER: z.enum(['groq', 'openrouter', 'openai', 'nvidia', 'gemini', 'anthropic', 'local']).optional(),
   /**
    * Refuse to start without a working model, instead of degrading.
    *
@@ -92,6 +94,19 @@ const EnvSchema = z.object({
    * Unset means: required in production, tolerated in development.
    */
   AI_REQUIRED: z.enum(['true', 'false']).optional(),
+  /**
+   * The key, whatever provider it belongs to.
+   *
+   * The one variable that has to be set to use a model. It exists because the
+   * per-provider keys turned "paste your key and run" into a two-step ritual
+   * with a lookup table: pick a provider, then find the matching variable name,
+   * then discover that the key you hold is for the other one. Now the key goes
+   * in here and the provider is worked out from it.
+   *
+   * Takes precedence over the per-provider variables, which stay supported so an
+   * existing configuration keeps working untouched.
+   */
+  AI_API_KEY: z.string().min(1).optional(),
   /** Overrides the provider's default model when set. */
   AI_MODEL: z.string().min(1).optional(),
   AI_FALLBACK_MODELS: z.string().default(''),
@@ -159,9 +174,17 @@ const EnvSchema = z.object({
   RATE_LIMIT_WINDOW: z.string().min(1).default('1 minute'),
 });
 
-export type Env = z.infer<typeof EnvSchema>;
+/**
+ * The validated environment, with the provider always resolved.
+ *
+ * Intersected rather than inferred: the *input* schema leaves `AI_PROVIDER`
+ * optional so an unset one can be inferred from the key, but nothing downstream
+ * should ever have to handle it being absent. Every consumer gets a definite
+ * provider and the inference happens once, in `readEnv`.
+ */
+export type Env = z.infer<typeof EnvSchema> & { AI_PROVIDER: AiProvider };
 
-export type AiProvider = Env['AI_PROVIDER'];
+export type AiProvider = NonNullable<z.infer<typeof EnvSchema>['AI_PROVIDER']>;
 
 export type ProviderApiKeyEnv =
   | 'GROQ_API_KEY'
@@ -373,7 +396,7 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
     throw new Error(`Invalid environment configuration -> ${detail}`);
   }
 
-  const env = parsed.data;
+  const env = resolveProvider(parsed.data);
 
   // The compose file ships a placeholder so `docker compose up` runs as a single
   // command. A committed default is a way in, so it is only ever allowed to be
@@ -397,6 +420,74 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
 
   assertModelIsReachable(env);
   return env;
+}
+
+/**
+ * Works out which provider is meant, so setting one key is enough.
+ *
+ * Three cases, in order: an explicit `AI_PROVIDER` always wins, because someone
+ * who wrote it meant it. Otherwise a key that identifies itself is trusted. A key
+ * nobody recognises is still used - against the default - because refusing to run
+ * over an unfamiliar key shape would be worse than letting the provider reject
+ * it with an error that names the problem.
+ */
+function resolveProvider(parsed: z.infer<typeof EnvSchema>): Env {
+  const inferred = providerFromKey(parsed.AI_API_KEY);
+  const provider = parsed.AI_PROVIDER ?? inferred ?? 'groq';
+  return { ...parsed, AI_PROVIDER: provider };
+}
+
+/**
+ * Provider keys are self-identifying, and the prefixes do not collide.
+ *
+ * `sk-or-v1-` is checked before `sk-` because OpenRouter keys are also `sk-`, and
+ * a Groq key sent to OpenRouter is a confusing 401 rather than an obvious
+ * misconfiguration. Anthropic is the same shape, so it is matched first there
+ * too.
+ *
+ * Inference is a convenience with a hard floor under it: it can only ever
+ * produce a provider the operator's key is genuinely for. Nothing here grants
+ * access to anything, it just saves the operator reading a table.
+ */
+export function providerFromKey(key: string | undefined): AiProvider | null {
+  if (key === undefined) {
+    return null;
+  }
+  const value = key.trim();
+  if (value.startsWith('gsk_')) {
+    return 'groq';
+  }
+  if (value.startsWith('nvapi-')) {
+    return 'nvidia';
+  }
+  if (value.startsWith('AIza')) {
+    return 'gemini';
+  }
+  if (value.startsWith('sk-ant-')) {
+    return 'anthropic';
+  }
+  if (value.startsWith('sk-or-v1-')) {
+    return 'openrouter';
+  }
+  if (value.startsWith('sk-')) {
+    return 'openai';
+  }
+  return null;
+}
+
+/**
+ * The key to authenticate with, from either spelling.
+ *
+ * `AI_API_KEY` first so a key pasted there works without any further
+ * configuration, then the provider's own variable so existing setups are
+ * untouched. A provider with no key of its own - `local` - has none either way.
+ */
+export function apiKeyFor(env: Env): string | undefined {
+  if (env.AI_API_KEY !== undefined) {
+    return env.AI_API_KEY;
+  }
+  const apiKeyEnv = PRESETS[env.AI_PROVIDER].apiKeyEnv;
+  return apiKeyEnv === null ? undefined : env[apiKeyEnv];
 }
 
 /** Whether this process must refuse to start without a usable model. */
@@ -452,11 +543,12 @@ function assertModelIsReachable(env: Env): void {
  */
 export function missingApiKeyFor(env: Env): string | null {
   const preset = PRESETS[env.AI_PROVIDER];
-  const apiKeyEnv = preset.apiKeyEnv;
-  if (apiKeyEnv === null || env[apiKeyEnv] !== undefined) {
+  if (preset.apiKeyEnv === null || apiKeyFor(env) !== undefined) {
     return null;
   }
-  return `${apiKeyEnv} is not set, so ${preset.label} cannot be reached`;
+  // Names the universal variable rather than the provider's own, because it is
+  // the one an operator is told to set and it works for every provider.
+  return `AI_API_KEY is not set, so ${preset.label} cannot be reached`;
 }
 
 export function corsOrigins(env: Env): string[] {

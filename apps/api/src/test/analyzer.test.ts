@@ -149,18 +149,25 @@ describe('provider presets', () => {
     // customer - but a service that will not start cannot queue that customer for
     // a person either. The report is now made through the health endpoint and
     // per request, and every affected request escalates.
-    const saved = { provider: process.env.AI_PROVIDER, key: process.env.GROQ_API_KEY };
+    const saved = {
+      provider: process.env.AI_PROVIDER,
+      key: process.env.GROQ_API_KEY,
+      universal: process.env.AI_API_KEY,
+    };
     process.env.AI_PROVIDER = 'groq';
     delete process.env.GROQ_API_KEY;
+    delete process.env.AI_API_KEY;
 
     try {
       const env = readEnv('.env.absent');
 
       expect(env.AI_PROVIDER).toBe('groq');
-      expect(missingApiKeyFor(env)).toBe('GROQ_API_KEY is not set, so groq cannot be reached');
+      // The universal name, which is the one an operator is told to set.
+      expect(missingApiKeyFor(env)).toBe('AI_API_KEY is not set, so groq cannot be reached');
     } finally {
       restore('AI_PROVIDER', saved.provider);
       restore('GROQ_API_KEY', saved.key);
+      restore('AI_API_KEY', saved.universal);
     }
   });
 });

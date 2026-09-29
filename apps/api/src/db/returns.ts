@@ -204,14 +204,6 @@ export function findReturnByRequestId(db: Db, requestId: string): ReturnRecord |
   return row === undefined ? null : hydrate(row);
 }
 
-/** Every return a customer has open, newest first. Used by the storefront. */
-export function listReturnsForCustomer(db: Db, customerId: string): readonly ReturnRecord[] {
-  const rows = db
-    .prepare('SELECT * FROM returns WHERE customer_id = ? ORDER BY created_at DESC, id DESC')
-    .all(customerId) as ReturnRow[];
-  return rows.map(hydrate);
-}
-
 export interface ListReturnsFilters {
   readonly status?: ReturnStatus;
   readonly customerId?: string;
@@ -624,11 +616,16 @@ export function processReturn(
     // One join resolves product and the ceiling in the same row: nothing to
     // restock can be named here unless the line is genuinely part of this
     // return.
+    // Matched on `ri.item_id`, not `ri.id`. The caller names an order line, and
+    // `return_items.id` is that line's row *within this return* - a different
+    // value, so joining on it made every legitimate restock fail as "not a line
+    // on return", which is the safest possible failure and the most annoying:
+    // stock silently never came back and nothing looked broken.
     const resolve = db.prepare(
       `SELECT oi.product_id AS productId, ri.received_quantity AS received
          FROM return_items ri
          JOIN order_items oi ON oi.id = ri.item_id
-        WHERE ri.id = ? AND ri.return_id = ?`,
+        WHERE ri.item_id = ? AND ri.return_id = ?`,
     );
     const restock = db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?');
 

@@ -91,7 +91,7 @@ describe('environment precedence', () => {
     const env = readEnv(envFile);
 
     expect(env.AI_PROVIDER).toBe('groq');
-    expect(missingApiKeyFor(env)).toBe('GROQ_API_KEY is not set, so groq cannot be reached');
+    expect(missingApiKeyFor(env)).toBe('AI_API_KEY is not set, so groq cannot be reached');
   });
 
   it('reports no missing key when the provider is configured', () => {
@@ -245,15 +245,23 @@ describe('variables compose passes as empty strings', () => {
     // The distinction that was being lost: `GROQ_API_KEY=''` is not a key that
     // works, it is a key that is not there, and the analyzer must be built the
     // same way for both.
-    for (const key of ['NODE_ENV', 'ADMIN_API_SECRET', 'GROQ_API_KEY', 'AI_PROVIDER']) {
+    for (const key of [
+      'NODE_ENV',
+      'ADMIN_API_SECRET',
+      'GROQ_API_KEY',
+      'AI_API_KEY',
+      'AI_PROVIDER',
+      'AI_REQUIRED',
+    ]) {
       delete process.env[key];
     }
     process.env.GROQ_API_KEY = '';
+    process.env.AI_API_KEY = '';
     process.env.ADMIN_API_SECRET = 'a'.repeat(48);
     process.env.AI_PROVIDER = 'groq';
 
     expect(missingApiKeyFor(readEnv('/nonexistent-for-this-test'))).toBe(
-      'GROQ_API_KEY is not set, so groq cannot be reached',
+      'AI_API_KEY is not set, so groq cannot be reached',
     );
   });
 });

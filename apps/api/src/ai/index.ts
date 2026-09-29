@@ -1,4 +1,4 @@
-import { presetFor, type Env } from '../config/env.js';
+import { apiKeyFor, presetFor, type Env } from '../config/env.js';
 import { OpenAiAnalyzer } from './openaiAnalyzer.js';
 import { AnthropicAnalyzer } from './anthropicAnalyzer.js';
 import { LocalAnalyzer } from './localAnalyzer.js';
@@ -26,17 +26,12 @@ export function createAnalyzer(env: Env): AIAnalyzer {
     return LocalAnalyzer();
   }
 
-  const apiKeyEnv = preset.apiKeyEnv;
-  if (apiKeyEnv === null) {
-    // Unreachable while `local` is the only keyless preset and it is handled
-    // above. Guarded rather than asserted, so a future keyless provider fails
-    // with something readable instead of reading `null` as a variable name.
-    throw new Error(`provider ${preset.label} has no API key variable configured`);
-  }
-
-  const apiKey = env[apiKeyEnv];
+  const apiKey = apiKeyFor(env);
   if (apiKey === undefined) {
-    return UnavailableAnalyzer(`${apiKeyEnv} is not set, so no claim can be extracted`, apiKeyEnv);
+    return UnavailableAnalyzer(
+      'AI_API_KEY is not set, so no claim can be extracted',
+      'AI_API_KEY',
+    );
   }
 
   return preset.kind === 'anthropic'

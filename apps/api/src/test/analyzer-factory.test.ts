@@ -34,6 +34,8 @@ import { scenario, TEST_NOW } from './helpers.js';
  */
 const MANAGED_KEYS = [
   'AI_PROVIDER',
+  'AI_API_KEY',
+  'AI_REQUIRED',
   'AI_MODEL',
   'AI_BASE_URL',
   'AI_FALLBACK_MODELS',
@@ -110,6 +112,23 @@ describe('choosing an analyzer', () => {
     expect(analyzer.label).toBe('local (heuristic)');
   });
 
+  it('authenticates any provider with the one universal key', () => {
+    // The shortcut the whole configuration is built around: a key on its own is
+    // enough, and the provider is worked out from it. Asserted per provider
+    // because each of these reaches a different endpoint.
+    for (const [key, expected] of [
+      ['gsk_abc', 'groq'],
+      ['nvapi-abc', 'nvidia'],
+      ['AIzaAbc', 'gemini'],
+      ['sk-or-v1-abc', 'openrouter'],
+      ['sk-abc', 'openai'],
+      ['sk-ant-abc', 'anthropic'],
+    ] as const) {
+      const analyzer = createAnalyzer(envWith({ AI_API_KEY: key }));
+      expect(analyzer.label, key).toBe(expected);
+    }
+  });
+
   it('builds an unavailable analyzer when the key is missing, rather than throwing', () => {
     const analyzer = createAnalyzer(envWith({ AI_PROVIDER: 'groq' }));
 
@@ -117,7 +136,9 @@ describe('choosing an analyzer', () => {
     // The operator's only clue, in `/api/health` and on every stored decision, is
     // this string. "none" tells them a model is not answering; the name of the
     // variable tells them what to set.
-    expect(analyzer.model).toBe('GROQ_API_KEY missing');
+    // The universal name, not the provider's: it is the one an operator is
+    // expected to reach for, and it is the same for every provider.
+    expect(analyzer.model).toBe('AI_API_KEY missing');
   });
 
   it('still reads claims when a key is present', () => {
@@ -141,7 +162,7 @@ describe('a missing key', () => {
     // The reason is recorded per request rather than logged once at boot, so the
     // audit trail of a decision says why it had no evidence.
     expect(attempts).toHaveLength(1);
-    expect(attempts[0]?.error).toMatch(/GROQ_API_KEY is not set/);
+    expect(attempts[0]?.error).toMatch(/AI_API_KEY is not set/);
     expect(attempts[0]?.ok).toBe(false);
   });
 });
