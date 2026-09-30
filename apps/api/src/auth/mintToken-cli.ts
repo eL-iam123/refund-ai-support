@@ -1,15 +1,16 @@
 /**
  * Issues a staff token: `pnpm --filter @refund/api token --agent alice --role admin`
  *
- * Deliberately a CLI and not an HTTP route. A login endpoint here would need a
- * user store, a password policy and a session lifecycle, and a half-built
- * version of that is a weaker perimeter than no login at all - it looks like
- * authentication while remaining trivially bypassable. Staff credentials in this
- * system are provisioned out of band, which is what a real deployment behind an
- * identity provider would do anyway.
+ * The browser sign-in is the normal way into the console; this is the
+ * headless one, for a script or a curl. Deliberately a CLI and not an HTTP
+ * route. A token endpoint here would need a user store, a password policy and a
+ * session lifecycle, and a half-built version of that is a weaker perimeter than
+ * no login at all - it looks like authentication while remaining trivially
+ * bypassable. Staff credentials in this system are provisioned out of band,
+ * which is what a real deployment behind an identity provider would do anyway.
  */
 
-import { readEnv } from '../config/env.js';
+import { adminEnabled, adminSigningKey, readEnv } from '../config/env.js';
 import { mintToken, ROLES, type Role } from './tokens.js';
 
 interface Options {
@@ -62,8 +63,18 @@ function parseTtl(raw: string): number {
 function main(): void {
   const options = parseArgs(process.argv.slice(2));
   const env = readEnv();
+  // Minting is signing with the console's key, so there is nothing to sign with
+  // until the console is configured. Saying so is better than a signature that
+  // could never verify, which would look like a working credential in a script.
+  if (!adminEnabled(env)) {
+    throw new Error(
+      'the admin console is not configured, so there is no session to mint. Set ' +
+        'ADMIN_USERNAME and ADMIN_PASSWORD in your .env (see admin-login.txt), or sign ' +
+        'in through the browser instead',
+    );
+  }
   process.stdout.write(
-    `${mintToken(env.ADMIN_API_SECRET, options.agent, options.role, options.ttlMs, new Date())}\n`,
+    `${mintToken(adminSigningKey(env), options.agent, options.role, options.ttlMs, new Date())}\n`,
   );
 }
 

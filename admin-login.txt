@@ -1,0 +1,85 @@
+REFUND DESK - ADMIN CONSOLE LOGIN
+================================
+
+The staff console is not part of the product until you turn it on. There is no
+account to find, no default that is quietly active, and no route to reach: until
+ADMIN_USERNAME and ADMIN_PASSWORD are in your .env, every staff route answers 404
+and the /admin page in the browser is not rendered. The shop, the cart, the order
+history and the refund assistant all work exactly as they did before.
+
+This file holds the demo credentials, so you do not have to invent one.
+
+
+THE DEMO CREDENTIALS
+--------------------
+
+    username:  admin
+    password:  refund-desk-demo
+
+To use them, add two lines to your .env and restart:
+
+    ADMIN_USERNAME=admin
+    ADMIN_PASSWORD=refund-desk-demo
+
+Then open /admin and sign in with the pair above.
+
+There is no .env committed to this repository, so the console starts off. To make
+it, copy .env.example to .env first.
+
+
+MAKE YOUR OWN
+-------------
+
+    openssl rand -base64 24
+
+Any password of 12 characters or more is accepted. Put it in .env as
+ADMIN_PASSWORD with any username you like.
+
+Changing either value takes effect on the next restart and invalidates every
+session issued under the old one, because the password is also what sessions are
+signed with. To sign everyone out without changing the password, set
+ADMIN_API_SECRET to a new value of at least 32 characters:
+
+    openssl rand -hex 32
+
+
+WHAT HAPPENS AT SIGN IN
+-----------------------
+
+Your username and password go to POST /api/admin/login, are compared in constant
+time, and come back as an httpOnly SameSite=Lax cookie called admin_session that
+expires in eight hours. No token is ever handed to the browser's JavaScript, so
+a cross-site-scripting bug in the storefront cannot read an operator's session
+out of it. The password is held in one place - your .env - and is never written
+to the database or to disk by the application.
+
+There is exactly one operator account. It comes from the environment rather than
+a user table, so there is no way to create an account over the network and
+nothing to leak out of a database backup. A wrong username and a wrong password
+get the same reply, so the endpoint cannot be used to discover whether an operator
+account exists.
+
+Sign out clears the cookie. One limitation worth knowing: the session is a
+stateless signed token, so a copy taken before sign out stays valid until it
+expires or the signing key changes. That is the trade for not keeping a second
+table of staff credentials.
+
+
+ABOUT THE DEMO PASSWORD IN PRODUCTION
+-------------------------------------
+
+The password above is printed in a file in a public repository, so it is not a
+secret. The API refuses to start in production while ADMIN_PASSWORD is set to it -
+the same rule the bundled placeholder signing key is held to. That is why the
+console is off until you set a password: the one in this file is a convenience for
+evaluating the product, and the API will not let it become a real deployment's
+credential.
+
+
+WHERE THE ACTIONS END UP
+------------------------
+
+Every override, settlement and release is written to the append-only audit log
+with the username that performed it, so the trail names a person the system
+actually knows about rather than the subject field of a pasted token. Read it at
+GET /api/admin/audit, or verify the whole chain at GET /api/admin/audit/verify.

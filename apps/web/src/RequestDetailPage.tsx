@@ -56,6 +56,17 @@ function Drawer({ detail, onApplied }: { detail: RequestDetail; onApplied: () =>
         </p>
       </header>
 
+      {request.decision.decision === 'escalated' ? (
+        <Panel title="Awaiting a person">
+          <p className="muted">
+            This request was escalated because the policy could not reach a decision it could stand
+            behind. The customer has been told a person is reviewing it. Decide below in the{' '}
+            <strong>Human decision</strong> panel — nothing changes for the customer until an agent
+            acts, and every act is logged.
+          </p>
+        </Panel>
+      ) : null}
+
       <Panel title="What the customer said">
         <blockquote className="quote">{request.message}</blockquote>
         <p className="reply-shown">{request.responseText}</p>

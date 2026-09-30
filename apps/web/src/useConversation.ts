@@ -60,11 +60,30 @@ export type Turn =
       readonly duplicate: DuplicateNotice | null;
     }
   | {
+      /**
+       * The assistant asked a clarifying question instead of deciding. A
+       * question is not a decision and renders as one - the customer's message
+       * and the question it earned - but it settles the turn into its own shape
+       * so nothing downstream can mistake a question for an outcome.
+       */
+      readonly kind: 'asked';
+      readonly id: string;
+      readonly text: string;
+      readonly question: string;
+    }
+  | {
       /** A turn loaded from storage rather than decided in this session. */
       readonly kind: 'stored';
       readonly id: string;
       readonly text: string;
       readonly result: ReplyBody;
+    }
+  | {
+      /** A stored clarifying question, remembered with the question it asked. */
+      readonly kind: 'storedAsk';
+      readonly id: string;
+      readonly text: string;
+      readonly question: string;
     }
   | {
       /**
@@ -261,7 +280,21 @@ export function useConversation(
     live.begin(orderId, message, localId);
 
     try {
-      const { request, duplicate } = await api.sendMessage({ customerId, orderId, message });
+      const reply = await api.sendMessage({ customerId, orderId, message });
+      if ('question' in reply) {
+        // A question is not a decision: the turn settles into its own shape and
+        // the composer stays open, because the customer's next message is the
+        // answer to it - and the server persists the exchange as dialogue, so
+        // a refresh keeps it too.
+        live.settle(orderId, localId, {
+          kind: 'asked',
+          id: reply.dialogueId,
+          text: message,
+          question: reply.question,
+        });
+        return;
+      }
+      const { request, duplicate } = reply;
       live.settle(orderId, localId, {
         kind: 'replied',
         id: request.id,
@@ -296,6 +329,9 @@ export function useConversation(
 function toTurn(stored: StoredTurn): Turn {
   if (stored.kind === 'update') {
     return { kind: 'update', id: stored.id, text: stored.body, ofRequestId: stored.requestId };
+  }
+  if (stored.kind === 'dialogue') {
+    return { kind: 'storedAsk', id: stored.id, text: stored.message, question: stored.question };
   }
   return {
     kind: 'stored',

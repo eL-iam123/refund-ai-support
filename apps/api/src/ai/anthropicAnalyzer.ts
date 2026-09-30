@@ -2,14 +2,14 @@ import { z } from 'zod';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildExtractionUser, EXTRACTION_SYSTEM } from './prompts.js';
-import { ExtractionOutputSchema } from './schemas.js';
+import { buildAgentUser, EXTRACTION_SYSTEM } from './prompts.js';
+import { AgentOutputSchema, type AgentOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
+  type AgentReply,
   type AIAnalyzer,
   type AnalyzerInput,
-  type AnalyzerResult,
   type AttemptObserver,
 } from './analyzer.js';
 
@@ -46,8 +46,16 @@ const MAX_REPAIRS = 1;
 const MAX_ERROR_LENGTH = 500;
 const ANTHROPIC_VERSION = '2023-06-01';
 
-/** The tool the model must call instead of answering in prose. */
-const TOOL_NAME = 'record_refund_claim';
+/**
+ * The two tools the model may call, mirroring the OpenAI adapter's union.
+ *
+ * Both are declared here as first-class tools so the model is pushed through
+ * the discriminator by the provider rather than asked to respect a prose mode
+ * string. `ask_question` is the messenger exit; `decide_claim` is the engine
+ * exit. The answer is read back off whichever tool was called.
+ */
+const ASK_TOOL = 'ask_question';
+const DECIDE_TOOL = 'decide_claim';
 
 interface MessageResponse {
   readonly content?: readonly {
@@ -92,22 +100,22 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     this.model = this.candidates[0] ?? 'unknown';
   }
 
-  async analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AnalyzerResult> {
+  async analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const base = buildExtractionUser(input.message, input.order, this.env.AI_SHARE_ORDER_FACTS);
+    const base = buildAgentUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
     let complaints = 'no completion';
 
     for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
       const user =
         repair === 0
           ? base
-          : `${base}\n\nYour previous reply was rejected: ${complaints}. Call the tool with a valid object.`;
+          : `${base}\n\nYour previous reply was rejected: ${complaints}. Call a tool with a valid object.`;
 
       const completion = await this.complete(base, user, budget, observer);
-      const parsed = ExtractionOutputSchema.safeParse(parseJson(completion.text));
+      const parsed = AgentOutputSchema.safeParse(parseJson(completion.text));
 
       if (parsed.success) {
-        return toResult(parsed.data, completion.model);
+        return toAgentReply(parsed.data, completion.model);
       }
 
       complaints = formatIssues(parsed.error).slice(0, 300);
@@ -284,33 +292,50 @@ function requestBody(
     // same message two different ways is a claim nobody can audit.
     temperature: 0,
     system: EXTRACTION_SYSTEM,
-    tools: [extractionTool()],
-    tool_choice: { type: 'tool', name: TOOL_NAME },
+    // `any` rather than the single-tool `tool` choice: the model must call one
+    // of the two tools but gets to pick which - exactly the ask-or-decide
+    // discriminator the engine is built around.
+    tools: [askTool(), decideTool()],
+    tool_choice: { type: 'any' },
     messages: repairTurn
       ? [
           { role: 'user', content: firstUserMessage },
-          { role: 'assistant', content: 'I will record the claim.' },
+          { role: 'assistant', content: 'I will call a tool.' },
           { role: 'user', content: user },
         ]
       : [{ role: 'user', content: firstUserMessage }],
   };
 }
 
-function extractionTool(): { name: string; description: string; input_schema: object } {
+function askTool(): { name: string; description: string; input_schema: object } {
   return {
-    name: TOOL_NAME,
-    description: 'Record the structured refund claim found in the customer message.',
-    input_schema: z.toJSONSchema(ExtractionOutputSchema),
+    name: ASK_TOOL,
+    description: 'Ask the customer exactly one clarifying question for the one missing detail.',
+    input_schema: z.toJSONSchema(z.object({ question: z.string().min(1).max(400) })),
   };
 }
 
-/** The tool call's arguments, or null when the model did not make one. */
+function decideTool(): { name: string; description: string; input_schema: object } {
+  return {
+    name: DECIDE_TOOL,
+    description: 'Submit the structured refund claim read from the conversation to the decision engine.',
+    input_schema: z.toJSONSchema(AgentOutputSchema),
+  };
+}
+
+/** The tool call, normalised to the union shape, or null when none was made. */
 function toolInputText(payload: MessageResponse): string | null {
   for (const block of payload.content ?? []) {
-    if (block.type === 'tool_use' && block.name === TOOL_NAME) {
-      // `input` is the already-decoded object. Re-serialising it means the
-      // downstream path is identical to the OpenAI adapter's: text in, Zod out.
-      return JSON.stringify(block.input ?? null);
+    const input = typeof block.input === 'object' && block.input !== null ? block.input : {};
+    if (block.type === 'tool_use' && block.name === ASK_TOOL) {
+      // The ask tool's input is bare `{question}`; normalise it back onto the
+      // union the engine validates, so the downstream path stays "text in, Zod
+      // out" exactly like the OpenAI adapter.
+      const { question } = input as { question?: unknown };
+      return JSON.stringify({ action: 'ask', question });
+    }
+    if (block.type === 'tool_use' && block.name === DECIDE_TOOL) {
+      return JSON.stringify({ action: 'decide', ...input });
     }
   }
   return null;
@@ -372,9 +397,13 @@ async function backoff(attempt: number, budget: AbortSignal): Promise<void> {
   }
 }
 
-function toResult(data: z.infer<typeof ExtractionOutputSchema>, model: string): AnalyzerResult {
+function toAgentReply(data: AgentOutput, model: string): AgentReply {
+  if (data.action === 'ask') {
+    return { kind: 'question', question: data.question, model };
+  }
   const { suggestedDecision, suggestedAmountCents, ...extraction } = data;
   return {
+    kind: 'claim',
     extraction,
     proposal: {
       suggestedDecision,

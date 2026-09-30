@@ -82,8 +82,18 @@ export const RefundSchema = z.object({
 });
 export type RefundDto = z.infer<typeof RefundSchema>;
 
+/**
+ * Where a request came from. Scenario fixtures are replayed history for the
+ * demo console; storefront rows are real requests from the shop. They are told
+ * apart so a reviewer can see that the demo surface is seeded data and that a
+ * testing session is not, instead of both reading as the same authority.
+ */
+export const RequestSourceSchema = z.enum(['scenario', 'storefront']);
+export type RequestSourceDto = z.infer<typeof RequestSourceSchema>;
+
 export const ListRequestsQuerySchema = z.object({
   decision: z.enum(DECISIONS).optional(),
+  source: RequestSourceSchema.optional(),
   customerId: z.string().optional(),
   q: z.string().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -249,6 +259,7 @@ export const RefundRequestSchema = z.object({
   customerId: z.string(),
   customerName: z.string(),
   orderId: z.string().nullable(),
+  source: RequestSourceSchema,
   message: z.string(),
   decision: RefundDecisionSchema,
   /** Composed, deterministic customer-facing reply. */
@@ -270,6 +281,7 @@ export const RefundRequestSummarySchema = RefundRequestSchema.pick({
   customerId: true,
   customerName: true,
   orderId: true,
+  source: true,
   message: true,
   overriddenBy: true,
 }).extend({

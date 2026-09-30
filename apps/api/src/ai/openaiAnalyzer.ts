@@ -2,15 +2,15 @@ import OpenAI, { APIConnectionError, APIError, APIUserAbortError } from 'openai'
 import type { z } from 'zod';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildExtractionUser, EXTRACTION_SYSTEM } from './prompts.js';
-import { ExtractionOutputSchema } from './schemas.js';
+import { buildAgentUser, EXTRACTION_SYSTEM } from './prompts.js';
+import { AgentOutputSchema, type AgentOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
+  type AgentReply,
   type AIAnalyzer,
   type AnalyzerInput,
   type AnalyzerOrder,
-  type AnalyzerResult,
   type AttemptObserver,
 } from './analyzer.js';
 import type { OrderRecord } from '../db/records.js';
@@ -175,12 +175,12 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     });
   }
 
-  async analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AnalyzerResult> {
+  async analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
     // One deadline for the whole call, shared by every attempt and the repair
     // pass, so the total time a customer waits is a configured number rather
     // than candidates x attempts x timeout.
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const base = buildExtractionUser(input.message, input.order, this.env.AI_SHARE_ORDER_FACTS);
+    const base = buildAgentUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
     let complaints = 'no completion';
 
     for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
@@ -190,10 +190,10 @@ export class OpenAiAnalyzer implements AIAnalyzer {
           : `${base}\n\nYour previous reply was rejected: ${complaints}. Reply with valid JSON only.`;
 
       const completion = await this.complete(EXTRACTION_SYSTEM, user, budget, observer);
-      const parsed = ExtractionOutputSchema.safeParse(parseJson(completion.text));
+      const parsed = AgentOutputSchema.safeParse(parseJson(completion.text));
 
       if (parsed.success) {
-        return toResult(parsed.data, completion.model);
+        return toAgentReply(parsed.data, completion.model);
       }
 
       complaints = formatIssues(parsed.error).slice(0, 300);
@@ -314,9 +314,13 @@ export class OpenAiAnalyzer implements AIAnalyzer {
   }
 }
 
-function toResult(data: z.infer<typeof ExtractionOutputSchema>, model: string): AnalyzerResult {
+function toAgentReply(data: AgentOutput, model: string): AgentReply {
+  if (data.action === 'ask') {
+    return { kind: 'question', question: data.question, model };
+  }
   const { suggestedDecision, suggestedAmountCents, ...extraction } = data;
   return {
+    kind: 'claim',
     extraction,
     proposal: {
       suggestedDecision,

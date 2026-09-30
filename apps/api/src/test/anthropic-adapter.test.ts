@@ -21,6 +21,7 @@ import { testEnv } from './helpers.js';
 
 const INPUT: AnalyzerInput = {
   message: 'The mug arrived cracked. I would like a refund.',
+  history: [],
   order: {
     id: 'ORD-1',
     totalCents: 4200,
@@ -78,7 +79,7 @@ afterEach(() => {
 
 describe('anthropic wire format', () => {
   it('sends a forced tool call to the native messages endpoint', async () => {
-    const { calls } = stubAnthropic({ content: [{ type: 'tool_use', name: 'record_refund_claim', input: VALID_INPUT }] });
+    const { calls } = stubAnthropic({ content: [{ type: 'tool_use', name: 'decide_claim', input: { action: 'decide', ...VALID_INPUT } }] });
 
     await buildAnalyzer().analyze(INPUT, noopObserver);
 
@@ -92,7 +93,9 @@ describe('anthropic wire format', () => {
     expect(request.headers.get('anthropic-version')).not.toBeNull();
 
     const body = (await request.json()) as Record<string, unknown>;
-    expect(body.tool_choice).toEqual({ type: 'tool', name: 'record_refund_claim' });
+    // The ask-or-decide discriminator: the model must call a tool, and picks
+    // which one. Neither the tool call nor the choice is a single fixed name.
+    expect(body.tool_choice).toEqual({ type: 'any' });
     // No OpenAI SDK shape leaks into a request this endpoint will reject.
     expect(body.messages).toHaveLength(1);
     expect(body).not.toHaveProperty('response_format');
@@ -104,7 +107,7 @@ describe('anthropic wire format', () => {
     stubAnthropic({
       content: [
         { type: 'text', text: 'Let me check that order.' },
-        { type: 'tool_use', id: 'toolu_01ABC', name: 'record_refund_claim', input: VALID_INPUT },
+        { type: 'tool_use', id: 'toolu_01ABC', name: 'decide_claim', input: { action: 'decide', ...VALID_INPUT } },
       ],
       model: 'claude-haiku-4-5-20251001',
       usage: { input_tokens: 100, output_tokens: 40 },
@@ -112,6 +115,9 @@ describe('anthropic wire format', () => {
 
     const result = await buildAnalyzer().analyze(INPUT, noopObserver);
 
+    if (result.kind !== 'claim') {
+      throw new Error(`expected a claim but the model asked: ${result.question}`);
+    }
     expect(result.extraction.reason).toBe('damaged');
     expect(result.extraction.items).toEqual(['MUG']);
     expect(result.proposal.suggestedDecision).toBe('approved');
@@ -121,7 +127,7 @@ describe('anthropic wire format', () => {
   it('ignores a block whose id matches the tool but whose name does not', async () => {
     // Guards against the bug returning: matching on `id` would accept this.
     stubAnthropic({
-      content: [{ type: 'tool_use', id: 'record_refund_claim', name: 'some_other_tool', input: VALID_INPUT }],
+      content: [{ type: 'tool_use', id: 'decide_claim', name: 'some_other_tool', input: { action: 'decide', ...VALID_INPUT } }],
     });
 
     // No usable tool call, so the adapter exhausts its retries and reports the

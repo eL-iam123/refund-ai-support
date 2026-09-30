@@ -143,9 +143,14 @@ export const shopApi = {
    * `customerId` is sent because the endpoint's schema requires it, but the
    * server overrides it with the session's customer when a session exists. See
    * the note on the Orders page: without signing in, this field is believed.
+   *
+   * The reply is either a decision (`request`) or the assistant's clarifying
+   * question (`question`). They are told apart by the caller, because settling a
+   * live turn into a question bubble is not the same as settling it into a
+   * decision bubble - and a decision is never a question, or the reverse.
    */
   requestRefund: (input: { customerId: string; orderId: string; message: string }) =>
-    post<{ request: RefundRequest }>('/api/chat/messages', input),
+    post<{ request: RefundRequest } | { question: string; dialogueId: string }>('/api/chat/messages', input),
 
   /**
    * One order's conversation with the assistant.
@@ -217,6 +222,13 @@ export type ChatTurn =
        */
       readonly decision: 'approved' | 'denied' | 'escalated';
       readonly refundAmountCents: number;
+      readonly createdAt: string;
+    }
+  | {
+      readonly kind: 'dialogue';
+      readonly id: string;
+      readonly message: string;
+      readonly question: string;
       readonly createdAt: string;
     }
   | {

@@ -2,7 +2,9 @@ import type { Db } from '../db/connection.js';
 import { queryAll } from '../db/sql.js';
 import { findOrder } from '../db/orderRepository.js';
 import { listUpdatesForOrder } from '../db/customerUpdates.js';
+import { listDialogueForOrder } from '../db/dialogue.js';
 import { NotFoundError } from '../http/errors.js';
+import type { DialogueLine } from '../ai/analyzer.js';
 
 /**
  * A customer's conversation, per order.
@@ -37,10 +39,12 @@ import { NotFoundError } from '../http/errors.js';
  * A `request` entry is the customer asking something and the answer they were
  * given. An `update` entry is the assistant telling them what a person later did
  * about it - approved, paid, or withdrawn - and carries no message, because the
- * customer did not send one.
+ * customer did not send one. A `dialogue` entry is the assistant asking a
+ * clarifying question and the customer message it answered - a question is not a
+ * decision, so it has no request row, but it is still the customer's history.
  *
- * The two are told apart in the type rather than by a null check at the renderer,
- * so a missing message is a compile error rather than an empty bubble.
+ * The three are told apart in the type rather than by a null check at the
+ * renderer, so a missing message is a compile error rather than an empty bubble.
  */
 export type ChatTurn =
   | {
@@ -50,6 +54,13 @@ export type ChatTurn =
       readonly responseText: string;
       readonly decision: string;
       readonly refundAmountCents: number;
+      readonly createdAt: string;
+    }
+  | {
+      readonly kind: 'dialogue';
+      readonly id: string;
+      readonly message: string;
+      readonly question: string;
       readonly createdAt: string;
     }
   | {
@@ -126,10 +137,25 @@ export function conversationForOrder(
     .reverse()
     .map((turn) => ({ turn, rank: 0 }));
 
-  // Asked for separately rather than joined. A UNION ALL over two tables that
-  // need different orderings to be correct would put the tiebreak logic in SQL,
-  // where the reason for it cannot be explained; here the rule is three lines
-  // and says what it does.
+  // Asked for separately rather than joined. A UNION ALL over tables that need
+  // different orderings to be correct would put the tiebreak logic in SQL, where
+  // the reason for it cannot be explained; here the rule is three lines and says
+  // what it does.
+  const dialogue = listDialogueForOrder(db, customerId, orderId, limit).map((turn) => ({
+    turn: {
+      kind: 'dialogue' as const,
+      id: turn.id,
+      message: turn.customerMessage,
+      question: turn.assistantQuestion,
+      createdAt: turn.createdAt,
+    },
+    // Before the request it led to. In the ask-first flow the question is what
+    // the customer answered, so it chronologically precedes the decision row the
+    // answer produced; on a same-instant tie the request must not read as if it
+    // came first.
+    rank: -0.5,
+  }));
+
   const updates = listUpdatesForOrder(db, customerId, orderId, limit)
     .map((update) => ({
       turn: {
@@ -142,7 +168,7 @@ export function conversationForOrder(
       rank: 1,
     }));
 
-  return merge(requests, updates);
+  return merge([...requests, ...dialogue], updates);
 }
 
 /**
@@ -168,7 +194,7 @@ function merge(
 
 /** Total messages per order, for the "3 messages" badge on the order list. */
 export function conversationCounts(db: Db, customerId: string): ReadonlyMap<string, number> {
-  const rows = queryAll<{ order_id: string; n: number }>(
+  const requests = queryAll<{ order_id: string; n: number }>(
     db.prepare(
       `SELECT order_id, COUNT(*) AS n
          FROM refund_requests
@@ -177,7 +203,88 @@ export function conversationCounts(db: Db, customerId: string): ReadonlyMap<stri
     ),
     customerId,
   );
-  return new Map(rows.map((row) => [row.order_id, row.n]));
+  const dialogue = queryAll<{ order_id: string; n: number }>(
+    db.prepare(
+      `SELECT order_id, COUNT(*) AS n
+         FROM shop_dialogue
+        WHERE customer_id = ? AND order_id IS NOT NULL
+        GROUP BY order_id`,
+    ),
+    customerId,
+  );
+  const counts = new Map<string, number>();
+  for (const row of requests) {
+    counts.set(row.order_id, (counts.get(row.order_id) ?? 0) + row.n);
+  }
+  for (const row of dialogue) {
+    counts.set(row.order_id, (counts.get(row.order_id) ?? 0) + row.n);
+  }
+  return counts;
+}
+
+/**
+ * The conversation as the model sees it, for the next message.
+ *
+ * The assistant holds no state between calls, so every turn ships again as
+ * plain `DialogueLine` pairs. The thread above is the customer's view; this is
+ * the same rows flattened so a claim can quote an earlier message and grounding
+ * can verify that quote against everything the customer actually wrote.
+ */
+export function transcriptForOrder(
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  now: Date,
+  limit: number,
+): readonly DialogueLine[] {
+  const stray = dialogueLines(db, customerId, null, limit);
+  if (orderId === null) {
+    return stray;
+  }
+  const lines: DialogueLine[] = [...stray];
+  for (const turn of conversationForOrder(db, customerId, orderId, now, limit)) {
+    switch (turn.kind) {
+      case 'request':
+        lines.push({ role: 'customer', text: turn.message }, { role: 'assistant', text: turn.responseText });
+        break;
+      case 'dialogue':
+        lines.push({ role: 'customer', text: turn.message }, { role: 'assistant', text: turn.question });
+        break;
+      case 'update':
+        lines.push({ role: 'assistant', text: turn.body });
+        break;
+    }
+  }
+  return lines.slice(-limit * 2);
+}
+
+/**
+ * The only context there can be when no order was resolved: the stray-answer
+ * dialogue for this customer. There is no `refund_requests` row to quote,
+ * because an unresolved order never produces one - the customer may not have
+ * answered yet, or may not have an account under this spelling at all.
+ */
+function dialogueLines(db: Db, customerId: string, orderId: string | null, limit: number): readonly DialogueLine[] {
+  const rows = queryAll<{ customer_message: string; assistant_question: string }>(
+    db.prepare(
+      `SELECT customer_message, assistant_question
+         FROM shop_dialogue
+        WHERE customer_id = ? AND order_id IS ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?`,
+    ),
+    customerId,
+    orderId,
+    limit,
+  );
+  const lines: DialogueLine[] = [];
+  for (const row of rows.reverse()) {
+    lines.push(
+      { role: 'customer', text: row.customer_message },
+      { role: 'assistant', text: row.assistant_question },
+    );
+  }
+  return lines;
 }
 
 function hydrateTurn(row: TurnRow): ChatTurn {

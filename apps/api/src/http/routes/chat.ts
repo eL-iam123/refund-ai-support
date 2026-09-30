@@ -12,6 +12,7 @@ import type { AppContext } from '../context.js';
 import { processRefundRequest, type ProcessResult } from '../../orchestrator.js';
 import { findRequestById, messageFingerprint, type NewRequestRow } from '../../db/requestRepository.js';
 import { persistDecision } from '../../db/persistDecision.js';
+import { recordDialogueTurn } from '../../db/dialogue.js';
 import {
   duplicateResponseText,
   findDuplicateReport,
@@ -80,6 +81,31 @@ export function registerChatRoutes(app: FastifyInstance, ctx: AppContext): void 
 
     const input = toProcessInput(resolved, now);
     const result = await processRefundRequest(ctx.db, ctx.pipeline, input);
+
+    // The messenger half: the assistant asked a clarifying question. Nothing was
+    // decided, so nothing becomes a request row - the exchange is stored as
+    // dialogue instead, and the question is the whole reply. The customer reads
+    // exactly what the model asked, and the answer they send back becomes the
+    // model's context for the next turn.
+    if (result.stage === 'asked') {
+      // The ask is anchor-neutral on purpose. A question is not a decision: the
+      // customer might answer with a different order than the one the pipeline
+      // had provisionally matched, and anchoring the question to that guess
+      // would make the answer's context miss it (the next turn builds its
+      // transcript from the order the answer resolves to). So the turn is stored
+      // with no order, and `adoptDialogueToOrder` pins it to the order the
+      // customer's answer eventually resolves to.
+      const turn = recordDialogueTurn(ctx.db, {
+        customerId: input.customerId,
+        orderId: null,
+        customerMessage: input.message,
+        assistantQuestion: result.question,
+        now: ctx.now(),
+      });
+      ctx.log.info({ requestId: input.requestId, question: result.question }, 'chat.asked');
+      return reply.code(200).send({ question: result.question, dialogueId: turn.id });
+    }
+
     const row = buildRow(input.requestId, resolved, result, ctx.now());
 
     // The reservation lives inside persistDecision rather than here. An approval
@@ -167,7 +193,7 @@ function toProcessInput(data: CreateRefundRequest, now: Date): ProcessInputField
 function buildRow(
   requestId: string,
   input: CreateRefundRequest,
-  result: ProcessResult,
+  result: Extract<ProcessResult, { stage: 'decided' }>,
   now: Date,
 ): NewRequestRow {
   return {

@@ -176,10 +176,12 @@ export function confidentMatch(result: MatchResult): OrderMatch | null {
   if (best === undefined) {
     return null;
   }
-  if (runnerUp === undefined) {
+  if (runnerUp === undefined || best.score > runnerUp.score) {
     return best;
   }
-  return best.score * 2 > runnerUp.score ? best : null;
+  // Equal scores are a coin flip, and a coin flip that ends in a refund is not
+  // a decision: the caller escalates (or, with a model attached, asks).
+  return null;
 }
 
 /**

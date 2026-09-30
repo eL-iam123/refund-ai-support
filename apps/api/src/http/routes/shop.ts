@@ -34,14 +34,15 @@ const ChatHistoryQuery = z.object({
 /**
  * What the storefront says when no key is configured.
  *
- * Short enough to sit in a panel, and complete enough to act on: choose a
- * provider, put its key in `.env` under the name that provider uses, restart.
- * The README section is named rather than linked by anchor because anchors move.
+ * Short enough to sit in a panel, and complete enough to act on: paste the key
+ * into `AI_API_KEY` in `.env` and restart. The provider is worked out from the
+ * key, so there is no second step and no lookup table to get wrong. The README
+ * section is named rather than linked by anchor because anchors move.
  */
 const NO_API_KEY_NOTE =
-  'No API key is set. To turn the model on, set AI_PROVIDER in .env to the provider you want ' +
-  '(groq, openai, anthropic, gemini, nvidia or openrouter), set that provider\'s API key in .env ' +
-  'under its own name, and restart the server. README.md, "Configuration", has the details.';
+  'No API key is set, so requests are being escalated to a person instead of read by a model. ' +
+  'To turn the model on, paste your provider\'s key into AI_API_KEY in .env and restart the ' +
+  'server - the provider is worked out from the key. README.md, "Configuration", has the details.';
 
 const RegisterSchema = z.object({
   email: z.string().min(3).max(200),
@@ -151,13 +152,12 @@ export function registerShopRoutes(app: FastifyInstance, ctx: AppContext): void 
    *
    * The note is written for whoever is looking at the storefront, which is not
    * always the operator. It says *what is missing* and *where to set it* instead
-   * of naming a variable, because `GROQ_API_KEY is not set` tells a reader
+   * of naming a variable, because `AI_API_KEY is not set` tells a reader
    * nothing they can act on unless they already know which provider is selected
    * and where its key goes - and the two are the first things a new deployment
    * gets wrong. The variable name is still available to an operator on the
    * request record itself, where a precise diagnostic is what is wanted.
-   */
-  app.get('/api/shop/assistant-status', () => ({
+   */  app.get('/api/shop/assistant-status', () => ({
     aiMode: aiModeLabel(ctx.pipeline),
     aiAvailable: ctx.pipeline.analyzer.available,
     aiNote: ctx.pipeline.analyzer.available ? '' : NO_API_KEY_NOTE,

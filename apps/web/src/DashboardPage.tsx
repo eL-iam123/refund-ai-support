@@ -1,4 +1,5 @@
 import { useCallback, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import type { AdminStatsDto } from '@refund/shared';
 import { api } from './api';
 import { ErrorNote, Loading, Panel } from './components';
@@ -62,7 +63,12 @@ function Overview({ stats }: { stats: AdminStatsDto }): ReactNode {
         <Tile label="Requests" value={String(stats.total)} />
         <Tile label="Approved" value={String(stats.byDecision.approved ?? 0)} tone="approved" />
         <Tile label="Denied" value={String(stats.byDecision.denied ?? 0)} tone="denied" />
-        <Tile label="Escalated" value={String(stats.byDecision.escalated ?? 0)} tone="escalated" />
+        <Tile
+          label="Escalated"
+          value={String(stats.byDecision.escalated ?? 0)}
+          tone="escalated"
+          to="/admin/requests?decision=escalated"
+        />
         <Tile label="Model calls" value={String(stats.llmCalls)} />
         <Tile label="Override attempts" value={String(stats.injectionAttempts)} tone={tone(stats.injectionAttempts)} />
         <Tile label="Model clamped" value={String(stats.clampsFired)} tone={tone(stats.clampsFired)} />
@@ -73,6 +79,10 @@ function Overview({ stats }: { stats: AdminStatsDto }): ReactNode {
         <strong>Model clamped</strong> counts requests where the resolver overruled the model's
         proposed decision or amount. It is the metric that shows the policy is actually in charge,
         so it is the one to read next to the override attempts.
+      </p>
+      <p className="muted">
+        <strong>Escalated</strong> is a person's queue, not a number: it links to every request
+        awaiting a human decision. Open it, decide, and the tile empties.
       </p>
     </Panel>
   );
@@ -87,15 +97,25 @@ function Tile({
   label,
   value,
   tone,
+  to,
 }: {
   label: string;
   value: string;
   tone?: 'approved' | 'denied' | 'escalated' | 'warn' | undefined;
+  to?: string;
 }): ReactNode {
-  return (
-    <div className={tone === undefined ? 'tile' : `tile tile-${tone}`}>
+  const body = (
+    <>
       <span className="tile-value">{value}</span>
       <span className="tile-label">{label}</span>
-    </div>
+    </>
+  );
+  const className = tone === undefined ? 'tile' : `tile tile-${tone}`;
+  return to === undefined ? (
+    <div className={className}>{body}</div>
+  ) : (
+    <Link className={`${className} tile-link`} to={to}>
+      {body}
+    </Link>
   );
 }

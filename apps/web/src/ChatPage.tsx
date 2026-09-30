@@ -360,11 +360,48 @@ function TurnView({ turn }: { turn: Turn }): ReactNode {
       </>
     );
   }
+  if (turn.kind === 'storedAsk') {
+    return (
+      <>
+        <p className="bubble-me">{turn.text}</p>
+        <Question reply={turn.question} />
+      </>
+    );
+  }
+  if (turn.kind === 'asked') {
+    return (
+      <>
+        <p className="bubble-me">{turn.text}</p>
+        <Question reply={turn.question} />
+      </>
+    );
+  }
   return (
     <>
       <p className="bubble-me">{turn.text}</p>
       <Reply result={turn.result} duplicate={turn.duplicate} />
     </>
+  );
+}
+
+/**
+ * The assistant asking for the one missing detail.
+ *
+ * Deliberately not a `Reply`: a question is not a decision, has no amount, and
+ * has no status pill to show. It is drawn as a question so a customer can tell
+ * "we are still talking" from "you have an answer" at a glance - and answering
+ * it is exactly what the composer stays open for.
+ */
+function Question({ reply }: { reply: string }): ReactNode {
+  return (
+    <div className="bubble-them">
+      <div className="row">
+        <Bot size={16} />
+        <span className="pill pill-escalated">One quick question</span>
+      </div>
+      <p>{reply}</p>
+      <footer className="row small muted">Answer this and I can check what the refund policy allows.</footer>
+    </div>
   );
 }
 

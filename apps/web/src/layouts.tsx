@@ -13,7 +13,8 @@ import {
   User,
   Wallet,
 } from 'lucide-react';
-import { clearStaffToken, onStaffTokenChange, staffToken } from './auth';
+import { isSignedIn, onStaffSessionChange, setStaffSession } from './auth';
+import { api } from './api';
 import { cartCount, subscribeToCart } from './shop/cartStore';
 
 /**
@@ -31,7 +32,7 @@ import { cartCount, subscribeToCart } from './shop/cartStore';
  *
  * Both halves are in one bundle because this is one demo binary. The boundary a
  * real deployment enforces is the one `StaffGate` models - the API refuses every
- * staff route without a token - so a hidden link is convenience, not security.
+ * staff route without a session - so a hidden link is convenience, not security.
  */
 export function ShopperLayout(): ReactNode {
   const count = useCartCount();
@@ -83,7 +84,7 @@ export function AdminLayout(): ReactNode {
           <NavLink to="/admin/requests"><Inbox size={16} /> All requests</NavLink>
           <NavLink to="/admin/policy"><FileText size={16} /> Policy</NavLink>
           {signedIn ? (
-            <button type="button" className="linkish" onClick={clearStaffToken}>
+            <button type="button" className="linkish" onClick={() => void signOut()}>
               <LogOut size={16} /> Sign out
             </button>
           ) : null}
@@ -107,5 +108,19 @@ function useCartCount(): number {
 }
 
 function useStaffSession(): boolean {
-  return useSyncExternalStore(onStaffTokenChange, staffToken, () => null) !== null;
+  return useSyncExternalStore(onStaffSessionChange, isSignedIn, () => false);
+}
+
+/**
+ * Clears the session cookie, then the local copy of who was signed in.
+ *
+ * Local state first is deliberate: the cookie is gone either way, and a failed
+ * logout call should not leave a header claiming somebody is still signed in.
+ */
+async function signOut(): Promise<void> {
+  try {
+    await api.signOut();
+  } finally {
+    setStaffSession(null);
+  }
 }

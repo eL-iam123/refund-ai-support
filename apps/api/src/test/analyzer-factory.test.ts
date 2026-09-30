@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createAnalyzer } from '../ai/index.js';
 import { AiUnavailableError, type AIAnalyzer, type ProviderAttempt } from '../ai/analyzer.js';
 import { readEnv, type Env } from '../config/env.js';
-import { processRefundRequest } from '../orchestrator.js';
+import { processRefundRequest, type ProcessResult } from '../orchestrator.js';
 import { openMemoryDatabase } from '../db/connection.js';
 import { seedDatabase } from '../db/seed.js';
 import { FakeAnalyzer } from './fakeAnalyzer.js';
@@ -155,7 +155,7 @@ describe('a missing key', () => {
     const analyzer = createAnalyzer(envWith({ AI_PROVIDER: 'groq' }));
     const attempts: ProviderAttempt[] = [];
 
-    await expect(analyzer.analyze({ message: 'my television is broken', order: null }, (a) => attempts.push(a))).rejects.toBeInstanceOf(
+    await expect(analyzer.analyze({ message: 'my television is broken', order: null, history: [] }, (a) => attempts.push(a))).rejects.toBeInstanceOf(
       AiUnavailableError,
     );
 
@@ -179,7 +179,7 @@ describe('a missing key', () => {
 describe('the pipeline with no model configured', () => {
   const DAMAGED_TV = 'My NOVA 43 inch television arrived cracked and unusable.';
 
-  function run(analyzer: AIAnalyzer): Promise<Awaited<ReturnType<typeof processRefundRequest>>> {
+  function run(analyzer: AIAnalyzer): Promise<Extract<ProcessResult, { stage: 'decided' }>> {
     const db = openMemoryDatabase();
     seedDatabase(db, TEST_NOW);
     const s = scenario('S-01');
@@ -197,7 +197,12 @@ describe('the pipeline with no model configured', () => {
         message: DAMAGED_TV,
         now: TEST_NOW,
       },
-    );
+    ).then((result) => {
+      if (result.stage === 'asked') {
+        throw new Error(`pipeline asked instead of deciding: ${result.question}`);
+      }
+      return result;
+    });
   }
 
   it('still answers, and escalates rather than approving on no evidence', async () => {

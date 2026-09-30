@@ -49,21 +49,27 @@ echo 'AI_API_KEY=paste_your_key_here' >> .env
 docker compose up
 ```
 
-The provider is worked out from the key, so a Groq, NVIDIA, Gemini, Anthropic,
-OpenRouter or OpenAI key all work with no other setting:
+The provider is worked out from the key, so any of them works with no other
+setting. None of them is required, and none is the default:
 
 | Your key starts with | Provider used |
 | --- | --- |
-| `gsk_` | Groq (free tier) |
-| `nvapi-` | NVIDIA (free tier) |
-| `AIza` | Gemini (free tier) |
-| `sk-or-v1-` | OpenRouter (free tier) |
-| `sk-ant-` | Anthropic |
 | `sk-` | OpenAI |
+| `sk-ant-` | Anthropic |
+| `AIza` | Gemini (free tier) |
+| `nvapi-` | NVIDIA (free tier) |
+| `sk-or-v1-` | OpenRouter (free tier) |
+| `gsk_` | Groq (free tier) |
 
-`AI_PROVIDER` is only for a provider's own compatible endpoint, and
-`AI_PROVIDER=local` runs the pattern matcher with no network at all — useful for
-a demo, and refused when `NODE_ENV=production`.
+A key whose prefix is not in that table is refused at boot rather than guessed
+at, because the only available guess is a vendor you never named. Set
+`AI_PROVIDER` explicitly for a self-hosted or OpenAI-compatible endpoint, and
+`AI_BASE_URL` alongside it.
+
+`AI_PROVIDER=local` runs the pattern matcher with no network at all — the named
+version of "no model", and refused when `NODE_ENV=production`. It is also what
+an empty configuration resolves to, so a deployment with no key at all is
+visibly running a pattern matcher rather than quietly dialling a provider.
 
 **No key is needed to run the product.** With no key the server starts, reports
 the model as unavailable on the staff dashboard, and every request that would
@@ -72,12 +78,27 @@ recoverable; a service that refuses to boot has no queue at all. Set
 `AI_REQUIRED=true` for a deployment that must not run that way — see
 [Configuration](#configuration).
 
-`docker-compose.yml` ships a placeholder `ADMIN_API_SECRET` so the command above
-works on a clean machine. It is rejected at boot when `NODE_ENV=production`, so
-claiming to be a deployment means supplying a deployment's secrets:
+**The staff console is off until you turn it on.** It is not a hidden link with
+a login form behind it — with no operator account configured, `/admin` is not
+rendered and every staff route answers `404`, so a fresh clone has no admin
+surface to find. Two lines in `.env` and a restart bring it back:
 
 ```bash
-NODE_ENV=production ADMIN_API_SECRET="$(openssl rand -hex 32)" docker compose up
+echo 'ADMIN_USERNAME=admin' >> .env
+echo 'ADMIN_PASSWORD=refund-desk-demo' >> .env     # or: openssl rand -base64 24
+docker compose up
+```
+
+`admin-login.txt` holds the demo pair and what happens when you sign in. That
+exact password is refused when `NODE_ENV=production`, because it is printed in a
+file in this repository.
+
+A production run wants a real model and a real password:
+
+```bash
+NODE_ENV=production ADMIN_USERNAME=ops \
+  ADMIN_PASSWORD="$(openssl rand -base64 24)" \
+  AI_API_KEY=paste_your_key_here docker compose up
 ```
 
 ### Without Docker
@@ -95,15 +116,18 @@ Open http://localhost:5173. The customer view is `/`; the agent console is
 `/admin`; the storefront is http://localhost:5174/shop/ (and, in a production
 build, the same origin at `/shop`).
 
-The staff console is gated. Mint a token first:
+The staff console needs `ADMIN_USERNAME` and `ADMIN_PASSWORD` in `.env`; without
+them `/admin` does not exist. Set them, restart, and sign in at `/admin` with that
+username and password. The result is an httpOnly `SameSite=Lax` cookie that every
+API call carries — no token is ever handed to the browser's JavaScript, so a
+script injected into the storefront cannot read an operator's session out of it.
+`admin-login.txt` has the demo pair.
+
+For a script rather than a browser, mint a token that carries the same authority:
 
 ```bash
 pnpm --filter @refund/api token --agent alice --role admin   # or --role agent
 ```
-
-Paste it into the console once; it is kept in `sessionStorage` and attached to
-every API call by `apps/web/src/api.ts`. `ADMIN_API_SECRET` must be set or the
-server refuses to start.
 
 ## The shop
 
@@ -184,7 +208,7 @@ apps/api            Fastify 5 + SQLite (better-sqlite3)
   src/security/     injection scanner
   src/retrieval/    order identification and item scoping
   src/db/           schema, migrations, repositories
-  src/auth/         staff tokens, roles, guards
+  src/auth/         staff sign-in, session cookie, tokens, roles, guards
   src/shop/         storefront accounts, catalogue, checkout
   src/http/         routes, serialization, error mapping
   src/response/     deterministic customer replies
@@ -193,7 +217,7 @@ apps/web            React 19 + Vite + react-router 7   (storefront and staff con
 
 One client, not two. The storefront and the staff console are different audiences
 with different trust levels, but they are the same origin and the same code - the
-console is behind a token gate, the shop behind a session cookie - and splitting
+console is behind a sign-in, the shop behind a session cookie - and splitting
 them into separate apps only bought a second build, a second deploy and a second
 thing to fall out of date with the first.
 
@@ -233,8 +257,38 @@ Four separate mechanisms, not one convention:
 3. **Escalation is the default** — when no rule concludes, the request goes to a human.
    Never an automatic approval.
 4. **Disagreement is recorded** — if the model proposed something else,
-   `reconcile()` writes an `OverrideRecord` into the audit trail. You can always see
-   what the model wanted versus what the policy decided.
+    `reconcile()` writes an `OverrideRecord` into the audit trail. You can always see
+    what the model wanted versus what the policy decided.
+
+### The assistant asks before it assumes
+
+The model's two tools are `ask_question` and `decide_claim`; there is no third. A
+request is decided in one turn when the customer has said enough, and the model is
+expected to ask when it has not.
+
+- **An ask is a question, never a decision.** It returns `200 { question, dialogueId }`,
+  writes no `refund_requests` row, and is stored as dialogue — so a refresh keeps
+  the exchange.
+- **Asks are anchor-neutral.** A turn is recorded with no order until the customer's
+  answer resolves one; the ask is then adopted onto that order, so the answer is
+  decided against the conversation that asked it and the customer's thread reads as
+  one continuous conversation.
+- **The deterministic half.** When the message genuinely spans more than one of the
+  customer's own orders (equal product matches), order resolution stays unresolved
+  and the pipeline asks *which order* — a coin flip is never resolved as a pick.
+  A single unresolved reference escalates rather than confirming or denying an
+  id's existence.
+- **Grounding spans turns.** The claim's quotes are checked against every *customer*
+  line in the dialogue transcript plus the current message — an earlier turn is
+  citable, the assistant's own wording never is.
+
+### Demo history is not your queue
+
+The console seeds a few recorded decisions so it opens onto history rather than an
+empty table. Because those rows matter differently from real claims, every list
+row and detail carries `source` — `scenario` for replay, `storefront` for a live
+customer — and the queue can filter on it. The tag is derived from the row, not
+written at request time, so a seeded run cannot masquerade as a customer.
 
 ## Configuration
 
@@ -251,15 +305,23 @@ docker run …` is honoured even if a `.env` was baked into the image.
 
 ### The two that matter
 
+Nothing is required to start. These are the two that decide what the product can
+do once it is running.
+
 | Variable | Why |
 |---|---|
-| `ADMIN_API_SECRET` | Signs staff tokens. Without it the server refuses to boot. `openssl rand -hex 32`. Anyone holding it can mint admin tokens, so it is never committed. |
+| `ADMIN_USERNAME` + `ADMIN_PASSWORD` | The operator account. Both or neither: without them the staff console does not exist, `/admin` is not rendered, and every staff route answers `404`. The demo pair is in `admin-login.txt` and is refused in production. |
 | `AI_API_KEY` | The model key, whatever provider it is for — the provider is inferred from its prefix. Optional: without it the product runs and escalates. Set `AI_REQUIRED=true` to make it mandatory. |
 **No key is committed to this repository, and that is deliberate.** A key in git
 is a key in every clone, every image layer and every fork, permanently and
 publicly; the honest fix is a key that is not here. Per-provider variables
-(`GROQ_API_KEY`, `NVIDIA_API_KEY`, and so on) still work for a setup that keeps
+(`NVIDIA_API_KEY`, `GEMINI_API_KEY`, and so on) still work for a setup that keeps
 its keys separate, and take second place to `AI_API_KEY` when both are set.
+
+`ADMIN_API_SECRET` is optional. When set it signs staff sessions and tokens, so
+rotating it invalidates every outstanding session at once; when unset the signing
+key is derived from `ADMIN_PASSWORD`, which is enough for the console to work and
+means the ordinary setup is two variables rather than three.
 
 **A missing key is not an error by default.** The server starts, the assistant
 has no model behind it, every request that needs a claim escalates to a person,
@@ -405,6 +467,7 @@ human instead. Neither setting can approve anything.
 | `POST` | `/api/refunds/:id/settle` | verify and pay a reserved refund, admin only |
 | `POST` | `/api/refunds/:id/release` | give a reservation back without paying, admin only, reason required |
 | `GET` | `/api/whoami` | the identity the server attributes this session's actions to |
+| `POST` | `/api/admin/login` \| `/logout` \| `GET /session` | staff sign-in, session cookie, sign-out. `404` when no operator account is configured |
 | `GET` | `/api/admin/stats` | dashboard counters, staff only |
 | `GET` | `/api/shop/products` | the live catalogue |
 | `POST` | `/api/shop/register`, `/api/shop/login`, `/api/shop/demo-login` | accounts |
@@ -538,19 +601,46 @@ sends `idempotency_key`, and this ledger is what makes that call safe to retry.
 
 ### Staff authentication
 
-Staff routes require `Authorization: Bearer <token>`; missing, malformed, forged
-and expired tokens all get `401`, and an agent token on an admin-only route gets
-`403`. Roles are `agent` (read requests, read catalogue and stats) and `admin`
-(plus override). `GET /api/health`, `GET /api/policy`, `GET /api/scenarios` and
-`POST /api/chat/messages` are deliberately public so a customer can reach the
-assistant and read the policy without an account.
+**First question: is there a console at all.** If `ADMIN_USERNAME` and
+`ADMIN_PASSWORD` are not both set, every staff route answers `404` — not `401`.
+`401` would confirm that an admin area is contemplated here, and the guarantee
+worth having is that an unconfigured deployment has no admin surface to find,
+not merely one that rejects the credential you did not set. It holds even
+against a correctly signed token, which is asserted in the suite, and the shop,
+the policy and the assistant are untouched by it.
 
-Tokens are HMAC-SHA256 over `agent.role.expiry`, signed with
-`ADMIN_API_SECRET`. The secret is required at startup — there is no default and
-no dev bypass, because a default would be a way in. It must be at least 32
-characters, and that is checked at boot rather than at the first customer
-request. A missing *provider* key is deliberately not in that list: it degrades
-the queue instead of stopping the service.
+Beyond that, a staff route needs a valid credential: missing, malformed, forged
+and expired ones all get `401`, and an agent credential on an admin-only route
+gets `403`. Roles are `agent` (read requests, read catalogue and stats) and
+`admin` (plus override). `GET /api/health`, `GET /api/policy`,
+`GET /api/scenarios` and `POST /api/chat/messages` are deliberately public so a
+customer can reach the assistant and read the policy without an account.
+
+**How you get one.** A browser signs in at `POST /api/admin/login` with the
+username and password from the environment and gets an httpOnly `SameSite=Lax`
+cookie. A script mints a bearer token with the CLI. Both are the same signed
+token verified against the same key, so a session has exactly the authority a
+minted token does and no route is reachable one way but not the other.
+
+The sign-in endpoint is the one this project's design would normally avoid, so
+what it is *not* is the point: one account, from the environment, with no way to
+create another over the network and no user table to inject into; a constant-time
+comparison; one message for a wrong username and a wrong password, so it cannot
+enumerate accounts; and a cookie in response, never a token in the body, so
+there is no long-lived credential in JavaScript. Behind an identity provider the
+whole file disappears.
+
+Tokens are HMAC-SHA256 over `sub.role.exp`, signed with `ADMIN_API_SECRET` or
+with a key derived from `ADMIN_PASSWORD`. There is no default signing key and no
+dev bypass, because a default would be a way in; `ADMIN_API_SECRET` must be at
+least 32 characters if supplied, and that is checked at boot rather than at the
+first customer request. A missing *provider* key is deliberately not in that
+list: it degrades the queue instead of stopping the service.
+
+Sign out clears the cookie. One limitation, asserted in the suite rather than
+described: the session is stateless, so a copy taken before sign out stays valid
+until it expires (eight hours) or the signing key changes. That is the trade for
+not keeping a second table of staff credentials.
 
 `GET /api/admin/audit/verify` is admin-only and re-walks the audit chain on
 demand, naming the id of the row that fails. It returns `200` with `ok: false`
@@ -560,7 +650,7 @@ failed request.
 ## Testing
 
 ```
-366 passed · 8 skipped · 0 network required
+456 passed · 8 skipped · 0 network required
 ```
 
 The 8 skipped are the opt-in live provider suite, which stays dark unless
@@ -579,8 +669,13 @@ project hit rather than a hypothetical one.
 - **Grounding tests** — invented quotes are rejected; verified ones survive.
 - **Injection tests** — all four categories detected, honest refund requests *not*
   flagged, and S-18 confirmed undetected.
-- **Staff auth tests** — `401` for missing/malformed/forged/expired tokens, `403`
-  for an agent on an admin route, and the customer chat endpoint left open.
+- **Staff auth tests** — `401` for missing/malformed/forged/expired credentials,
+  `403` for an agent on an admin route, and the customer chat endpoint left open.
+- **Admin console tests** — the console absent without an operator account (`404`
+  on every staff route, including against a correctly signed token), sign-in
+  setting an httpOnly cookie with the same authority a minted token has, one
+  reply for a wrong username and a wrong password, and the published demo
+  password refused in production.
 - **Shop tests** — registration, login, demo login, session binding, checkout,
   stock, order isolation, and that a shop session overrides a forged body
   `customerId`.
@@ -645,7 +740,7 @@ one is like this.
   The one thing that would make a missing key invisible is a deployment paying
   for a model it never reaches, so `AI_REQUIRED` turns that into a failed boot,
   and a key is never committed to make the failure go away.
-- **No secret in the repository.** `ADMIN_API_SECRET` and every model key are
+- **No secret in the repository.** `ADMIN_API_SECRET`, `ADMIN_PASSWORD` and every model key are
   supplied by the operator. `.env` is gitignored, `.env.example` documents the
   shape without values, and the compose file reads the key from the environment
   at container start rather than baking it into a layer.

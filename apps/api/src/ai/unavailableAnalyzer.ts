@@ -1,4 +1,4 @@
-import { AiUnavailableError, type AIAnalyzer, type AnalyzerInput, type AnalyzerResult, type AttemptObserver } from './analyzer.js';
+import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver } from './analyzer.js';
 
 /**
  * The analyzer used when no provider key is configured.
@@ -40,7 +40,7 @@ export function UnavailableAnalyzer(reason: string, missingKey: string): AIAnaly
     // show a shopper: it is a hint to an operator about their own deployment, not
     // anything about the database.
     unavailableReason: reason,
-    analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AnalyzerResult> {
+    analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
       observer({
         model,
         attempt: 1,

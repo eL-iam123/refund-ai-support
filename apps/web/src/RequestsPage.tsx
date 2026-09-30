@@ -1,6 +1,6 @@
 import { useCallback, useState, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
-import type { Decision, RefundRequestSummaryDto } from '@refund/shared';
+import { Link, useSearchParams } from 'react-router-dom';
+import type { Decision, RefundRequestSummaryDto, RequestSourceDto } from '@refund/shared';
 import { api } from './api';
 import { DecisionBadge, Empty, ErrorNote, Loading, Panel } from './components';
 import { formatCents, formatTime, truncate } from './format';
@@ -11,6 +11,10 @@ import { useAsyncData } from './useAsyncData';
  *
  * `reasonCodes` is the deciding rules, not every rule that ran: an operator
  * scanning a queue needs "why", and the full pass trail belongs in the drawer.
+ *
+ * The queue can be opened at `?decision=escalated` from the dashboard tile, so
+ * an escalated row is a link away from being a person's inbox rather than a
+ * number on a tile.
  */
 
 const FILTERS: readonly { value: Decision | ''; label: string }[] = [
@@ -20,18 +24,41 @@ const FILTERS: readonly { value: Decision | ''; label: string }[] = [
   { value: 'escalated', label: 'Escalated' },
 ];
 
+const SOURCES: readonly { value: RequestSourceDto | ''; label: string }[] = [
+  { value: '', label: 'All sources' },
+  { value: 'storefront', label: 'Live' },
+  { value: 'scenario', label: 'Scenario' },
+];
+
 export function RequestsPage(): ReactNode {
-  const [filter, setFilter] = useState<Decision | ''>('');
+  const [params] = useSearchParams();
+  const initial = FILTERS.some((f) => f.value === (params.get('decision') ?? ''))
+    ? (params.get('decision') as Decision)
+    : '';
+  const [filter, setFilter] = useState<Decision | ''>(initial);
+  const [source, setSource] = useState<RequestSourceDto | ''>('');
   const [search, setSearch] = useState<string>('');
 
   const load = useCallback(
-    () => api.listRequests({ decision: filter || undefined, q: search || undefined }),
-    [filter, search],
+    () => api.listRequests({ decision: filter || undefined, source: source || undefined, q: search || undefined }),
+    [filter, source, search],
   );
-  const state = useAsyncData(load, `${filter}|${search}`);
+  const state = useAsyncData(load, `${filter}|${source}|${search}`);
 
   return (
-    <Panel title="Requests" action={<Filters filter={filter} search={search} onFilter={setFilter} onSearch={setSearch} />}>
+    <Panel
+      title="Requests"
+      action={
+        <Filters
+          filter={filter}
+          source={source}
+          search={search}
+          onFilter={setFilter}
+          onSource={setSource}
+          onSearch={setSearch}
+        />
+      }
+    >
       {state.status === 'error' ? <ErrorNote error={state.error} /> : null}
       {state.status === 'loading' ? <Loading label="Loading requests…" /> : null}
       {state.status === 'ready' && state.value.requests.length === 0 ? (
@@ -46,13 +73,17 @@ export function RequestsPage(): ReactNode {
 
 function Filters({
   filter,
+  source,
   search,
   onFilter,
+  onSource,
   onSearch,
 }: {
   filter: Decision | '';
+  source: RequestSourceDto | '';
   search: string;
   onFilter: (next: Decision | '') => void;
+  onSource: (next: RequestSourceDto | '') => void;
   onSearch: (next: string) => void;
 }): ReactNode {
   return (
@@ -67,6 +98,13 @@ function Filters({
           {option.label}
         </button>
       ))}
+      <select value={source} onChange={(event) => onSource(event.target.value as RequestSourceDto | '')} aria-label="filter by source">
+        {SOURCES.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
       <input
         value={search}
         onChange={(event) => onSearch(event.target.value)}
@@ -95,7 +133,12 @@ function RequestTable({ requests }: { requests: readonly RefundRequestSummaryDto
         {requests.map((row) => (
           <tr key={row.id}>
             <td className="muted nowrap">{formatTime(row.createdAt)}</td>
-            <td className="nowrap">{row.customerName}</td>
+            <td className="nowrap">
+              <span className={row.source === 'scenario' ? 'tag tag-scenario' : 'tag tag-live'}>
+                {row.source === 'scenario' ? 'scenario' : 'live'}
+              </span>{' '}
+              {row.customerName}
+            </td>
             <td>
               <Link to={`/admin/requests/${row.id}`}>{truncate(row.message, 72)}</Link>
               {row.injectionDetected ? <span className="tag tag-warn">override attempt</span> : null}

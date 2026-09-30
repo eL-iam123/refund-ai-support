@@ -107,11 +107,17 @@ describe('a process that requires a model refuses to start without one', () => {
     // *supposed* to be optional - the provider and the required switch - are the
     // two that break a default `docker compose up`, and they break it as a crash
     // loop with an enum error that reads like a config mistake.
+    //
+    // With both empty there is no provider and no key, so the resolved answer is
+    // `local`: the named pattern matcher. That used to fall back to a vendor
+    // nobody asked for, which meant an empty configuration reported a missing
+    // Groq key - sending whoever was setting the stack up to a company they had
+    // no account with.
     process.env.NODE_ENV = 'development';
     delete process.env.AI_REQUIRED;
     process.env.AI_PROVIDER = '';
     process.env.AI_API_KEY = '';
-    expect(readEnv(NO_FILE).AI_PROVIDER).toBe('groq');
+    expect(readEnv(NO_FILE).AI_PROVIDER).toBe('local');
   });
 
   it('treats an empty AI_REQUIRED as unset, not as invalid', () => {
@@ -204,12 +210,26 @@ describe('one key is enough to choose the provider', () => {
     expect(readEnv(NO_FILE).AI_PROVIDER).toBe('nvidia');
   });
 
-  it('accepts an unrecognised key rather than refusing to start', () => {
-    // A key we cannot identify is still a key. Refusing to boot over an
-    // unfamiliar prefix would be a worse failure than letting the provider
-    // reject it with an error that names the real problem.
-    const env = readEnvWithKey('some-key-shape-we-have-not-seen');
-    expect(env.AI_PROVIDER).toBe('groq');
+  it('refuses to start on a key it cannot place', () => {
+    // A key we cannot identify is a key we cannot use, and there is only one
+    // thing to do with an unusable configuration: say so, loudly, at boot. The
+    // alternatives are both worse - guessing a vendor would call an API nobody
+    // authorised, and having nothing to call would run the whole product with no
+    // model while reporting a healthy start. The error names the fix instead.
+    expect(() => readEnvWithKey('some-key-shape-we-have-not-seen')).toThrow(
+      /does not begin with a prefix/,
+    );
+  });
+
+  it('accepts an unrecognised key once AI_PROVIDER says where it goes', () => {
+    // The real case behind the rule above: a self-hosted or OpenAI-compatible
+    // endpoint whose keys this project has never seen. Naming the provider is
+    // the operator saying so, and it is the only thing that can make an
+    // unfamiliar key usable.
+    process.env.AI_PROVIDER = 'openai';
+    process.env.AI_API_KEY = 'a-self-hosted-key-we-do-not-know';
+    const env = readEnv(NO_FILE);
+    expect(env.AI_PROVIDER).toBe('openai');
     // And it counts as a key, so this is not reported as a missing one.
     expect(missingApiKeyFor(env)).toBeNull();
   });

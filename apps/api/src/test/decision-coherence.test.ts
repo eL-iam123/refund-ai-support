@@ -174,6 +174,8 @@ describe('the invariant is enforced by the write path', () => {
     const row = findRequestById(harness.db, 'REQ-COHERENCE-1');
     expect(row).not.toBeNull();
     expect(() => assertDecisionCoherent(row?.decision as Decision, row?.refundAmountCents ?? -1)).not.toThrow();
-    expect(testEnv().ADMIN_API_SECRET.length).toBeGreaterThan(0);
+    // The signing key is configuration, not a constant: the harness supplies it
+    // because an app with no key would have no admin console to guard.
+    expect(testEnv().ADMIN_API_SECRET).toBeTruthy();
   });
 });

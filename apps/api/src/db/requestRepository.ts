@@ -148,6 +148,7 @@ export function findRequestById(db: Db, id: string): PersistedRequest | null {
 
 export interface ListFilter {
   readonly decision?: string | undefined;
+  readonly source?: 'scenario' | 'storefront' | undefined;
   readonly customerId?: string | undefined;
   readonly search?: string | undefined;
   readonly limit: number;
@@ -160,6 +161,14 @@ export function listRequests(db: Db, filter: ListFilter): PersistedRequest[] {
   if (filter.decision !== undefined) {
     clauses.push('decision = ?');
     params.push(filter.decision);
+  }
+  // Scenario fixtures carry a scenario_id; storefront requests never do. The
+  // discriminator is whether a demo id is attached, so the two can never
+  // collide on the same row.
+  if (filter.source === 'scenario') {
+    clauses.push('scenario_id IS NOT NULL');
+  } else if (filter.source === 'storefront') {
+    clauses.push('scenario_id IS NULL');
   }
   if (filter.customerId !== undefined) {
     clauses.push('customer_id = ?');

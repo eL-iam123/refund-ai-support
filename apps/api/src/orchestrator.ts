@@ -17,6 +17,8 @@ import type { AIAnalyzer, AttemptObserver, ProviderAttempt } from './ai/index.js
 import { toAnalyzerOrder } from './ai/openaiAnalyzer.js';
 import { disputeCeiling, identifyOrder, type Identification } from './retrieval/identifyOrder.js';
 import { scanForInjection } from './security/injection.js';
+import { transcriptForOrder } from './retrieval/conversation.js';
+import { adoptDialogueToOrder } from './db/dialogue.js';
 import { runFactGates, type GateResult } from './policy/gates.js';
 import { evaluateRule, evaluateRules } from './policy/engine.js';
 import { R14RequestIntegrity } from './policy/rules/R-14-request-integrity.js';
@@ -35,6 +37,16 @@ import { formatCents } from './lib/money.js';
  * scenario suite means. The model's output is treated as a claim from stage 4
  * onwards, and becomes a decision in exactly one place: the resolver.
  *
+ * There is one deliberate exception to that ordering, and it is the point
+ * between retrieval and the fact gates. When no order could be resolved, the
+ * assistant is allowed to ask the customer to clarify *which* order before the
+ * policy runs - because with no order there is nothing for the policy to run
+ * on, and the alternative to a question is an escalation for what is usually a
+ * missing order reference. The ask only happens under conditions that make it
+ * safe (a real analyzer to continue the conversation, no injection attempt, at
+ * least one order to clarify against), and it produces no decision and no
+ * request row - just one stored question.
+ *
  * Each stage is a separate function taking a context it can see completely.
  * The top-level function is then short enough to read in one pass, which is
  * the point: a reviewer should be able to confirm the ordering without
@@ -42,6 +54,8 @@ import { formatCents } from './lib/money.js';
  */
 
 const REASON_RULES = rulesForStage('reason_rules');
+/** How much of the prior conversation is shipped to the model with each turn. */
+const HISTORY_LIMIT = 12;
 
 /**
  * Persists one model attempt. Successful or not, first try or fifth.
@@ -70,19 +84,42 @@ export interface ProcessInput {
   readonly now: Date;
 }
 
-export interface ProcessResult {
-  readonly customer: CustomerRecord;
-  readonly order: OrderRecord | null;
-  readonly decision: RefundDecision;
-  readonly extraction: ClaimExtraction | null;
-  readonly grounding: GroundingResult | null;
-  readonly injection: InjectionScan;
-  readonly responseText: string;
-  readonly llmCalled: boolean;
-  readonly aiMode: string;
-  readonly timings: readonly StageTiming[];
-  readonly resolvedOrderId: string | null;
-}
+/**
+ * What running the pipeline produced.
+ *
+ * Two outputs, and the caller cannot confuse them because they are different
+ * types. An `asked` result is the assistant choosing to clarify: nothing was
+ * decided, so nothing may be persisted as a decision - the caller stores the
+ * question instead. A `decided` result is the resolver's decision, which the
+ * caller persists as a request row. The discriminator makes "a question is not
+ * a decision" a compile-time property of every caller, not a comment.
+ */
+export type ProcessResult =
+  | {
+      readonly stage: 'asked';
+      readonly question: string;
+      readonly customer: CustomerRecord;
+      readonly order: OrderRecord | null;
+      readonly resolvedOrderId: string | null;
+      readonly injection: InjectionScan;
+      readonly llmCalled: boolean;
+      readonly aiMode: string;
+      readonly timings: readonly StageTiming[];
+    }
+  | {
+      readonly stage: 'decided';
+      readonly customer: CustomerRecord;
+      readonly order: OrderRecord | null;
+      readonly decision: RefundDecision;
+      readonly extraction: ClaimExtraction | null;
+      readonly grounding: GroundingResult | null;
+      readonly injection: InjectionScan;
+      readonly responseText: string;
+      readonly llmCalled: boolean;
+      readonly aiMode: string;
+      readonly timings: readonly StageTiming[];
+      readonly resolvedOrderId: string | null;
+    };
 
 export class UnknownCustomerError extends Error {
   constructor(customerId: string) {
@@ -125,6 +162,18 @@ export async function processRefundRequest(
 
   const intake = runIntake(db, input, deps.injectionAction, log);
   const retrieval = retrieveOrder(db, input, intake, log);
+
+  // The clarify turn, before the fact gates. Its guards are its whole safety:
+  // unresolved order, a real analyzer to continue the conversation, no
+  // injection attempt, and at least one order to clarify against. Without all
+  // four the request proceeds into the pipeline and escalates exactly as
+  // before, so the question cannot widen what the policy would decide.
+  const mode = `${deps.analyzer.label} (${deps.analyzer.model})`;
+  const clarification = clarifyOrder(retrieval.found, deps.analyzer, intake.injection, log);
+  if (clarification !== null) {
+    return askedResult(clarification, retrieval.order, intake, false, mode, log);
+  }
+
   const gates = runFactGates(retrieval.context);
   log.record(
     'fact_gates',
@@ -133,7 +182,11 @@ export async function processRefundRequest(
       : `${gates.blockedItems.length} item(s) excluded, ${formatCents(gates.eligibleAmountCents)} eligible`,
   );
 
-  const analysis = await analyseClaim(deps, input, gates, retrieval.order, observer, log);
+  const analysis = await analyseClaim(db, deps, input, gates, retrieval.order, observer, log);
+  if (analysis.outcome === 'question') {
+    return askedResult(analysis.question, retrieval.order, intake, true, mode, log);
+  }
+
   const reasonEvaluations = runReasonRules(retrieval.context, gates, analysis, log);
   const decision = resolveDecision(
     db,
@@ -147,7 +200,15 @@ export async function processRefundRequest(
 
   const responseText = composeReply(decision, retrieval.order, input.message, log);
 
+  // An unresolved-order question was answered; its dialogue belongs to the
+  // order it resolved to. Adoption is a display-and-context concern only - the
+  // decision above is what it is either way.
+  if (retrieval.order !== null) {
+    adoptDialogueToOrder(db, input.customerId, retrieval.order.id);
+  }
+
   return {
+    stage: 'decided',
     customer: intake.customer,
     order: retrieval.order,
     decision,
@@ -158,9 +219,35 @@ export async function processRefundRequest(
     // True whenever the request reached stage 4 without being gate-terminated,
     // whether or not the provider answered. The attempt rows say which.
     llmCalled: !gates.terminal,
-    aiMode: `${deps.analyzer.label} (${deps.analyzer.model})`,
+    aiMode: mode,
     timings: log.all(),
     resolvedOrderId: retrieval.order?.id ?? null,
+  };
+}
+
+/**
+ * The asked branch of the pipeline, built in one place so the two question
+ * exits - OrderRetrieval's deterministic clarify, and the model's own ask -
+ * cannot drift apart.
+ */
+function askedResult(
+  question: string,
+  order: OrderRecord | null,
+  intake: Intake,
+  llmCalled: boolean,
+  aiMode: string,
+  log: StageLog,
+): Extract<ProcessResult, { stage: 'asked' }> {
+  return {
+    stage: 'asked',
+    question,
+    customer: intake.customer,
+    order,
+    resolvedOrderId: order?.id ?? null,
+    injection: intake.injection,
+    llmCalled,
+    aiMode,
+    timings: log.all(),
   };
 }
 
@@ -243,16 +330,73 @@ function retrieveOrder(db: Db, input: ProcessInput, intake: Intake, log: StageLo
   };
 }
 
+/**
+ * The one question the pipeline asks without the model: "which order?".
+ *
+ * Between retrieval and the fact gates, because an unresolved order leaves the
+ * fact gates nothing to run on. Every guard here is load-bearing and each one
+ * answers a way this could go wrong:
+ *
+ *  - `unresolved` only - a resolved order proceeds to the model, which may ask
+ *    its own question in its own words.
+ *  - `available` - the question is only worth asking if a model will be there
+ *    to read the customer's answer. Without one, asking just delays the
+ *    escalation by a round trip.
+ *  - no injection attempt - a hostile message gets the safe path (R-14, a
+ *    person) instead of a friendly conversation.
+ *  - at least one candidate - a customer with no orders on file has nothing to
+ *    clarify; the question would be nonsense and the escalation is correct.
+ *
+ * Returns null (proceed) rather than throwing, so the ordinary pipeline shape -
+ * everything terminal escalates - is untouched.
+ */
+function clarifyOrder(
+  found: Identification,
+  analyzer: AIAnalyzer,
+  injection: InjectionScan,
+  log: StageLog,
+): string | null {
+  // Two or more of the customer's own orders stand behind the ambiguity: this
+  // is "which order do you mean?", a question only the customer can answer. A
+  // single unresolved reference - a typo, or an id that belongs to nobody on
+  // this account - is deliberately NOT asked about: probing an id must not be
+  // answered with a confirmation that it does or does not exist, so that case
+  // keeps the R-13 escalation a person reviews. Injection attempts and a
+  // missing model are likewise not conversable, and proceed to the pipeline.
+  if (found.basis !== 'unresolved' || !analyzer.available || injection.detected || found.candidates < 2) {
+    return null;
+  }
+  const question = `I could not tell which order that is about - I can see ${found.candidates} recent orders on your account. Could you send the order number (something like ORD-1234) or the name of the product it concerns?`;
+  log.record('ai_analysis', 'not reached: asked the customer to clarify which order');
+  return question;
+}
+
 interface Analysis {
   readonly extraction: ClaimExtraction | null;
   readonly grounding: GroundingResult | null;
   readonly proposal: AiProposal | null;
 }
 
-const NO_ANALYSIS: Analysis = { extraction: null, grounding: null, proposal: null };
+type AnalyseOutcome =
+  | ({ readonly outcome: 'claim' } & Analysis)
+  | { readonly outcome: 'question'; readonly question: string; readonly model: string };
+
+const NO_ANALYSIS: AnalyseOutcome = {
+  outcome: 'claim',
+  extraction: null,
+  grounding: null,
+  proposal: null,
+};
 
 /**
  * Stage 4: the one model call, plus the grounding check on its output.
+ *
+ * The model may answer with a question or with a claim; either is a valid
+ * reply and both are real behaviours of a messenger. A question flows straight
+ * out as the `asked` result - nothing was decided, so nothing is handed to the
+ * resolver. A claim gets grounded against the full customer corpus: the current
+ * message and every earlier message of theirs, so the model is permitted to
+ * quote an earlier turn and the check still catches a quote from anywhere else.
  *
  * The catch is the point, not a best-effort convenience. Every rule has already
  * run on order facts by this point, so a provider that is down, rate-limited or
@@ -260,35 +404,55 @@ const NO_ANALYSIS: Analysis = { extraction: null, grounding: null, proposal: nul
  * else - and "no claim" can only escalate, never approve.
  */
 async function analyseClaim(
+  db: Db,
   deps: PipelineDeps,
   input: ProcessInput,
   gates: GateResult,
   order: OrderRecord | null,
   observer: AttemptObserver,
   log: StageLog,
-): Promise<Analysis> {
+): Promise<AnalyseOutcome> {
   if (gates.terminal) {
     log.record('ai_analysis', 'not reached: fact gates terminated the request');
     return NO_ANALYSIS;
   }
 
-  let result: Awaited<ReturnType<AIAnalyzer['analyze']>>;
+  const history = transcriptForOrder(db, input.customerId, order?.id ?? null, input.now, HISTORY_LIMIT);
+
+  let reply: Awaited<ReturnType<AIAnalyzer['analyze']>>;
   try {
-    result = await deps.analyzer.analyze({ message: input.message, order: toAnalyzerOrder(order) }, observer);
+    reply = await deps.analyzer.analyze(
+      { message: input.message, order: toAnalyzerOrder(order), history },
+      observer,
+    );
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error);
     log.record('ai_analysis', `no usable extraction (${truncate(reason, 120)}); continuing without a claim`);
-    return NO_ANALYSIS;
+    return { outcome: 'claim', extraction: null, grounding: null, proposal: null };
   }
 
-  const grounding = verifyGrounding(result.extraction, input.message);
+  if (reply.kind === 'question') {
+    log.record('ai_analysis', `asked the customer the missing detail (${reply.model})`);
+    return { outcome: 'question', question: reply.question, model: reply.model };
+  }
+
+  // Only the customer's side of the transcript is eligible evidence. The model
+  // may quote something the customer said two messages ago, but never its own
+  // question and never its own phrasing.
+  const corpus = [...history.filter((line) => line.role === 'customer').map((line) => line.text), input.message];
+  const grounding = verifyGrounding(reply.extraction, corpus);
   log.record(
     'ai_analysis',
-    `reason="${result.extraction.reason}" intent="${result.extraction.intent}" ` +
-      `lang=${result.extraction.language} grounded=${String(grounding?.grounded ?? false)} ` +
-      `via ${result.model}`,
+    `reason="${reply.extraction.reason}" intent="${reply.extraction.intent}" ` +
+      `lang=${reply.extraction.language} grounded=${String(grounding?.grounded ?? false)} ` +
+      `via ${reply.model}`,
   );
-  return { extraction: result.extraction, grounding, proposal: result.proposal };
+  return {
+    outcome: 'claim',
+    extraction: reply.extraction,
+    grounding,
+    proposal: reply.proposal,
+  };
 }
 
 function truncate(text: string, max: number): string {

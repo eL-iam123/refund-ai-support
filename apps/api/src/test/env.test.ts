@@ -150,7 +150,11 @@ describe('the bundled placeholder secret', () => {
   function envFileWith(extra: Record<string, string>): string {
     const path = join(tmpdir(), `placeholder-${Math.random().toString(36).slice(2)}.env`);
     const body = Object.entries({
-      GROQ_API_KEY: 'test-key',
+      // A provider the production guard accepts, so these tests fail on the
+      // secret they are about rather than on an unrelated "local is not a model"
+      // refusal triggered by the new no-key default.
+      AI_PROVIDER: 'nvidia',
+      NVIDIA_API_KEY: 'nvapi-test-key',
       ADMIN_API_SECRET: PLACEHOLDER_SECRET,
       ...extra,
     })

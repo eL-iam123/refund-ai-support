@@ -1,5 +1,5 @@
 import type { ClaimExtraction } from '@refund/shared';
-import { AiUnavailableError, type AIAnalyzer, type AnalyzerInput, type AnalyzerResult, type AttemptObserver } from './analyzer.js';
+import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver } from './analyzer.js';
 import { scanForInjection } from '../security/injection.js';
 
 /**
@@ -174,10 +174,11 @@ export function LocalAnalyzer(): AIAnalyzer {
   };
 }
 
-function analyzeWithHeuristics(input: AnalyzerInput, observer: AttemptObserver): AnalyzerResult {
+function analyzeWithHeuristics(input: AnalyzerInput, observer: AttemptObserver): AgentReply {
   observer({ model: MODEL, attempt: 1, ok: true, latencyMs: 0, promptTokens: null, completionTokens: null, error: null });
   const extraction = read(input);
   return {
+    kind: 'claim',
     extraction,
     proposal: {
       suggestedDecision: suggestDecision(extraction.reason, input.message, extraction.policyOverrideAttempted),

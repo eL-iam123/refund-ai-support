@@ -40,7 +40,7 @@ export function registerRequestRoutes(app: FastifyInstance, ctx: AppContext): vo
   // investigates; only an admin rewrites an outcome. Splitting them here means a
   // compromised agent account cannot approve money.
   const staff = (role: 'agent' | 'admin') => ({
-    preHandler: staffOnly(ctx.env.ADMIN_API_SECRET, role, ctx.now),
+    preHandler: staffOnly(ctx.env, role, ctx.now),
   });
 
   app.get('/api/requests', staff('agent'), (request) => {
@@ -52,6 +52,7 @@ export function registerRequestRoutes(app: FastifyInstance, ctx: AppContext): vo
     const rows = listRequests(ctx.db, {
       limit: query.data.limit,
       decision: query.data.decision,
+      source: query.data.source,
       customerId: query.data.customerId,
       search: query.data.q,
     });

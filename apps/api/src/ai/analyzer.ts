@@ -4,10 +4,11 @@ import type { AiProposal, ClaimExtraction } from '@refund/shared';
  * The one seam between the policy engine and a language model.
  *
  * Everything above this file is provider-agnostic and deterministic. Everything
- * below it is "ask a model to read a message". The interface is deliberately
+ * below it is "ask a model to talk to a customer". The interface is deliberately
  * narrow - one method, one job - because the security argument of this system
- * is that the model's entire influence is a single `ClaimExtraction` that the
- * resolver is free to overrule.
+ * is that the model is a messenger, not a decision maker. Its entire influence
+ * is one `AgentReply` that either asks the customer a question or hands the
+ * engine a `ClaimExtraction`, and the engine is free to overrule the claim.
  *
  * The production implementation is a real HTTP client. The test implementation
  * is a fake in `src/test/`. There is no "offline mode" and no simulated model
@@ -38,19 +39,46 @@ export interface AnalyzerOrder {
   readonly items: readonly AnalyzerItem[];
 }
 
+/** One prior turn of the conversation, oldest first. */
+export interface DialogueLine {
+  readonly role: 'customer' | 'assistant';
+  readonly text: string;
+}
+
 export interface AnalyzerInput {
   readonly message: string;
   /** Null when no order could be resolved for the customer. */
   readonly order: AnalyzerOrder | null;
+  /**
+   * The conversation so far, excluding the current message. The model cannot
+   * hold state, so the transcript is shipped with every call - a question it
+   * asked last turn is the customer's context for this turn.
+   */
+  readonly history: readonly DialogueLine[];
 }
 
-export interface AnalyzerResult {
-  /** The model's reading of the message. A claim, never a decision. */
-  readonly extraction: ClaimExtraction;
-  /** What the model would like to happen. Recorded, compared, and overridable. */
-  readonly proposal: AiProposal;
-  readonly model: string;
-}
+/**
+ * What the model is allowed to do back.
+ *
+ * Two options, and nothing else. `question` is the messenger half of the job:
+ * the model may ask the customer for the one detail it is missing. `claim` is
+ * the engine half - a reading of the message, never a decision, that the
+ * resolver compares against the policy and is free to overrule. Everything the
+ * model says to a customer is a question; everything it decides is a suggestion.
+ */
+export type AgentReply =
+  | {
+      readonly kind: 'question';
+      /** Exactly one question, written in the customer's own language. */
+      readonly question: string;
+      readonly model: string;
+    }
+  | {
+      readonly kind: 'claim';
+      readonly extraction: ClaimExtraction;
+      readonly proposal: AiProposal;
+      readonly model: string;
+    };
 
 export interface ProviderAttempt {
   readonly model: string;
@@ -92,13 +120,13 @@ export interface AIAnalyzer {
    */
   readonly unavailableReason: string | null;
   /**
-   * Reads the customer's message and returns a structured claim.
+   * Replies to the customer's message.
    *
    * Rejects with `AiUnavailableError` when no configured model produced
    * schema-valid output. Callers treat that as "no claim", which can only
    * escalate - the decision is computed from order facts either way.
    */
-  analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AnalyzerResult>;
+  analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply>;
 }
 
 /** Every configured model failed, or none of them answered with valid JSON. */

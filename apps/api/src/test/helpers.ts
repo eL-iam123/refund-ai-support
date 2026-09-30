@@ -20,6 +20,10 @@ export const TEST_NOW = new Date('2026-03-14T12:00:00.000Z');
 /** The secret the harness builds apps with, and the one tokens are signed with. */
 export const TEST_SECRET = 'test-secret-not-used-anywhere-32-chars-min';
 
+/** The console credentials the harness configures, so the staff routes exist. */
+export const TEST_ADMIN_USERNAME = 'test-admin';
+export const TEST_ADMIN_PASSWORD = 'test-admin-password-not-real';
+
 /** A valid Authorization header for a given role. */
 export function authHeader(role: 'agent' | 'admin', subject = 'test-staff'): string {
   return `Bearer ${mintToken(TEST_SECRET, subject, role, 3_600_000, TEST_NOW)}`;
@@ -56,6 +60,11 @@ export function testEnv(overrides: Partial<Env> = {}): Env {
     return {
       ...readEnv('.env.test-absent'),
       ADMIN_API_SECRET: TEST_SECRET,
+      // The console is configured in the harness. `adminEnabled` gates every
+      // staff route on these two, so without them the whole authorization suite
+      // would be testing 404s and pass for the wrong reason.
+      ADMIN_USERNAME: TEST_ADMIN_USERNAME,
+      ADMIN_PASSWORD: TEST_ADMIN_PASSWORD,
       ...overrides,
     };
   } finally {
@@ -166,4 +175,22 @@ export async function appHarness(
   });
   await app.ready();
   return { app, db };
+}
+
+/**
+ * Narrows a pipeline result to the branch that ended in a decision.
+ *
+ * The pipeline's result is a `stage` union on purpose - a clarifying question is
+ * a real possible outcome now - but the policy tests are conformance claims that
+ * a given input *must* decide. Asking each of them to re-narrow by hand would
+ * spread "did this decide?" logic everywhere; this helper states it once, at the
+ * same place the fixture's expected outcome is enforced.
+ */
+export function decided(
+  result: ProcessResult,
+): Extract<ProcessResult, { stage: 'decided' }> {
+  if (result.stage === 'asked') {
+    throw new Error(`expected a decision but the pipeline asked: ${result.question}`);
+  }
+  return result;
 }

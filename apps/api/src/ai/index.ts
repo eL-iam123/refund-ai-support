@@ -46,11 +46,12 @@ export { UnavailableAnalyzer } from './unavailableAnalyzer.js';
 export { modelCandidates, toAnalyzerOrder } from './openaiAnalyzer.js';
 export {
   AiUnavailableError,
+  type AgentReply,
   type AIAnalyzer,
   type AnalyzerInput,
   type AnalyzerItem,
   type AnalyzerOrder,
-  type AnalyzerResult,
+  type DialogueLine,
   type AttemptObserver,
   type ProviderAttempt,
 } from './analyzer.js';

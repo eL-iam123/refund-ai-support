@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import cookie from '@fastify/cookie';
 import { existsSync } from 'node:fs';
-import { corsOrigins, type Env } from '../config/env.js';
+import { corsOrigins, adminEnabled, type Env } from '../config/env.js';
 import { createLogger, type Logger } from '../lib/logger.js';
 import type { Db } from '../db/connection.js';
 import { aiModeLabel, buildContext } from './context.js';
@@ -15,6 +15,7 @@ import { registerCatalogRoutes } from './routes/catalog.js';
 import { registerShopRoutes } from './routes/shop.js';
 import { registerRefundRoutes } from './routes/refunds.js';
 import { registerReturnsRoutes } from './routes/returns.js';
+import { registerAdminAuthRoutes } from './routes/adminAuth.js';
 import { toErrorResponse, toHttpError } from './errors.js';
 import { registerAuth } from '../auth/guards.js';
 
@@ -81,6 +82,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   app.get('/api/health', () => ({
     status: 'ok',
     aiMode: aiModeLabel(ctx.pipeline),
+    // Published so the client can decide whether to render a staff console that
+    // exists. It reveals nothing but the shape of the deployment: whether an
+    // operator account is configured is a fact about a demo, not a secret, and
+    // the staff routes themselves still answer 404 without a credential.
+    adminEnabled: adminEnabled(options.env),
   }));
 
   registerChatRoutes(app, ctx);
@@ -89,6 +95,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerShopRoutes(app, ctx);
   registerRefundRoutes(app, ctx);
   registerReturnsRoutes(app, ctx);
+  // Unconditional, because a sign-in route that vanished on an unconfigured
+  // deployment would leave the client unable to tell "disabled" from "wrong
+  // path". It answers 404 itself when the console is not configured.
+  registerAdminAuthRoutes(app, ctx);
 
   registerNotFound(app, options.staticDir);
   return app;

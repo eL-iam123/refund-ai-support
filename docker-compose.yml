@@ -17,8 +17,9 @@ services:
     environment:
       # Defaults to development so `docker compose up` runs as a single command.
       # Setting this to production turns on the stricter boot checks, which
-      # refuse the bundled placeholder secret below - that is the point: claiming
-      # to be a deployment means supplying a deployment's secrets.
+      # refuse a published demo password and require a real model - that is the
+      # point: claiming to be a deployment means supplying a deployment's
+      # secrets.
       NODE_ENV: ${NODE_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_PATH: /data/refund.sqlite
@@ -26,9 +27,9 @@ services:
       # Vite dev servers. Empty in production is correct, not an oversight.
       CORS_ORIGIN: ${CORS_ORIGIN:-}
       # AI_API_KEY is the only thing that has to be set to use a model. The
-      # provider is worked out from the key, so a Groq, OpenAI, Gemini or
-      # Anthropic key all work here unchanged. AI_PROVIDER is for the case where
-      # the key is not one of those - a compatible endpoint of your own.
+      # provider is worked out from the key, so any provider's key works here
+      # unchanged. AI_PROVIDER is for the case where the key is not one of the
+      # shapes it recognises - a compatible endpoint of your own.
       AI_API_KEY: ${AI_API_KEY:-}
       AI_PROVIDER: ${AI_PROVIDER:-}
       # Unset means "required in production, tolerated in development", so a
@@ -45,10 +46,17 @@ services:
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Has a default so `docker compose up` works as a single command. The API
-      # refuses this exact placeholder when NODE_ENV=production, so the default
-      # is a convenience for evaluating the product and never a deployed secret.
-      ADMIN_API_SECRET: ${ADMIN_API_SECRET:-dev-only-insecure-secret-change-me-0123456789}
+      # The staff console exists only once a username and a password are set.
+      # Both default to empty, which is the point: a clone that runs
+      # `docker compose up` has no admin surface at all, and every staff route
+      # answers 404 until an operator account is configured. admin-login.txt has
+      # the demo pair, and the API refuses that exact password in production.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Optional. The key staff sessions are signed with; it is derived from
+      # ADMIN_PASSWORD when unset. Setting it separately means rotating one value
+      # invalidates every outstanding session at once.
+      ADMIN_API_SECRET: ${ADMIN_API_SECRET:-}
     volumes:
       - refund-data:/data
     # The SQLite file is the only durable state, so a lost container is not a

@@ -135,7 +135,7 @@ function notifyCustomer(
  * displayed name the client chose would be the exact bug removed from the API.
  */
 function registerRefundReadRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const staff = staffOnly(ctx.env.ADMIN_API_SECRET, 'agent', ctx.now);
+  const staff = staffOnly(ctx.env, 'agent', ctx.now);
 
   app.get('/api/whoami', { preHandler: staff }, (request: FastifyRequest) => {
     const principal = requirePrincipal(request.principal);
@@ -149,7 +149,7 @@ function registerRefundReadRoutes(app: FastifyInstance, ctx: AppContext): void {
    * needs to be able to ask the question and get a verdict naming the row that
    * failed, without a debugger and a copy of the source.
    */
-  app.get('/api/admin/audit/verify', { preHandler: staffOnly(ctx.env.ADMIN_API_SECRET, 'admin', ctx.now) }, () => {
+  app.get('/api/admin/audit/verify', { preHandler: staffOnly(ctx.env, 'admin', ctx.now) }, () => {
     const verdict = verifyAuditChain(ctx.db);
     if (!verdict.ok) {
       ctx.log.error({ brokenAtId: verdict.brokenAtId, reason: verdict.reason }, 'audit.chain.broken');
@@ -168,7 +168,7 @@ function registerRefundReadRoutes(app: FastifyInstance, ctx: AppContext): void {
    * because a log page that renders rows from one moment and a verdict from
    * another can show "intact" above rows that were written after the check.
    */
-  app.get('/api/admin/audit', { preHandler: staffOnly(ctx.env.ADMIN_API_SECRET, 'admin', ctx.now) }, (request: FastifyRequest) => {
+  app.get('/api/admin/audit', { preHandler: staffOnly(ctx.env, 'admin', ctx.now) }, (request: FastifyRequest) => {
     const query = parseOr(ListAuditQuerySchema.safeParse(request.query), 'audit filter');
     const verdict = verifyAuditChain(ctx.db);
     if (!verdict.ok) {
@@ -258,7 +258,7 @@ function release(ctx: AppContext, id: string, body: unknown): { refund: RefundDt
 }
 
 function registerRefundWriteRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const admin = staffOnly(ctx.env.ADMIN_API_SECRET, 'admin', ctx.now);
+  const admin = staffOnly(ctx.env, 'admin', ctx.now);
 
   app.post<{ Params: unknown }>('/api/refunds/:id/settle', { preHandler: admin }, (request) => {
     const { id } = request.params as { id: string };

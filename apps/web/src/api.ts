@@ -1,4 +1,4 @@
-import { authHeaders } from './auth';
+import type { StaffSession } from './auth';
 import type {
   RefundDto,
   AdminStatsDto,
@@ -69,6 +69,7 @@ interface ErrorEnvelope {
 
 export interface RequestFilter {
   readonly decision?: string | undefined;
+  readonly source?: string | undefined;
   readonly customerId?: string | undefined;
   readonly q?: string | undefined;
 }
@@ -76,9 +77,12 @@ export interface RequestFilter {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
-    // The staff token rides here on every call rather than at each call site, so
-    // a new protected endpoint cannot be added without a credential by mistake.
-    headers: { 'content-type': 'application/json', ...authHeaders(), ...init?.headers },
+    // The staff session cookie rides here on every call rather than at each call
+    // site, so a new protected endpoint cannot be added without a credential by
+    // mistake. It is httpOnly, so this is the only line in the client that has
+    // anything to do with being signed in.
+    credentials: 'include',
+    headers: { 'content-type': 'application/json', ...init?.headers },
   });
 
   if (!response.ok) {
@@ -108,7 +112,6 @@ function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 /** Where a return's current status leads. Terminal states are absent by design. */
-/** Where a return's current status leads. Terminal states are absent by design. */
 export interface DuplicateNotice {
   /** The request that already existed, which is the one that was returned. */
   readonly ofRequestId: string;
@@ -134,15 +137,27 @@ export interface AuditPage {
 }
 
 export const api = {
-  health: (): Promise<{ status: string }> => request('/api/health'),
+  health: (): Promise<{ status: string; aiMode: string; adminEnabled: boolean }> => request('/api/health'),
+
+  /** The staff session, or a 401. Used to decide whether to render the console. */
+  staffSession: (): Promise<StaffSession> => request('/api/admin/session'),
+
+  signIn: (username: string, password: string): Promise<StaffSession> =>
+    post('/api/admin/login', { username, password }),
+
+  signOut: (): Promise<{ ok: boolean }> => post('/api/admin/logout', {}),
 
   /**
-   * Sends a message. `duplicate` is present only when the server recognised a
-   * repeat and returned the earlier request instead of creating one - a 200
-   * rather than a 201 in that case, so the two are not interchangeable.
+   * Sends a message. Two possible replies, and they are not interchangeable:
+   * a decision (`request`, with `duplicate` when the server recognised a repeat
+   * and returned the earlier request instead of creating one - a 200 rather than
+   * a 201 in that case), or the assistant's clarifying question (`question`).
    */
   sendMessage: (input: { customerId: string; orderId: string | null; message: string }) =>
-    post<{ request: RefundRequestDto; duplicate?: DuplicateNotice }>('/api/chat/messages', input),
+    post<{ request: RefundRequestDto; duplicate?: DuplicateNotice } | { question: string; dialogueId: string }>(
+      '/api/chat/messages',
+      input,
+    ),
 
   listRequests: (params: RequestFilter = {}) =>
     request<{ requests: RefundRequestSummaryDto[] }>(`/api/requests${queryString(params)}`),

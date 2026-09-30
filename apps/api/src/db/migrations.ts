@@ -440,6 +440,40 @@ const MIGRATIONS: readonly Migration[] = [
       db.exec('CREATE INDEX IF NOT EXISTS idx_customer_updates_request ON customer_updates (request_id)');
     },
   },
+  {
+    version: 10,
+    name: 'shop_dialogue',
+    up: (db) => {
+      // The clarify-then-decide conversation between the assistant and a customer.
+      //
+      // An assistant question is not a decision, so it has no row in
+      // `refund_requests` - nothing was resolved, nothing was refused. But it is
+      // still the customer's history: if they answer "the blue one" in a later
+      // message, the model has to be able to see that they were asked which item,
+      // and the customer has to be able to see that they asked. Dropping those
+      // turns would produce an assistant that asks the same question twice and an
+      // audit that cannot say how a decision came to be reached.
+      //
+      // `customer_message` is the customer's own words; `assistant_question` is
+      // the question the model was permitted to publish, verbatim. Two columns
+      // rather than one interleaved table, because a question never happens
+      // without the message it answers - this is not a general message log, it is
+      // the record of a question-and-answer, and a row must always have both.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS shop_dialogue (
+          id                TEXT PRIMARY KEY,
+          created_at        TEXT NOT NULL,
+          customer_id       TEXT NOT NULL,
+          order_id          TEXT,
+          customer_message  TEXT NOT NULL,
+          assistant_question TEXT NOT NULL
+        );
+      `);
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_shop_dialogue_thread ON shop_dialogue (customer_id, order_id, created_at)',
+      );
+    },
+  },
 ];
 
 /**

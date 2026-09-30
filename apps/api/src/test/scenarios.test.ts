@@ -21,6 +21,12 @@ async function run(scenario: Scenario) {
     orderId: scenario.orderId,
     message: scenario.message,
   });
+  if (result.stage === 'asked') {
+    // A conformance case must end in a decision; an assistant that answered
+    // with a question instead is a softer failure than the assertions below
+    // would report, and it is reported here so its own wording is visible.
+    throw new Error(`${scenario.id} did not decide: ${result.question}`);
+  }
   return { ...result, extractionCalls: h.analyzerCalls() };
 }
 

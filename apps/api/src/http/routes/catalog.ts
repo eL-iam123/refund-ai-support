@@ -22,7 +22,7 @@ export function registerCatalogRoutes(app: FastifyInstance, ctx: AppContext): vo
   // `/api/policy` stays open: the policy is published to customers anyway, and
   // withholding it would only make the rules harder to appeal.
   const staff = (role: 'agent' | 'admin') => ({
-    preHandler: staffOnly(ctx.env.ADMIN_API_SECRET, role, ctx.now),
+    preHandler: staffOnly(ctx.env, role, ctx.now),
   });
 
   app.get('/api/customers', staff('admin'), () => {

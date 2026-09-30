@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { INJECTION_ACTIONS } from '@refund/shared';
 
@@ -25,6 +26,9 @@ const EMPTY_IS_ABSENT = [
   'AI_MODEL',
   'AI_BASE_URL',
   'AI_FALLBACK_MODELS',
+  'ADMIN_API_SECRET',
+  'ADMIN_USERNAME',
+  'ADMIN_PASSWORD',
   'GROQ_API_KEY',
   'OPENROUTER_API_KEY',
   'OPENAI_API_KEY',
@@ -46,6 +50,15 @@ function normaliseEmptyVars(): void {
  * at boot in production; see the check in readEnv.
  */
 export const PLACEHOLDER_SECRET = 'dev-only-insecure-secret-change-me-0123456789';
+
+/**
+ * Demo admin password, printed in `admin-login.txt` and shipped as the
+ * documented default so a reviewer can sign in without inventing one. Rejected
+ * in production for the same reason as the signing key: a password that is in
+ * the repository is not a password. `adminEnabled` still requires it to be put
+ * in the environment, so a clone with no `.env` has no admin console at all.
+ */
+export const PLACEHOLDER_ADMIN_PASSWORD = 'refund-desk-demo';
 
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -165,11 +178,31 @@ const EnvSchema = z.object({
    */
   DUPLICATE_WINDOW_HOURS: z.coerce.number().int().min(0.02).max(24 * 90).default(72),
   /**
-   * HMAC key for staff tokens. Required and undefaulted on purpose: a server that
-   * cannot verify a signature must not fall back to trusting the caller, so
-   * startup fails rather than serving an unauthenticated admin API.
+   * The admin console, and the only way into it.
+   *
+   * The console does not exist until both of these are set: `adminEnabled` is
+   * false, every staff route answers 404, and `/api/health` says so. That is the
+   * desired default - an unconfigured deployment has no admin surface to find,
+   * let alone to attack - and it is why they are optional rather than required.
+   * A clone that wants the console generates a password, puts the pair in
+   * `.env`, and restarts. `admin-login.txt` carries the demo pair.
+   *
+   * Password is compared in constant time and exchanged for a short-lived signed
+   * cookie, so the browser holds nothing reusable and a stolen cookie is valid
+   * for hours rather than forever.
    */
-  ADMIN_API_SECRET: z.string().min(32, 'ADMIN_API_SECRET must be at least 32 characters'),
+  ADMIN_USERNAME: z.string().min(1).optional(),
+  ADMIN_PASSWORD: z.string().min(12, 'ADMIN_PASSWORD must be at least 12 characters').optional(),
+  /**
+   * HMAC key for staff tokens and admin sessions.
+   *
+   * Optional and undefaulted. When set it is the signing key, so rotating it
+   * invalidates every outstanding session at once. When only the login pair
+   * above is set, the key is derived from the password instead - two variables
+   * are enough to run the console. A server that cannot sign must not fall back
+   * to trusting the caller, so there is no constant default here.
+   */
+  ADMIN_API_SECRET: z.string().min(32, 'ADMIN_API_SECRET must be at least 32 characters').optional(),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_WINDOW: z.string().min(1).default('1 minute'),
 });
@@ -398,13 +431,21 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
 
   const env = resolveProvider(parsed.data);
 
-  // The compose file ships a placeholder so `docker compose up` runs as a single
-  // command. A committed default is a way in, so it is only ever allowed to be
-  // the reason a local evaluation starts - never the reason a deployed one does.
+  // The compose file ships a placeholder and admin-login.txt ships a demo
+  // password, so `docker compose up` runs as a single command. A committed
+  // default is a way in, so it is only ever allowed to be the reason a local
+  // evaluation starts - never the reason a deployed one does.
   if (env.NODE_ENV === 'production' && env.ADMIN_API_SECRET === PLACEHOLDER_SECRET) {
     throw new Error(
       'ADMIN_API_SECRET is still the bundled placeholder, which is published in the ' +
         'repository. Set your own before starting in production: openssl rand -hex 32',
+    );
+  }
+  if (env.NODE_ENV === 'production' && env.ADMIN_PASSWORD === PLACEHOLDER_ADMIN_PASSWORD) {
+    throw new Error(
+      'ADMIN_PASSWORD is still the bundled demo password from admin-login.txt, which is ' +
+        'published in the repository. Set your own before starting in production: ' +
+        'openssl rand -base64 24',
     );
   }
 
@@ -425,23 +466,50 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
 /**
  * Works out which provider is meant, so setting one key is enough.
  *
- * Three cases, in order: an explicit `AI_PROVIDER` always wins, because someone
+ * Four cases, in order. An explicit `AI_PROVIDER` always wins, because someone
  * who wrote it meant it. Otherwise a key that identifies itself is trusted. A key
- * nobody recognises is still used - against the default - because refusing to run
- * over an unfamiliar key shape would be worse than letting the provider reject
- * it with an error that names the problem.
+ * nobody recognises is an error, and that is a change worth defending: the
+ * alternative is to guess, and the only guess available is "some vendor this
+ * repository happens to know about" - which either calls an API the operator
+ * never intended or, having no provider to call, quietly runs the product with no
+ * model at all and reports nothing. A refusal naming the problem at boot is
+ * better than either, and a key that identifies itself cannot cause it.
+ *
+ * With no key and no provider there is nothing to be had, so the answer is
+ * `local` - the named pattern matcher - and requests escalate. That is the
+ * one-command demo, and production refuses `local` outright, so it can never be
+ * the accidental answer to a forgotten key.
  */
 function resolveProvider(parsed: z.infer<typeof EnvSchema>): Env {
+  if (parsed.AI_PROVIDER !== undefined) {
+    return { ...parsed, AI_PROVIDER: parsed.AI_PROVIDER };
+  }
+
   const inferred = providerFromKey(parsed.AI_API_KEY);
-  const provider = parsed.AI_PROVIDER ?? inferred ?? 'groq';
-  return { ...parsed, AI_PROVIDER: provider };
+  if (inferred !== null) {
+    return { ...parsed, AI_PROVIDER: inferred };
+  }
+
+  if (parsed.AI_API_KEY !== undefined) {
+    throw new Error(
+      'AI_API_KEY does not begin with a prefix this project recognises, so there is no way to ' +
+        'tell which provider it belongs to. Set AI_PROVIDER to the provider it is for - that is ' +
+        'also the answer for a self-hosted or OpenAI-compatible endpoint - or correct the key. ' +
+        `Recognised prefixes: ${KNOWN_KEY_PREFIXES.join(', ')}.`,
+    );
+  }
+
+  return { ...parsed, AI_PROVIDER: 'local' };
 }
+
+/** The prefixes `providerFromKey` recognises, in one place for the error above. */
+const KNOWN_KEY_PREFIXES: readonly string[] = ['gsk_', 'nvapi-', 'AIza', 'sk-or-v1-', 'sk-ant-', 'sk-'];
 
 /**
  * Provider keys are self-identifying, and the prefixes do not collide.
  *
  * `sk-or-v1-` is checked before `sk-` because OpenRouter keys are also `sk-`, and
- * a Groq key sent to OpenRouter is a confusing 401 rather than an obvious
+ * one provider's key sent to another is a confusing 401 rather than an obvious
  * misconfiguration. Anthropic is the same shape, so it is matched first there
  * too.
  *
@@ -549,6 +617,55 @@ export function missingApiKeyFor(env: Env): string | null {
   // Names the universal variable rather than the provider's own, because it is
   // the one an operator is told to set and it works for every provider.
   return `AI_API_KEY is not set, so ${preset.label} cannot be reached`;
+}
+
+/**
+ * Whether the admin console exists.
+ *
+ * A single boolean, read by the route guards rather than by each route, so
+ * "the console is not configured" is decided in exactly one place. Both halves
+ * are required: a username with no password would otherwise be an admin that any
+ * caller can walk past, and a password with no username has nobody to match.
+ */
+export function adminEnabled(env: Env): boolean {
+  return env.ADMIN_USERNAME !== undefined && env.ADMIN_PASSWORD !== undefined;
+}
+
+/**
+ * The credentials, or null when the console is not configured.
+ *
+ * Returns the pair rather than two optional reads at each call site, so a caller
+ * cannot half-apply it: logging in with a username from one and a password from
+ * the other is the failure this shape exists to make unrepresentable.
+ */
+export function adminCredentials(env: Env): { readonly username: string; readonly password: string } | null {
+  if (!adminEnabled(env)) {
+    return null;
+  }
+  // Both are checked above, so the narrowing is real rather than a cast.
+  return { username: env.ADMIN_USERNAME ?? '', password: env.ADMIN_PASSWORD ?? '' };
+}
+
+/**
+ * The key staff tokens and admin sessions are signed with.
+ *
+ * Prefers the dedicated `ADMIN_API_SECRET` when it is set, so rotating one
+ * variable invalidates every outstanding session at once - the reason it is
+ * worth having. Falls back to a value derived from the password when only the
+ * login pair is configured, so the ordinary case is two variables rather than
+ * three and the reviewer is not asked to generate a second secret.
+ *
+ * Derived, not raw: the password itself never becomes a key material argument
+ * that a stray log line could print, and the domain-separated prefix keeps it
+ * from colliding with anything else derived from the same input.
+ *
+ * Only meaningful when the console is configured; the guards check that first.
+ */
+export function adminSigningKey(env: Env): string {
+  if (env.ADMIN_API_SECRET !== undefined) {
+    return env.ADMIN_API_SECRET;
+  }
+  return createHash('sha256').update(`refund-desk.admin-session.${env.ADMIN_PASSWORD ?? ''}`).digest('hex');
 }
 
 export function corsOrigins(env: Env): string[] {

@@ -5,9 +5,8 @@ import { seedDatabase } from '../db/seed.js';
 import { processRefundRequest } from '../orchestrator.js';
 import { createAttemptRecorder } from '../db/attemptRecorder.js';
 import { pendingCentsForOrder } from '../db/refundLedger.js';
-import { appHarness } from './helpers.js';
+import { appHarness, TEST_NOW, decided } from './helpers.js';
 import { FakeAnalyzer } from './fakeAnalyzer.js';
-import { TEST_NOW } from './helpers.js';
 import { composeDeterministicResponse } from '../response/compose.js';
 import type { OrderRecord } from '../db/records.js';
 
@@ -102,7 +101,7 @@ describe('through the real pipeline', () => {
   async function run(message: string): Promise<{ decision: string; amount: number; reply: string }> {
     const db = openMemoryDatabase();
     seedDatabase(db, TEST_NOW);
-    const result = await processRefundRequest(db, {
+    const result = decided(await processRefundRequest(db, {
       analyzer: FakeAnalyzer({ kind: 'heuristic' }),
       recordAttempt: createAttemptRecorder(db),
       injectionAction: 'deny',
@@ -112,7 +111,7 @@ describe('through the real pipeline', () => {
       orderId: 'ORD-1001',
       message,
       now: TEST_NOW,
-    });
+    }));
     return {
       decision: result.decision.decision,
       amount: result.decision.refundAmountCents,
@@ -263,7 +262,7 @@ describe('through the ledger, end to end', () => {
     const { FakeAnalyzer: fake } = await import('./fakeAnalyzer.js');
     const { createAttemptRecorder: recorder } = await import('../db/attemptRecorder.js');
 
-    const result = await processRefundRequest(db, {
+    const result = decided(await processRefundRequest(db, {
       analyzer: fake({ kind: 'heuristic' }),
       recordAttempt: recorder(db),
       injectionAction: 'deny',
@@ -273,7 +272,7 @@ describe('through the ledger, end to end', () => {
       orderId: 'ORD-1001',
       message: APPROVED,
       now: TEST_NOW,
-    });
+    }));
 
     // Deciding does not persist; persisting does. Which is exactly why the
     // reservation is bound to persistence rather than to the decision.

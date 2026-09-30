@@ -14,28 +14,50 @@ import { useAsyncData } from './useAsyncData';
  * policy must answer. Sending one is the fastest way to watch a specific rule
  * work, which is why the send button is right there.
  */
+/**
+ * Fires one scenario at the API and settles its row.
+ *
+ * The reply is a decision or the assistant's clarifying question. A decision
+ * links to the request it created; a question is stated on the row instead,
+ * because the fixture asked for a decision and a question is not a fixture
+ * result - it is the assistant having found the message ambiguous.
+ */
+async function runScenario(
+  scenario: Scenario,
+  setRunning: (update: (previous: readonly { id: string; requestId: string }[]) => readonly { id: string; requestId: string }[]) => void,
+): Promise<void> {
+  setRunning((previous) => [...previous, { id: scenario.id, requestId: '' }]);
+  try {
+    const reply = await api.sendMessage({
+      customerId: scenario.customer.key,
+      orderId: scenario.orderId,
+      message: scenario.message,
+    });
+    if ('question' in reply) {
+      setRunning((previous) =>
+        previous.map((row) =>
+          row.id === scenario.id ? { id: row.id, requestId: `question: ${reply.question}` } : row,
+        ),
+      );
+      return;
+    }
+    const { request } = reply;
+    setRunning((previous) =>
+      previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: request.id } : row)),
+    );
+  } catch (cause: unknown) {
+    // Surfaced on the row that failed rather than as a page-level error, so one
+    // bad scenario does not hide the other seventeen.
+    setRunning((previous) => [...previous, { id: scenario.id, requestId: `error: ${describe(cause)}` }]);
+  }
+}
+
 export function ScenariosPage(): ReactNode {
   const load = useCallback(async () => (await api.scenarios()).scenarios, []);
   const state = useAsyncData(load, 'scenarios');
   const [running, setRunning] = useState<readonly { id: string; requestId: string }[]>([]);
 
-  const run = useCallback(async (scenario: Scenario): Promise<void> => {
-    setRunning((previous) => [...previous, { id: scenario.id, requestId: '' }]);
-    try {
-      const { request } = await api.sendMessage({
-        customerId: scenario.customer.key,
-        orderId: scenario.orderId,
-        message: scenario.message,
-      });
-      setRunning((previous) =>
-        previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: request.id } : row)),
-      );
-    } catch (cause: unknown) {
-      // Surfaced on the row that failed rather than as a page-level error, so
-      // one bad scenario does not hide the other seventeen.
-      setRunning((previous) => [...previous, { id: scenario.id, requestId: `error: ${describe(cause)}` }]);
-    }
-  }, []);
+  const run = useCallback((scenario: Scenario): Promise<void> => runScenario(scenario, setRunning), []);
 
   if (state.status === 'error') {
     return <ErrorNote error={state.error} />;
@@ -80,6 +102,9 @@ function RunResult({ requestId, busy }: { requestId: string; busy: boolean }): R
   }
   if (requestId.startsWith('error: ')) {
     return <p className="error-note">{requestId.slice('error: '.length)}</p>;
+  }
+  if (requestId.startsWith('question: ')) {
+    return <p className="muted small">Asked: {requestId.slice('question: '.length)}</p>;
   }
   return (
     <Link to={`/admin/requests/${requestId}`} className="muted">

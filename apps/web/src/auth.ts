@@ -1,33 +1,27 @@
 /**
- * Staff session storage.
+ * Staff session state.
  *
- * There is no login form that exchanges a password for a token, and there is no
- * token endpoint - adding one would let any anonymous caller mint themselves an
- * admin credential, which is a worse problem than the one it solves. An
- * operator pastes the token they minted with the CLI, exactly the way a
- * password manager shows an API key once and never stores it anywhere central.
+ * The credential is a username and password exchanged for an httpOnly cookie
+ * held by the browser. Nothing reusable is kept in JavaScript: there is no token
+ * in `sessionStorage` and none in `localStorage`, because every store a token
+ * can be read back out of is a store a cross-site-scripting bug can read it back
+ * out of. `sameSite=lax` and `httpOnly` on the cookie mean the console session
+ * survives the storefront having an XSS bug, which is the whole reason for
+ * choosing a session over the pasted-token flow this replaces.
  *
- * `sessionStorage` rather than `localStorage`: a staff token outlives nothing.
- * Closing the tab ends the session, and a token left in a shared machine's
- * persistent storage outlives the shift that was meant to use it.
+ * This module holds only *who* is signed in, to render the layout. It is not
+ * what authorises anything: the API checks the cookie itself on every call, so a
+ * stale or wrong value here changes what the header shows and nothing else.
  */
 
-const STORAGE_KEY = 'refund-desk.staff-token';
+export interface StaffSession {
+  readonly username: string;
+  readonly role: 'agent' | 'admin';
+}
 
-let current: string | null = read();
+let current: StaffSession | null = null;
 
 const listeners = new Set<() => void>();
-
-function read(): string | null {
-  try {
-    const stored = sessionStorage.getItem(STORAGE_KEY);
-    return stored !== null && stored.length > 0 ? stored : null;
-  } catch {
-    // Private browsing modes and non-browser test environments can throw on
-    // storage access. An in-memory session is better than a crash.
-    return null;
-  }
-}
 
 function emit(): void {
   for (const listener of [...listeners]) {
@@ -35,43 +29,26 @@ function emit(): void {
   }
 }
 
-export function staffToken(): string | null {
+export function staffSession(): StaffSession | null {
   return current;
 }
 
-export function setStaffToken(token: string): void {
-  const trimmed = token.trim();
-  current = trimmed.length > 0 ? trimmed : null;
-  try {
-    if (current === null) {
-      sessionStorage.removeItem(STORAGE_KEY);
-    } else {
-      sessionStorage.setItem(STORAGE_KEY, current);
-    }
-  } catch {
-    // Keep the in-memory token even if persistence failed; the session works,
-    // it just will not survive a reload.
+export function setStaffSession(session: StaffSession | null): void {
+  const changed = current?.username !== session?.username || current?.role !== session?.role;
+  current = session;
+  if (changed) {
+    emit();
   }
-  emit();
 }
 
-export function clearStaffToken(): void {
-  setStaffToken('');
-}
-
-export function hasStaffToken(): boolean {
+export function isSignedIn(): boolean {
   return current !== null;
 }
 
 /** Subscribes to session changes. Returns the unsubscribe function. */
-export function onStaffTokenChange(listener: () => void): () => void {
+export function onStaffSessionChange(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
-}
-
-/** The header block for an authenticated call, empty when signed out. */
-export function authHeaders(): Record<string, string> {
-  return current === null ? {} : { authorization: `Bearer ${current}` };
 }

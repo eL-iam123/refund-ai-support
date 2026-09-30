@@ -215,7 +215,7 @@ function auditSubject(record: ReturnRecord): string {
 
 export function registerReturnsRoutes(app: FastifyInstance, ctx: AppContext): void {
   registerCustomerRoutes(app, ctx);
-  registerStaffRoutes(app, ctx, staffOnly(ctx.env.ADMIN_API_SECRET, 'agent', ctx.now));
+  registerStaffRoutes(app, ctx, staffOnly(ctx.env, 'agent', ctx.now));
 }
 
 /**
