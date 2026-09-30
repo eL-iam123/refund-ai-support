@@ -16,6 +16,9 @@ import { registerShopRoutes } from './routes/shop.js';
 import { registerRefundRoutes } from './routes/refunds.js';
 import { registerReturnsRoutes } from './routes/returns.js';
 import { registerAdminAuthRoutes } from './routes/adminAuth.js';
+import { registerStaffConversationRoutes } from './routes/staffConversations.js';
+import { registerStaffAnalyticsRoutes } from './routes/staffAnalytics.js';
+import { registerWebSockets } from './hub.js';
 import { toErrorResponse, toHttpError } from './errors.js';
 import { registerAuth } from '../auth/guards.js';
 
@@ -66,6 +69,8 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
   registerAuth(app);
 
+  const hub = registerWebSockets(app, ctx);
+
   void app.register(rateLimit, {
     max: options.env.RATE_LIMIT_MAX,
     timeWindow: options.env.RATE_LIMIT_WINDOW,
@@ -89,12 +94,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     adminEnabled: adminEnabled(options.env),
   }));
 
-  registerChatRoutes(app, ctx);
+  registerChatRoutes(app, ctx, hub);
   registerRequestRoutes(app, ctx);
   registerCatalogRoutes(app, ctx);
   registerShopRoutes(app, ctx);
   registerRefundRoutes(app, ctx);
   registerReturnsRoutes(app, ctx);
+  registerStaffConversationRoutes(app, ctx, hub);
+  registerStaffAnalyticsRoutes(app, ctx);
   // Unconditional, because a sign-in route that vanished on an unconfigured
   // deployment would leave the client unable to tell "disabled" from "wrong
   // path". It answers 404 itself when the console is not configured.

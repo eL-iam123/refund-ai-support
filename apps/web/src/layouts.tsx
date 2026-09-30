@@ -2,6 +2,7 @@ import { useSyncExternalStore, type ReactNode } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import {
   FileText,
+  Headset,
   Inbox,
   LayoutDashboard,
   LogOut,
@@ -80,6 +81,7 @@ export function AdminLayout(): ReactNode {
         </div>
         <nav>
           <NavLink to="/admin"><LayoutDashboard size={16} /> Queue</NavLink>
+          <NavLink to="/admin/live"><Headset size={16} /> Live</NavLink>
           <NavLink to="/admin/refunds"><Wallet size={16} /> Payouts</NavLink>
           <NavLink to="/admin/requests"><Inbox size={16} /> All requests</NavLink>
           <NavLink to="/admin/policy"><FileText size={16} /> Policy</NavLink>

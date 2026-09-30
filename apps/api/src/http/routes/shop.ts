@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { aiModeLabel, type AppContext } from '../context.js';
-import { badRequest, UnauthorizedError } from '../errors.js';
+import { badRequest, conflict, HttpError, NotFoundError, UnauthorizedError } from '../errors.js';
 import {
   authenticate,
   createUser,
@@ -12,8 +12,14 @@ import {
   startSession,
   type ShopUser,
 } from '../../shop/auth.js';
-import { checkout, listOrdersForCustomer, listProducts } from '../../shop/catalogue.js';
+import { checkout, listOrdersForCustomer, listProducts, type ShopOrder } from '../../shop/catalogue.js';
+import { findRequestById, insertAuditEvent } from '../../db/requestRepository.js';
+import { findOrder } from '../../db/orderRepository.js';
+import { recordCustomerUpdate } from '../../db/customerUpdates.js';
 import { conversationCounts, conversationForOrder } from '../../retrieval/conversation.js';
+import { followUpFor } from '../../response/followUp.js';
+import { AppealAlreadyPendingError, fileAppeal, openAppealForRequest } from '../../db/appeals.js';
+import { FULLY_REFUNDED } from '../../policy/constants.js';
 
 /**
  * Storefront endpoints, mounted under `/api/shop`.
@@ -64,6 +70,19 @@ const CheckoutSchema = z.object({
     .max(25),
 });
 
+/**
+ * Why the customer thinks the refusal was wrong, as the person who reads it
+ * should see it: trimmed, and long enough to be useful but short enough to be
+ * read.
+ */
+const AppealSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(10, 'tell the person what you think was missed')
+    .max(2000, 'keep it under 2000 characters'),
+});
+
 /** Cookie flags. `httpOnly` keeps the token away from any script on the page. */
 function setSessionCookie(reply: FastifyReply, token: string): void {
   reply.setCookie(SESSION_COOKIE, token, {
@@ -82,6 +101,174 @@ function currentUser(request: FastifyRequest, ctx: AppContext): ShopUser | null 
   return resolveShopSession(ctx.db, cookies[SESSION_COOKIE], ctx.now());
 }
 
+/**
+ * Asking a person to look again at a refusal.
+ *
+ * Two routes, one subject. The POST accepts an appeal for any request the
+ * policy *denied* - not the ones it escalated or approved, which have no refusal
+ * to contest - and records it in the appeals table plus an audit event and the
+ * composed update the customer reads. The GET just reports whether such an
+ * appeal is already sitting with a person, so the page can switch the form into
+ * a "with an agent" state without a blind POST.
+ *
+ * The only unsupported case is an order that has already been refunded in full.
+ * That refusal cannot be revisited to anyone's benefit, so the appeal is refused
+ * rather than quietly deleted - the customer is told the door is genuinely shut.
+ */
+function handleAppealStatus(
+  request: FastifyRequest,
+  ctx: AppContext,
+): { appeal: { readonly id: string; readonly createdAt: string; readonly reason: string } | null } {
+  const user = requireUser(request, ctx);
+  return { appeal: appealFor(ctx, user, requestParm(request)) };
+}
+
+function persistAppeal(
+  ctx: AppContext,
+  user: ShopUser,
+  requestId: string,
+  refundRequest: { orderId: string | null },
+  reason: string,
+): { readonly id: string; readonly requestId: string; readonly createdAt: string; readonly reason: string } {
+  return ctx.db.transaction((): {
+    readonly id: string;
+    readonly requestId: string;
+    readonly createdAt: string;
+    readonly reason: string;
+  } => {
+    let created: ReturnType<typeof fileAppeal>;
+    try {
+      created = fileAppeal(ctx.db, {
+        requestId,
+        customerId: user.customerId,
+        reason,
+        now: ctx.now(),
+      });
+    } catch (error) {
+      if (error instanceof AppealAlreadyPendingError) {
+        throw conflict('appeal_pending', 'this request is already with a person');
+      }
+      throw error;
+    }
+    insertAuditEvent(
+      ctx.db,
+      requestId,
+      ctx.now().toISOString(),
+      'appeal_filed',
+      `appealed by ${user.customerId}: ${reason}`,
+    );
+    recordCustomerUpdate(ctx.db, {
+      customerId: user.customerId,
+      orderId: refundRequest.orderId,
+      requestId,
+      kind: 'appeal_submitted',
+      body: followUpFor({
+        kind: 'appeal_submitted',
+        orderId: refundRequest.orderId,
+        previousDecision: 'denied',
+        decision: 'denied',
+        amountCents: 0,
+        paidCents: 0,
+      }),
+      now: ctx.now(),
+    });
+    return {
+      id: created.id,
+      requestId,
+      createdAt: created.createdAt,
+      reason: created.reason,
+    };
+  })();
+}
+
+function handleFileAppeal(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  ctx: AppContext,
+): { appeal: { readonly id: string; readonly requestId: string; readonly createdAt: string; readonly reason: string } } {
+  const body = parseBody(AppealSchema, request.body);
+  const user = requireUser(request, ctx);
+  const requestId = requestParm(request);
+
+  const refundRequest = findRequestById(ctx.db, requestId);
+  if (refundRequest === null || refundRequest.customerId !== user.customerId) {
+    throw new NotFoundError('refund request', requestId);
+  }
+  if (appealFor(ctx, user, requestId) !== null) {
+    throw conflict('appeal_pending', 'this request is already with a person');
+  }
+  if (refundRequest.decision !== 'denied') {
+    throw new HttpError(
+      409,
+      'appeal_not_relevant',
+      'only a refused request can be appealed - this one was not refused',
+    );
+  }
+  refuseIfMoot(ctx, user, refundRequest.orderId);
+
+  const appeal = persistAppeal(ctx, user, requestId, refundRequest, body.reason);
+  reply.code(201);
+  return { appeal };
+}
+
+function requireUser(request: FastifyRequest, ctx: AppContext): ShopUser {
+  const user = currentUser(request, ctx);
+  if (user === null) {
+    throw new UnauthorizedError('sign in to appeal a decision');
+  }
+  return user;
+}
+
+function registerAppealRoutes(app: FastifyInstance, ctx: AppContext): void {
+  app.get('/api/shop/refunds/:requestId/appeal', (request) => handleAppealStatus(request, ctx));
+  app.post('/api/shop/refunds/:requestId/appeal', (request, reply) => handleFileAppeal(request, reply, ctx));
+}
+
+/** The request id from the path, as a string zod would not try to coerce. */
+function requestParm(request: FastifyRequest): string {
+  return (request.params as { requestId?: unknown }).requestId as string;
+}
+
+/**
+ * The customer's own open appeal on a request, or null.
+ *
+ * Scoped by the session's customer rather than by the expensive call being an
+ * existence oracle: a request id is a guessable string, and a signed-in customer
+ * should not be able to learn whether a random id belongs to someone else. So
+ * the request is loaded here and the ownership test is the guard, and the only
+ * thing a foreign id produces is the same 404 everyone else gets.
+ */
+function appealFor(
+  ctx: AppContext,
+  user: ShopUser,
+  requestId: string,
+): { readonly id: string; readonly createdAt: string; readonly reason: string } | null {
+  const refundRequest = findRequestById(ctx.db, requestId);
+  if (refundRequest === null || refundRequest.customerId !== user.customerId) {
+    return null;
+  }
+  const appeal = openAppealForRequest(ctx.db, requestId);
+  return appeal === null
+    ? null
+    : { id: appeal.id, createdAt: appeal.createdAt, reason: appeal.reason };
+}
+
+/** Refuses an appeal on an order that has already been refunded in full. */
+function refuseIfMoot(ctx: AppContext, user: ShopUser, orderId: string | null): void {
+  if (orderId === null) {
+    return;
+  }
+  const order = findOrder(ctx.db, user.customerId, orderId, ctx.now());
+  if (order !== null && order.paymentState === FULLY_REFUNDED && order.refundedCents >= order.totalCents) {
+    throw new HttpError(
+      409,
+      'appeal_impossible',
+      'this order has already been refunded in full, so there is nothing a review could change - ' +
+        'contact the shop if you believe this is a mistake',
+    );
+  }
+}
+
 /** Parses a body with zod, reporting field paths the way the rest of the API does. */
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
@@ -94,93 +281,89 @@ function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   return result.data;
 }
 
+function handleRegister(request: FastifyRequest, reply: FastifyReply, ctx: AppContext): { user: ShopUser } {
+  const body = parseBody(RegisterSchema, request.body);
+  const user = createUser(ctx.db, body, ctx.now());
+  const session = startSession(ctx.db, user, ctx.now());
+  setSessionCookie(reply, session.token);
+  reply.code(201);
+  return { user: session.user };
+}
+
+function handleLogin(request: FastifyRequest, reply: FastifyReply, ctx: AppContext): { user: ShopUser } {
+  const body = parseBody(LoginSchema, request.body);
+  const user = authenticate(ctx.db, body.email, body.password);
+  const session = startSession(ctx.db, user, ctx.now());
+  setSessionCookie(reply, session.token);
+  return { user: session.user };
+}
+
+function handleDemoLogin(request: FastifyRequest, reply: FastifyReply, ctx: AppContext): { user: ShopUser } {
+  const body = parseBody(DemoSchema, request.body);
+  const demo = listDemoUsers(ctx.db).find((u) => u.email === body.email.trim().toLowerCase());
+  if (demo === undefined) {
+    throw badRequest('that is not a demo account');
+  }
+  const session = startSession(ctx.db, demo, ctx.now());
+  setSessionCookie(reply, session.token);
+  return { user: session.user };
+}
+
+function handleLogout(request: FastifyRequest, reply: FastifyReply, ctx: AppContext): { ok: true } {
+  const cookies = request.cookies as Record<string, string | undefined>;
+  endSession(ctx.db, cookies[SESSION_COOKIE]);
+  reply.clearCookie(SESSION_COOKIE, { path: '/' });
+  return { ok: true };
+}
+
+function handleMe(request: FastifyRequest, ctx: AppContext): { user: ShopUser | null } {
+  const user = currentUser(request, ctx);
+  return user === null ? { user: null } : { user };
+}
+
+function handleAssistantStatus(ctx: AppContext): { aiMode: string; aiAvailable: boolean; aiNote: string } {
+  return {
+    aiMode: aiModeLabel(ctx.pipeline),
+    aiAvailable: ctx.pipeline.analyzer.available,
+    aiNote: ctx.pipeline.analyzer.available ? '' : NO_API_KEY_NOTE,
+  };
+}
+
+function handleOrders(request: FastifyRequest, ctx: AppContext): { user: ShopUser | null; orders: readonly ShopOrder[] } {
+  const user = currentUser(request, ctx);
+  if (user === null) {
+    return { user: null, orders: [] };
+  }
+  return { user, orders: listOrdersForCustomer(ctx.db, user.customerId) };
+}
+
+function handleCheckout(request: FastifyRequest, reply: FastifyReply, ctx: AppContext): { order: ShopOrder } {
+  const body = parseBody(CheckoutSchema, request.body);
+  const user = currentUser(request, ctx);
+  if (user === null) {
+    throw new UnauthorizedError('sign in to check out');
+  }
+  const order = checkout(ctx.db, user.customerId, body.lines, ctx.now());
+  reply.code(201);
+  return { order };
+}
+
 export function registerShopRoutes(app: FastifyInstance, ctx: AppContext): void {
   // Public: the catalogue is browsable without an account, like a real shop.
   app.get('/api/shop/products', () => ({ products: listProducts(ctx.db) }));
 
   app.get('/api/shop/demo-accounts', () => ({ accounts: listDemoUsers(ctx.db) }));
 
-  app.post('/api/shop/register', (request, reply) => {
-    const body = parseBody(RegisterSchema, request.body);
-    const user = createUser(ctx.db, body, ctx.now());
-    const session = startSession(ctx.db, user, ctx.now());
-    setSessionCookie(reply, session.token);
-    return reply.code(201).send({ user: session.user });
-  });
+  app.post('/api/shop/register', (request, reply) => handleRegister(request, reply, ctx));
+  app.post('/api/shop/login', (request, reply) => handleLogin(request, reply, ctx));
+  app.post('/api/shop/demo-login', (request, reply) => handleDemoLogin(request, reply, ctx));
+  app.post('/api/shop/logout', (request, reply) => handleLogout(request, reply, ctx));
+  app.get('/api/shop/me', (request) => handleMe(request, ctx));
+  app.get('/api/shop/assistant-status', () => handleAssistantStatus(ctx));
+  app.get('/api/shop/orders', (request) => handleOrders(request, ctx));
+  app.post('/api/shop/checkout', (request, reply) => handleCheckout(request, reply, ctx));
 
-  app.post('/api/shop/login', (request, reply) => {
-    const body = parseBody(LoginSchema, request.body);
-    const user = authenticate(ctx.db, body.email, body.password);
-    const session = startSession(ctx.db, user, ctx.now());
-    setSessionCookie(reply, session.token);
-    return { user: session.user };
-  });
-
-  app.post('/api/shop/demo-login', (request, reply) => {
-    const body = parseBody(DemoSchema, request.body);
-    // Demo sign-in is a passwordless shortcut by design, so it is restricted to
-    // accounts the seed marked as demo. Otherwise it would be a backdoor into
-    // every real account created in the database.
-    const demo = listDemoUsers(ctx.db).find((u) => u.email === body.email.trim().toLowerCase());
-    if (demo === undefined) {
-      throw badRequest('that is not a demo account');
-    }
-    const session = startSession(ctx.db, demo, ctx.now());
-    setSessionCookie(reply, session.token);
-    return { user: session.user };
-  });
-
-  app.post('/api/shop/logout', (request, reply) => {
-    const cookies = request.cookies as Record<string, string | undefined>;
-    endSession(ctx.db, cookies[SESSION_COOKIE]);
-    reply.clearCookie(SESSION_COOKIE, { path: '/' });
-    return { ok: true };
-  });
-
-  app.get('/api/shop/me', (request) => {
-    const user = currentUser(request, ctx);
-    return user === null ? { user: null } : { user };
-  });
-
-  /**
-   * Whether a model is actually behind the assistant.
-   *
-   * Public, because it exposes no customer data - only whether a key is present
-   * and which provider is configured. It exists so the storefront can say "no
-   * model configured" out loud instead of behaving exactly as it does when a
-   * model *is* answering, which is otherwise indistinguishable.
-   *
-   * The note is written for whoever is looking at the storefront, which is not
-   * always the operator. It says *what is missing* and *where to set it* instead
-   * of naming a variable, because `AI_API_KEY is not set` tells a reader
-   * nothing they can act on unless they already know which provider is selected
-   * and where its key goes - and the two are the first things a new deployment
-   * gets wrong. The variable name is still available to an operator on the
-   * request record itself, where a precise diagnostic is what is wanted.
-   */  app.get('/api/shop/assistant-status', () => ({
-    aiMode: aiModeLabel(ctx.pipeline),
-    aiAvailable: ctx.pipeline.analyzer.available,
-    aiNote: ctx.pipeline.analyzer.available ? '' : NO_API_KEY_NOTE,
-  }));
-
-  app.get('/api/shop/orders', (request) => {
-    const user = currentUser(request, ctx);
-    if (user === null) {
-      return { user: null, orders: [] };
-    }
-    return { user, orders: listOrdersForCustomer(ctx.db, user.customerId) };
-  });
-
-  app.post('/api/shop/checkout', (request, reply) => {
-    const body = parseBody(CheckoutSchema, request.body);
-    const user = currentUser(request, ctx);
-    if (user === null) {
-      throw new UnauthorizedError('sign in to check out');
-    }
-    const order = checkout(ctx.db, user.customerId, body.lines, ctx.now());
-    return reply.code(201).send({ order });
-  });
-
+  registerAppealRoutes(app, ctx);
   registerChatHistoryRoutes(app, ctx);
 }
 

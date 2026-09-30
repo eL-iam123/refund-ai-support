@@ -354,7 +354,7 @@ label { display: block; font-size: 0.85rem; color: var(--ink-soft); }
   max-height: 62vh;
 }
 
-.bubble-me, .bubble-them, .bubble-pending {
+.bubble-me, .bubble-them {
   max-width: 78%;
   padding: 0.55rem 0.75rem;
   border-radius: var(--radius);
@@ -364,7 +364,30 @@ label { display: block; font-size: 0.85rem; color: var(--ink-soft); }
 .bubble-me { align-self: flex-end; background: var(--brand-soft); border: 1px solid var(--brand); }
 .bubble-them { align-self: flex-start; background: var(--surface); border: 1px solid var(--line); }
 .bubble-them p:last-child { margin-bottom: 0; }
-.bubble-pending { align-self: flex-start; color: var(--ink-faint); font-style: italic; }
+
+/* A person's words, on the assistant's side but not in the assistant's voice.
+   Same reading orientation as the bot's bubble, different accent, so a
+   customer glancing at the thread can tell "a person wrote this" apart from
+   "the bot answered" without reading the label. */
+.bubble-agent { border-color: #b7a0c9; background: #faf7fd; }
+
+/* The assistant mid-thought: their bubble, an animated "…" in place of words. */
+.bubble-typing { display: flex; align-items: center; gap: 0.5rem; color: var(--ink-faint); }
+.bubble-typing svg { flex: none; }
+.typing-dots { display: inline-flex; gap: 0.2rem; }
+.typing-dot {
+  width: 0.35rem;
+  height: 0.35rem;
+  border-radius: 50%;
+  background: currentColor;
+  animation: typing-bounce 1.2s infinite ease-in-out;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.18s; }
+.typing-dot:nth-child(3) { animation-delay: 0.36s; }
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
 
 .quick-actions { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.5rem; }
 
@@ -416,3 +439,35 @@ a.tile:hover { border-color: var(--ink-faint); border-top-width: 3px; }
 .gate { max-width: 440px; margin: 2rem auto; padding: 1.25rem; border: 1px solid var(--line); border-radius: var(--radius); }
 .gate form { display: flex; flex-direction: column; gap: 0.6rem; margin-top: 1rem; }
 .precedence { display: flex; flex-direction: column; gap: 0.5rem; }
+
+/* --- Live takeover console ------------------------------------------------- */
+
+.live-layout { display: grid; grid-template-columns: 240px 1fr; gap: 1rem; align-items: start; }
+.live-list { display: flex; flex-direction: column; gap: 0.6rem; }
+.live-list-rows { display: grid; gap: 0.4rem; }
+.live-list-rows li { list-style: none; }
+.live-row {
+  text-align: left;
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  background: var(--page);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.live-row.is-active { border-color: var(--brand); background: var(--brand-soft); }
+.live-row-name { display: flex; align-items: center; gap: 0.4rem; font-weight: 600; }
+
+.live-console { display: flex; flex-direction: column; gap: 0.9rem; min-width: 0; }
+
+.case-brief { border: 1px solid var(--line); border-radius: var(--radius); padding: 0.6rem 0.9rem; background: var(--surface); }
+.case-brief summary { cursor: pointer; font-weight: 600; }
+.case-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.2rem; margin-top: 0.7rem; }
+.case-brief h3 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink-faint); margin: 0.9rem 0 0.35rem; }
+.case-quotes, .case-dialogue { display: grid; gap: 0.4rem; font-size: 0.85rem; }
+.case-quotes li, .case-dialogue li { list-style: none; padding-left: 0.5rem; border-left: 2px solid var(--line); display: flex; flex-direction: column; gap: 0.15rem; }
+.risks { display: grid; gap: 0.4rem; margin-top: 0.7rem; }
+
+.thread-stack { display: flex; flex-direction: column; gap: 0.55rem; padding: 0.9rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--page); }

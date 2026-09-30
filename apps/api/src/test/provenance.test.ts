@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LightMyRequestResponse } from 'fastify';
 import { appHarness, TEST_NOW, TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, type AppHarness } from './helpers.js';
 import { seedRequestHistory } from '../db/seedHistory.js';
+import { FakeAnalyzer } from './fakeAnalyzer.js';
+import type { PipelineDeps } from '../orchestrator.js';
 
 /**
  * Where a request came from.
@@ -21,10 +23,17 @@ describe('provenance: which surface a request came from', () => {
 
   beforeEach(async () => {
     harness = await appHarness();
-    // Production boot replays the curated scenario history so the console opens
-    // onto real-looking rows. The harness does not, so the one thing this file
-    // is about - the two surfaces sharing the table - has to be set up here.
-    seedRequestHistory(harness.db, TEST_NOW);
+    // Production boot runs the curated scenario history through the real
+    // pipeline so the console opens onto genuine rows. The harness does not, so
+    // the one thing this file is about - the two surfaces sharing the table -
+    // has to be set up here. The heuristic analyzer keeps the seed deterministic
+    // (no model, no network).
+    const pipeline: PipelineDeps = {
+      analyzer: FakeAnalyzer(),
+      recordAttempt: () => {},
+      injectionAction: 'deny',
+    };
+    await seedRequestHistory(harness.db, TEST_NOW, pipeline);
     sessionCookie = '';
   });
 

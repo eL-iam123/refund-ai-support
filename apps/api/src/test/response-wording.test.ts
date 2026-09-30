@@ -6,6 +6,7 @@ import { processRefundRequest } from '../orchestrator.js';
 import { createAttemptRecorder } from '../db/attemptRecorder.js';
 import { pendingCentsForOrder } from '../db/refundLedger.js';
 import { appHarness, TEST_NOW, decided } from './helpers.js';
+import { shopHarness, signIn } from './shop-helpers.js';
 import { FakeAnalyzer } from './fakeAnalyzer.js';
 import { composeDeterministicResponse } from '../response/compose.js';
 import type { OrderRecord } from '../db/records.js';
@@ -20,7 +21,7 @@ import type { OrderRecord } from '../db/records.js';
  * starts moving money. So the amounts are asserted, not just the text.
  */
 
-const APPROVED = 'The Ceramic Mug Set arrived broken and I want a refund.';
+const APPROVED = 'The lamp arrived broken and I want a refund.';
 const LINK_ONLY = 'https://cdn.example.com/IMG_4021.jpg';
 const ANGRY = 'Honestly this whole process is a joke. Three weeks ago and still nothing. I want my money now.';
 
@@ -231,25 +232,28 @@ describe('a denial that is really about the balance', () => {
 
 describe('through the ledger, end to end', () => {
   it('does not tell a customer with a pending refund that they are getting nothing', async () => {
-    const { app, db } = await appHarness();
+    const harness = await shopHarness();
+    const { db } = harness;
+    const shopper = await signIn(harness, 'dana@shop.demo');
     const post = (message: string) =>
-      app.inject({
+      harness.app.inject({
         method: 'POST',
         url: '/api/chat/messages',
-        payload: { customerId: 'CUST-AOKAFOR', orderId: 'ORD-1001', message },
+        headers: { cookie: shopper.cookie },
+        payload: { customerId: shopper.customerId, orderId: shopper.orderId, message },
       });
 
     // First claim takes the whole order and reserves it.
     const first = await post(APPROVED);
     expect(first.json<{ request: { decision: { decision: string } } }>().request.decision.decision).toBe('approved');
-    expect(pendingCentsForOrder(db, 'ORD-1001')).toBe(10000);
+    expect(pendingCentsForOrder(db, shopper.orderId)).toBe(12900);
 
     // The next claim finds nothing left, and must not imply the first is void.
     const second = await post('The lamp is also damaged as well');
     const body = second.json<{ request: { decision: { decision: string; refundAmountCents: number }; responseText: string } }>().request;
 
     expect(body.decision.decision).toBe('denied');
-    expect(body.responseText).toContain('A refund of $100.00 is approved for this order');
+    expect(body.responseText).toContain('A refund of $129.00 is approved for this order');
   });
 
   it('holds the balance even when the resolver is called outside the chat route', async () => {

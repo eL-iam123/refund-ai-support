@@ -1,6 +1,7 @@
 import type { ClaimExtraction } from '@refund/shared';
-import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver } from './analyzer.js';
+import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver, type ChatInput, type ChatReply, type ChatTool } from './analyzer.js';
 import { scanForInjection } from '../security/injection.js';
+import { isNoComplaint, noComplaintQuestion } from '../response/noComplaint.js';
 
 /**
  * The extractor that runs when there is no provider key.
@@ -161,21 +162,26 @@ export function LocalAnalyzer(): AIAnalyzer {
   return {
     label: 'local (heuristic)',
     model: MODEL,
-    // Available, but never described as a model. The storefront's status line
-    // says "no model configured" for a keyless deployment and "Model: local
-    // (heuristic)" for this, which keeps the two visibly distinct - substituting
-    // a pattern matcher for a provider while showing the same healthy status is
-    // exactly the silent degradation this class exists to avoid.
     available: true,
     unavailableReason: null,
     analyze(input, observer) {
       return Promise.resolve(analyzeWithHeuristics(input, observer));
+    },
+    chat(input, observer) {
+      return Promise.resolve(chatWithHeuristics(input, observer));
     },
   };
 }
 
 function analyzeWithHeuristics(input: AnalyzerInput, observer: AttemptObserver): AgentReply {
   observer({ model: MODEL, attempt: 1, ok: true, latencyMs: 0, promptTokens: null, completionTokens: null, error: null });
+  if (isNoComplaint(input.message)) {
+    return {
+      kind: 'question',
+      question: noComplaintQuestion(input.message, input.order !== null),
+      model: MODEL,
+    };
+  }
   const extraction = read(input);
   return {
     kind: 'claim',
@@ -322,3 +328,53 @@ function suggestDecision(
 }
 
 export { AiUnavailableError };
+
+/**
+ * Chat mode for escalated conversations (local heuristic version).
+ *
+ * Provides a helpful, conversational response with no monetary authority.
+ * Can use the remind_admin tool to notify the human agent.
+ */
+function chatWithHeuristics(input: ChatInput, observer: AttemptObserver): ChatReply {
+  observer({ model: MODEL, attempt: 1, ok: true, latencyMs: 0, promptTokens: null, completionTokens: null, error: null });
+
+  const message = input.message.toLowerCase();
+
+  // Check if the customer is pushing/waiting - use remind_admin tool
+  const isPushing = /(?:where|wait|waiting|anyone|hello|any\s+one|anybody|agent|human|admin|help|anyone\s+there|any\s+updates?|status|waiting|waited|long\s+time|taking\s+long|hurry|urgent|asap|immediately)/i.test(input.message);
+
+  if (isPushing && input.tools.some(t => t.name === 'remind_admin')) {
+    return {
+      kind: 'tool_call',
+      tool: 'remind_admin',
+      model: MODEL,
+    };
+  }
+
+  // Conversational responses based on message content
+  const isGreeting = /^(?:hi|hello|hey|hiya|howdy|good\s+(?:morning|afternoon|evening)|hi\s+there|hey\s+there)/i.test(input.message.trim());
+  const isThanks = /^(?:thanks|thank\s+you|thx|ty|thank\s+u)/i.test(input.message.trim());
+  const isWaiting = /(?:wait|waiting|waited|long\s+time|taking\s+long|any\s+updates?|status|any\s+news)/i.test(input.message);
+  const isFrustrated = /(?:frustrat|annoy|angry|upset|ridiculous|unacceptable|unprofessional|waste|wasting|worst)/i.test(input.message);
+
+  let response: string;
+
+  if (isGreeting && !isWaiting) {
+    response = "Hi there! I can see you're connected with a human agent who's looking into your case. They'll be with you shortly. Is there anything else I can help with while you wait?";
+  } else if (isThanks) {
+    response = "You're welcome! Your agent is working on this and will update you soon. Let me know if there's anything else you need.";
+  } else if (isFrustrated) {
+    response = "I understand this is frustrating, and I'm sorry for the wait. Your human agent is aware and is looking into this for you. I've let them know you're waiting. Is there anything specific you'd like me to pass along?";
+  } else if (isWaiting) {
+    response = "I know waiting is frustrating. Your agent is still reviewing this and will get back to you as soon as they can. I've given them a nudge that you're waiting. Is there anything else I can help with in the meantime?";
+  } else {
+    // Default helpful response
+    response = "I'm here to help while your agent works on this. They're reviewing the details and will get back to you soon. Is there anything specific you'd like me to pass along or any other questions I can answer while you wait?";
+  }
+
+  return {
+    kind: 'text',
+    text: response,
+    model: MODEL,
+  };
+}

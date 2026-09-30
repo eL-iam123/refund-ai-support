@@ -25,6 +25,14 @@ refund button. See [ADR 0001](docs/adr/0001-resolver-is-sole-authority.md).
 - **Human payment approval** — an approved refund is *reserved*, not paid; an
   admin must verify it in the queue before money moves, and releasing a
   reservation returns the balance to the order
+- **Customer appeals** — a denied request can be appealed; the appeal appears in
+  the agent queue and the takeover thread, closing when the agent overrides
+- **Takeover photos** — during a live takeover, both agent and customer can attach
+  images (JPEG, PNG, GIF, WebP ≤ 5 MB) that are stored on disk and served under
+  `/media/`
+- **Live queue analytics** — admin-only `/api/staff/analytics` shows open takeovers,
+  escalated-awaiting count, money awaiting review, decisions today by outcome, and
+  average takeover duration; rendered as a metrics strip on the Live page
 - **Conformance suite** — 18 scenarios pinning the behaviour, including the
   documented attack that the injection scanner is designed to miss
 
@@ -282,6 +290,37 @@ expected to ask when it has not.
   line in the dialogue transcript plus the current message — an earlier turn is
   citable, the assistant's own wording never is.
 
+### When the customer needs a person
+
+A customer who is not being settled takes the thread over to a human. The switch
+is explicit and reversible, and the two sides talk on the WebSocket, not through
+the pipeline.
+
+- **A live takeover.** `POST /api/staff/conversations/:customerId/take-over` is a
+  *claim* — one handoff row at a time per customer, so a colleague who already saw
+  the conversation gets the thread, and racing attempts are answered `409`. Only
+  the staff member who holds the row may message or hand it back. While the
+  handoff is live the pipeline is *paused*: a customer message is recorded to the
+  human thread, relayed to the open staff sockets, and answered by the agent —
+  never by the analyzer.
+- **The case file is built, not claimed.** Every takeover opens the same briefing,
+  derived from the thread at read time: the customer's own words, the assistant's
+  restatement of them, the questions it asked and the answers, the evidence it
+  actually secured (echoed quotes), the policy trail with the rules it ran, and
+  any risk flags. The human is not re-deriving what the machine established. A
+  conversation never got an order yet — the assistant is mid-clarify — opens just
+  as well, anchored on the customer alone.
+- **Notices are derived, never stored.** The one line the customer sees during a
+  takeover — "Connecting you to a customer agent - please hold." — is rendered
+  from the live handoff row, not written to the database, and disappears when the
+  agent hands the thread back. When the handoff ends the pipeline resumes exactly
+  where it would have: an unanswered customer message left over the takeover runs
+  the next time the customer writes.
+- **The agents' room.** `/admin/live` keeps an open WebSocket to the staff room;
+  the shop keeps one per customer. The socket carries only "something moved" —
+  every side re-reads its list or thread — so a message can never be delivered to
+  the wrong browser.
+
 ### Demo history is not your queue
 
 The console seeds a few recorded decisions so it opens onto history rather than an
@@ -480,6 +519,11 @@ human instead. Neither setting can approve anything.
 | `GET` | `/api/returns/:id` | one of them, or `404` for anyone else's |
 | `GET` | `/api/admin/returns`, `/api/admin/returns/by-request/:requestId` | the warehouse queue, staff only |
 | `POST` | `/api/admin/returns/:id/label` \| `/ship` \| `/receive` \| `/process` \| `/deny` | drive a return, staff only |
+| `GET` | `/api/staff/conversations`, `/api/staff/conversation?customerId=` | the live takeover queue and one conversation's case file + thread, staff only |
+| `POST` | `/api/staff/conversations/:customerId/take-over` | claim the thread; `409` if a colleague already holds it |
+| `POST` | `/api/staff/conversations/:customerId/message` | reply as the agent on behalf of the current holder |
+| `POST` | `/api/staff/conversations/:customerId/hand-back` | release the thread to the assistant; `409` if not held |
+| `WS` | `/api/shop/chat/ws` \| `/api/staff/conversation/ws` | the customer's room and the staff room — notify only, bodies are re-read |
 
 ### Overriding the policy
 
@@ -650,7 +694,7 @@ failed request.
 ## Testing
 
 ```
-456 passed · 8 skipped · 0 network required
+489 passed · 8 skipped · 0 network required
 ```
 
 The 8 skipped are the opt-in live provider suite, which stays dark unless

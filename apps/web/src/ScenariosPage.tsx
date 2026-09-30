@@ -41,6 +41,14 @@ async function runScenario(
       );
       return;
     }
+    if ('received' in reply) {
+      // A thread that is mid-takeover routes the scenario's message to a person
+      // instead of the pipeline, so there is no decision row to point at.
+      setRunning((previous) =>
+        previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: 'routed to a customer agent' } : row)),
+      );
+      return;
+    }
     const { request } = reply;
     setRunning((previous) =>
       previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: request.id } : row)),

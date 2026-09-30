@@ -474,6 +474,95 @@ const MIGRATIONS: readonly Migration[] = [
       );
     },
   },
+  {
+    version: 11,
+    name: 'live human takeover',
+    up: (db) => {
+      // A customer thread handed to a person.
+      //
+      // The AI assistant and a customer can be talking when the assistant decides
+      // it cannot help - or when a staff member decides it should not - and the
+      // customer keeps typing in the same box. `handoffs` is the record of that:
+      // which customer, which thread, which staff member took it, and whether it
+      // is still live. `ended_at` is null while a person is attached, which the
+      // partial unique index turns into "at most one live takeover per customer":
+      // two agents chatting into the same customer's box would be a mess with no
+      // record at all.
+      //
+      // `order_id` is nullable because a takeover can start mid-clarify, before
+      // any order has been identified - the thread is per customer either way.
+      //
+      // The messages exchanged while a person is attached live in a separate
+      // table rather than in `shop_dialogue`, which is a question-and-answer
+      // record with exactly two columns and does not fit a free conversation.
+      // `sender` says whose words they are: the customer's messages are routed
+      // here too, because the AI pipeline is deliberately *not* running while a
+      // person is on the line.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS handoffs (
+          id          TEXT PRIMARY KEY,
+          customer_id TEXT NOT NULL REFERENCES customers(id),
+          order_id    TEXT,
+          agent_id    TEXT NOT NULL,
+          started_at  TEXT NOT NULL,
+          ended_at    TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_handoffs_one_active
+          ON handoffs(customer_id) WHERE ended_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_handoffs_customer ON handoffs(customer_id, started_at);
+
+        CREATE TABLE IF NOT EXISTS agent_messages (
+          id          TEXT PRIMARY KEY,
+          created_at  TEXT NOT NULL,
+          handoff_id  TEXT NOT NULL REFERENCES handoffs(id) ON DELETE CASCADE,
+          sender      TEXT NOT NULL CHECK (sender IN ('agent', 'customer')),
+          body        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_messages_handoff ON agent_messages (handoff_id, created_at);
+      `);
+    },
+  },
+  {
+    version: 12,
+    name: 'appeals and chat media',
+    up: (db) => {
+      // A customer asking a person to look again at a refused request.
+      //
+      // Every denial the policy produces is deliberate - a hard rule refused the
+      // money - so an appeal is not a triage gate. It is the customer explicitly
+      // disagreeing, which is exactly the signal a person needs before they spend
+      // time re-reading a decided case. `decided_at` being null is what makes the
+      // appeal live, and the partial unique index turns "the customer asked again"
+      // into a state rather than a queue of repeat clicks: at most one appeal can
+      // be sitting with a person per request. Deciding an appeal is a hand-off to
+      // the takeover machinery, not a column flip here - the person talks it out
+      // in `agent_messages` and then overrides the request, which closes the
+      // appeal (`closeAppealsForRequest` in `applyHumanOverride`).
+      //
+      // The media columns on `agent_messages` are how a photo travels in a
+      // takeover: a person's reply, or the customer's own picture, with the file
+      // on disk and the route to it on the row. `body` stays NOT NULL - a photo
+      // message may carry a caption or an empty string, never absence.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS appeals (
+          id          TEXT PRIMARY KEY,
+          created_at  TEXT NOT NULL,
+          customer_id TEXT NOT NULL REFERENCES customers(id),
+          request_id  TEXT NOT NULL REFERENCES refund_requests(id),
+          reason      TEXT NOT NULL,
+          decided_at  TEXT,
+          decided_by  TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_appeals_one_open
+          ON appeals(request_id) WHERE decided_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_appeals_customer ON appeals (customer_id, created_at);
+
+        ALTER TABLE agent_messages ADD COLUMN media_path TEXT;
+        ALTER TABLE agent_messages ADD COLUMN media_type TEXT;
+        ALTER TABLE agent_messages ADD COLUMN media_bytes INTEGER;
+      `);
+    },
+  },
 ];
 
 /**

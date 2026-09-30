@@ -141,6 +141,8 @@ export function scenarioHarness(
 export interface AppHarness {
   readonly app: FastifyInstance;
   readonly db: Db;
+  /** How many times the analyzer was consulted (not counting the deterministic floor). */
+  readonly analyzerCalls: () => number;
 }
 
 /**
@@ -160,6 +162,8 @@ export async function appHarness(
 ): Promise<AppHarness> {
   const db = openMemoryDatabase();
   seedDatabase(db, TEST_NOW);
+  const analyzer = FakeAnalyzer(behaviour);
+  let analyzerCalls = 0;
   const app = buildApp({
     env,
     db,
@@ -168,13 +172,19 @@ export async function appHarness(
     // 45-day refund window would read every order as months old.
     now: (): Date => TEST_NOW,
     pipeline: {
-      analyzer: FakeAnalyzer(behaviour),
+      analyzer: {
+        ...analyzer,
+        analyze(input, observer) {
+          analyzerCalls += 1;
+          return analyzer.analyze(input, observer);
+        },
+      },
       recordAttempt: createAttemptRecorder(db),
       injectionAction: env.INJECTION_ACTION,
     },
   });
   await app.ready();
-  return { app, db };
+  return { app, db, analyzerCalls: () => analyzerCalls };
 }
 
 /**

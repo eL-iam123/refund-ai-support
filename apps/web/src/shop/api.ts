@@ -178,6 +178,24 @@ export const shopApi = {
   assistantStatus: (): Promise<{ aiMode: string; aiAvailable: boolean; aiNote: string }> =>
     request('/api/shop/assistant-status'),
 
+  /**
+   * The customer's open appeal on a refused request, if any.
+   */
+  appealStatus: (requestId: string): Promise<{ appeal: { id: string; createdAt: string; reason: string } | null }> =>
+    request(`/api/shop/refunds/${encodeURIComponent(requestId)}/appeal`),
+
+  /**
+   * Files an appeal on a refused request.
+   */
+  fileAppeal: (requestId: string, reason: string): Promise<{ appeal: { id: string; requestId: string; createdAt: string; reason: string } }> =>
+    post(`/api/shop/refunds/${encodeURIComponent(requestId)}/appeal`, { reason }),
+
+  /**
+   * Uploads a photo during a live takeover.
+   */
+  chatMedia: (input: { orderId: string | null; caption?: string; media: { dataUrl: string } }): Promise<{ message: { kind: 'agent'; id: string; sender: 'agent' | 'customer'; body: string; createdAt: string; media: { type: string; url: string; bytes: number } | null } }> =>
+    post('/api/shop/chat/media', input),
+
 };
 
 /**
@@ -235,6 +253,31 @@ export type ChatTurn =
       readonly kind: 'update';
       readonly id: string;
       readonly requestId: string;
+      readonly body: string;
+      readonly createdAt: string;
+    }
+  | {
+      /**
+       * One message exchanged with a person during a live takeover. `sender`
+       * names whose words they are: the customer's own routed messages and the
+       * agent's replies both live here, as the server stores them.
+       */
+      readonly kind: 'agent';
+      readonly id: string;
+      readonly sender: 'agent' | 'customer';
+      readonly body: string;
+      readonly createdAt: string;
+      /** Optional photo attached to this message, served under `/media/`. Null for text. */
+      readonly media: { readonly type: string; readonly url: string; readonly bytes: number } | null;
+    }
+  | {
+      /**
+       * The moment the thread changed hands: the "connecting you to a customer
+       * agent" notice, derived from the takeover row and present only while it
+       * is live.
+       */
+      readonly kind: 'handoff';
+      readonly id: string;
       readonly body: string;
       readonly createdAt: string;
     };

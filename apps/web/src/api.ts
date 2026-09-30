@@ -136,6 +136,80 @@ export interface AuditPage {
   readonly audit: AuditChainDto;
 }
 
+export interface AgentRoutedReply {
+  /** The takeover's copy of the customer's message. */
+  readonly message: {
+    readonly id: string;
+    readonly createdAt: string;
+    readonly sender: 'customer';
+    readonly body: string;
+    readonly media: { readonly type: string; readonly url: string; readonly bytes: number } | null;
+  };
+}
+
+/** One row of the live conversations list, from the staff endpoint. */
+export interface StaffConversation {
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly orderId: string | null;
+  readonly lastActivityAt: string;
+  readonly activityCount: number;
+  readonly activeHandoff: { readonly id: string; readonly agentId: string; readonly startedAt: string } | null;
+  /** Refusals the customer is asking a person to look at again. */
+  readonly openAppeals: readonly { readonly requestId: string; readonly reason: string; readonly createdAt: string }[];
+}
+
+/** A thread entry as the staff console reads it. */
+export type StaffThreadTurn =
+  | {
+      readonly kind: 'request';
+      readonly requestId: string;
+      readonly message: string;
+      readonly responseText: string;
+      readonly decision: 'approved' | 'denied' | 'escalated';
+      readonly refundAmountCents: number;
+      readonly createdAt: string;
+    }
+  | { readonly kind: 'dialogue'; readonly id: string; readonly message: string; readonly question: string; readonly createdAt: string }
+  | { readonly kind: 'update'; readonly id: string; readonly requestId: string; readonly body: string; readonly createdAt: string }
+  | {
+      readonly kind: 'agent';
+      readonly id: string;
+      readonly sender: 'agent' | 'customer';
+      readonly body: string;
+      readonly createdAt: string;
+      /** Optional photo attached to this message, served under `/media/`. Null for text. */
+      readonly media: { readonly type: string; readonly url: string; readonly bytes: number } | null;
+    }
+  | { readonly kind: 'handoff'; readonly id: string; readonly body: string; readonly createdAt: string };
+
+/** The deterministic briefing shown beside a takeover. */
+export interface HandoffBrief {
+  readonly state: 'ai' | 'handed_off';
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly orderId: string | null;
+  readonly agentId: string | null;
+  readonly since: string | null;
+  readonly handoffReason: string | null;
+  readonly whatTheySaid: readonly { readonly at: string; readonly text: string }[];
+  readonly dialogue: readonly { readonly question: string; readonly answer: string }[];
+  readonly echoedEvidence: readonly string[];
+  readonly claim:
+    | {
+        readonly summary: string;
+        readonly decision: string;
+        readonly refundAmountCents: number;
+        readonly reasonCodes: readonly string[];
+        readonly items: readonly string[];
+      }
+    | null;
+  readonly policyTrail: readonly { readonly ruleId: string; readonly outcome: string; readonly evidence: string }[];
+  readonly riskFlags: readonly { readonly label: string; readonly detail: string }[];
+  /** Refusals the customer asked a person to look at again, oldest first. */
+  readonly appeals: readonly { readonly requestId: string; readonly reason: string; readonly createdAt: string }[];
+}
+
 export const api = {
   health: (): Promise<{ status: string; aiMode: string; adminEnabled: boolean }> => request('/api/health'),
 
@@ -148,16 +222,19 @@ export const api = {
   signOut: (): Promise<{ ok: boolean }> => post('/api/admin/logout', {}),
 
   /**
-   * Sends a message. Two possible replies, and they are not interchangeable:
+   * Sends a message. Three possible replies, and they are not interchangeable:
    * a decision (`request`, with `duplicate` when the server recognised a repeat
    * and returned the earlier request instead of creating one - a 200 rather than
-   * a 201 in that case), or the assistant's clarifying question (`question`).
+   * a 201 in that case), the assistant's clarifying question (`question`), or
+   * `received` - the thread was handed to a person, the pipeline is off, and the
+   * message was routed to them instead of being decided.
    */
   sendMessage: (input: { customerId: string; orderId: string | null; message: string }) =>
-    post<{ request: RefundRequestDto; duplicate?: DuplicateNotice } | { question: string; dialogueId: string }>(
-      '/api/chat/messages',
-      input,
-    ),
+    post<
+      | { request: RefundRequestDto; duplicate?: DuplicateNotice }
+      | { question: string; dialogueId: string }
+      | ({ received: true; agentConnected: true } & AgentRoutedReply)
+    >('/api/chat/messages', input),
 
   listRequests: (params: RequestFilter = {}) =>
     request<{ requests: RefundRequestSummaryDto[] }>(`/api/requests${queryString(params)}`),
@@ -198,6 +275,37 @@ export const api = {
    */
   audit: (filter: AuditFilter = {}): Promise<AuditPage> =>
     request(`/api/admin/audit${auditQueryString(filter)}`),
+
+  /**
+   * The live takeover console.
+   *
+   * The list is what a queue is for; the thread + briefing is the case file;
+   * the three verbs are the whole of what an agent can do. The customer's half
+   * of the same feature is the ordinary chat endpoint - this console never
+   * touches `customerId` from anywhere but the staff session and the list rows.
+   */
+  staffConversations: (): Promise<{ conversations: readonly StaffConversation[] }> =>
+    request('/api/staff/conversations'),
+
+  staffConversation: (customerId: string, orderId: string | null): Promise<{ thread: readonly StaffThreadTurn[]; brief: HandoffBrief }> => {
+    const search = new URLSearchParams({ customerId });
+    if (orderId !== null && orderId.length > 0) {
+      search.set('orderId', orderId);
+    }
+    return request(`/api/staff/conversation?${search.toString()}`);
+  },
+
+  staffTakeOver: (customerId: string, orderId: string | null): Promise<{ handoff: { id: string; customerId: string; orderId: string | null; agentId: string; startedAt: string } }> =>
+    post(`/api/staff/conversations/${encodeURIComponent(customerId)}/take-over`, { orderId }),
+
+  staffMessage: (customerId: string, body: string, mediaDataUrl?: string): Promise<{ message: { id: string; createdAt: string; sender: string; body: string; media: { type: string; url: string; bytes: number } | null } }> =>
+    post(`/api/staff/conversations/${encodeURIComponent(customerId)}/message`, { body, media: mediaDataUrl ? { dataUrl: mediaDataUrl } : undefined }),
+
+  staffHandBack: (customerId: string): Promise<{ ended: { id: string; customerId: string; orderId: string | null; agentId: string; startedAt: string } }> =>
+    post(`/api/staff/conversations/${encodeURIComponent(customerId)}/hand-back`, {}),
+
+  staffAnalytics: (): Promise<{ analytics: { openHandoffs: number; escalatedAwaiting: number; awaitingReviewCents: number; decisionsToday: { approved: number; denied: number; escalated: number }; averageTakeoverMinutes: number | null; since: string } }> =>
+    request('/api/staff/analytics'),
 };
 
 function auditQueryString(filter: AuditFilter): string {

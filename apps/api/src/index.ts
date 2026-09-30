@@ -6,6 +6,8 @@ import { seedDatabase } from './db/seed.js';
 import { seedRequestHistory } from './db/seedHistory.js';
 import { seedShop } from './shop/seed.js';
 import { purgeExpiredSessions } from './shop/auth.js';
+import { createAnalyzer } from './ai/index.js';
+import { createAttemptRecorder } from './db/attemptRecorder.js';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -42,10 +44,16 @@ async function main(): Promise<void> {
   if (countRows(db) === 0) {
     const seeded = seedDatabase(db, new Date());
     log.info({ seeded }, 'database.seeded');
-    // A few recorded decisions, so the console opens onto history rather than an
-    // empty table. Replayed from the canonical scenarios, never from a model.
-    const history = seedRequestHistory(db, new Date());
-    log.info({ history }, 'database.seeded.history');
+    // A few decisions, so the console opens onto history rather than an empty
+    // table. Produced, not written: each canonical scenario is run through the
+    // real pipeline with the deployment's analyzer, so the demo rows show the
+    // same trace, grounding and response a live customer would have produced.
+    const history = await seedRequestHistory(db, new Date(), {
+      analyzer: createAnalyzer(env),
+      recordAttempt: createAttemptRecorder(db),
+      injectionAction: env.INJECTION_ACTION,
+    });
+    log.info({ created: history.created, asked: history.asked }, 'database.seeded.history');
   }
 
   // The storefront catalogue and demo accounts are additive, so they are topped

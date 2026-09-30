@@ -1,4 +1,4 @@
-import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver } from './analyzer.js';
+import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
 
 /**
  * The analyzer used when no provider key is configured.

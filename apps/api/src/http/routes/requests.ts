@@ -24,6 +24,7 @@ import { RuleEvaluationSchema } from '@refund/shared';
 import { FULLY_REFUNDED } from '../../policy/constants.js';
 import { authoriseRefund, releaseRefundsForRequest } from '../../db/refundLedger.js';
 import { recordCustomerUpdate } from '../../db/customerUpdates.js';
+import { closeAppealsForRequest } from '../../db/appeals.js';
 import { followUpFor } from '../../response/followUp.js';
 import { formatCents } from '../../lib/money.js';
 
@@ -219,6 +220,10 @@ function applyOverride(
         );
       }
     }
+    // A person deciding the request is the way an appeal ends. The person is in
+    // the thread now (that is the only way they got here), so the open appeal is
+    // no longer a queue entry waiting for attention.
+    closeAppealsForRequest(ctx.db, requestId, agentId, ctx.now());
     insertAuditEvent(ctx.db, requestId, at, 'human_override', detail);
 
     notifyCustomer(ctx, requestId, previousDecision);

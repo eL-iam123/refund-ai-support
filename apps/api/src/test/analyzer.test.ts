@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { APIConnectionError, APIConnectionTimeoutError, APIError, APIUserAbortError } from 'openai';
 import { classifyProviderFailure, modelCandidates, toAnalyzerOrder } from '../ai/openaiAnalyzer.js';
 import { parseJson } from '../ai/json.js';
+import { LocalAnalyzer } from '../ai/localAnalyzer.js';
 import { ExtractionOutputSchema } from '../ai/schemas.js';
 import { redactSecrets } from '../lib/redact.js';
 import { testEnv } from './helpers.js';
@@ -15,6 +16,49 @@ import type { OrderRecord } from '../db/records.js';
  * claim arrives intact, the retry logic cannot amplify a bug, and no credential
  * can reach the audit trail.
  */
+
+describe('the local extractor leaves a greeting to the messenger', () => {
+  it('asks what happened rather than claiming, when nothing is wrong yet', async () => {
+    const reply = await LocalAnalyzer().analyze({ message: 'hello', order: null, history: [] }, () => {});
+
+    expect(reply.kind).toBe('question');
+    if (reply.kind === 'question') {
+      expect(reply.question).toContain('what happened');
+    }
+  });
+
+  it('does not lose a multi-word greeting or a standalone thanks', async () => {
+    for (const message of ['Hi there!', 'hello', 'thanks', 'thank you', 'hola', 'bonjour']) {
+      const reply = await LocalAnalyzer().analyze({ message, order: null, history: [] }, () => {});
+      expect(reply.kind, message).toBe('question');
+    }
+  });
+
+  it('names the missing order when none is resolved yet, in the customer’s language', async () => {
+    const reply = await LocalAnalyzer().analyze({ message: 'hola', order: null, history: [] }, () => {});
+    expect(reply.kind).toBe('question');
+    if (reply.kind === 'question') {
+      expect(reply.question).toMatch(/pedido/);
+    }
+  });
+
+  it('still claims a real complaint, including a vague one ("It’s just not right")', async () => {
+    const vague = await LocalAnalyzer().analyze(
+      { message: "It's just not right. Can you sort it out?", order: null, history: [] },
+      () => {},
+    );
+    expect(vague.kind).toBe('claim');
+
+    const damaged = await LocalAnalyzer().analyze(
+      { message: 'hello, my lamp arrived cracked', order: { id: 'ORD-1', totalCents: 100, status: 'delivered', paymentState: 'settled', ageDays: 3, items: [] }, history: [] },
+      () => {},
+    );
+    expect(damaged.kind).toBe('claim');
+    if (damaged.kind === 'claim') {
+      expect(damaged.extraction.reason).toBe('damaged');
+    }
+  });
+});
 
 describe('retry classification', () => {
   it('retries the failures a flaky provider actually produces', () => {

@@ -146,6 +146,32 @@ export function findRequestById(db: Db, id: string): PersistedRequest | null {
   return row === null ? null : hydrate(row);
 }
 
+/**
+ * The most recent request on a thread, for the staff briefing.
+ *
+ * `order_id IS ?` so a mid-clarify thread (no order resolved yet) joins on NULL
+ * correctly, and `rowid` breaks the fixed-clock tie the same way the thread
+ * merge does. Latest, not "first": a takeover hands a person the decision the
+ * customer is currently reacting to, which is the one that matters.
+ */
+export function latestRequestForThread(
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+): PersistedRequest | null {
+  const row = queryOne<RequestRow>(
+    db.prepare(
+      `SELECT ${SELECT_COLUMNS} FROM refund_requests
+        WHERE customer_id = ? AND order_id IS ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1`,
+    ),
+    customerId,
+    orderId,
+  );
+  return row === null ? null : hydrate(row);
+}
+
 export interface ListFilter {
   readonly decision?: string | undefined;
   readonly source?: 'scenario' | 'storefront' | undefined;

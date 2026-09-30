@@ -23,7 +23,7 @@ export function persistDecision(
   db: Db,
   row: NewRequestRow,
   context: { readonly orderId: string | null; readonly customerId: string; readonly now: Date },
-): { readonly reservedCents: number } {
+): { readonly reservedCents: number; readonly reservationId: string | null } {
   const persist = db.transaction(() => {
     insertRequest(db, row);
     insertAuditEvent(
@@ -35,7 +35,7 @@ export function persistDecision(
     );
 
     if (row.decision !== 'approved' || row.refundAmountCents <= 0 || context.orderId === null) {
-      return { reservedCents: 0 };
+      return { reservedCents: 0, reservationId: null };
     }
 
     // Recorded as awaiting verification, not as paid. Nothing here moves money;
@@ -54,7 +54,11 @@ export function persistDecision(
       'refund_authorised',
       `${formatCents(row.refundAmountCents)} pending human verification`,
     );
-    return { reservedCents: reservation.amountCents };
+    // The reservation id is surfaced because a seeder that replays history has
+    // to settle the money a real approval reserved - a refund that was approved
+    // in the demo and settled nowhere would look like money stuck in review
+    // forever.
+    return { reservedCents: reservation.amountCents, reservationId: reservation.id };
   });
 
   return persist();

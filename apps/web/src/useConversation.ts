@@ -99,6 +99,31 @@ export type Turn =
       readonly id: string;
       readonly text: string;
       readonly ofRequestId: string;
+    }
+  | {
+      /**
+       * One message exchanged with a person during a live takeover, told apart
+       * by `sender`. The customer's own words render on their side of the
+       * thread; the agent's words render with a marker so the customer knows
+       * the reply came from a person - the whole reason a takeover happened.
+       */
+      readonly kind: 'agent';
+      readonly id: string;
+      readonly text: string;
+      readonly sender: 'agent' | 'customer';
+      readonly createdAt: string;
+      /** Optional photo attached to this message, served under `/media/`. Null for text. */
+      readonly media: { readonly type: string; readonly url: string; readonly bytes: number } | null;
+    }
+  | {
+      /**
+       * The moment a person took over the thread, rendered as the notice the
+       * customer was told. Derived from the takeover row, so it is only in the
+       * history while the takeover is actually live.
+       */
+      readonly kind: 'handoff';
+      readonly id: string;
+      readonly text: string;
     };
 
 export interface Conversation {
@@ -112,6 +137,8 @@ export interface Conversation {
   readonly loading: boolean;
   readonly setDraft: (next: string) => void;
   readonly send: () => Promise<void>;
+  /** Re-reads the stored thread: the socket tells us something changed. */
+  readonly refresh: () => void;
 }
 
 /** Turns held in this session, per order. See `useLiveTurns`. */
@@ -145,9 +172,13 @@ interface LoadedThread {
 function useStoredThread(
   customerId: string | null,
   orderId: string | null,
-): { readonly turns: readonly Turn[]; readonly loading: boolean; readonly error: string } {
+): { readonly turns: readonly Turn[]; readonly loading: boolean; readonly error: string; readonly reload: () => void } {
   const [loaded, setLoaded] = useState<LoadedThread | null>(null);
   const [failed, setFailed] = useState<string>('');
+  // Bumped by `reload`. The socket announces "something changed, come look";
+  // that announcement is not itself a turn, it is a reason to re-read storage -
+  // the thread the customer and any agent see must come from the same query.
+  const [version, setVersion] = useState(0);
 
   useEffect(() => {
     if (orderId === null || customerId === null) {
@@ -172,13 +203,14 @@ function useStoredThread(
     return () => {
       current = false;
     };
-  }, [customerId, orderId]);
+  }, [customerId, orderId, version]);
 
   const applies = loaded !== null && loaded.orderId === orderId;
   return {
     turns: applies ? loaded.turns : [],
     loading: orderId !== null && customerId !== null && !applies && failed === '',
     error: failed,
+    reload: () => setVersion((v) => v + 1),
   };
 }
 
@@ -281,31 +313,7 @@ export function useConversation(
 
     try {
       const reply = await api.sendMessage({ customerId, orderId, message });
-      if ('question' in reply) {
-        // A question is not a decision: the turn settles into its own shape and
-        // the composer stays open, because the customer's next message is the
-        // answer to it - and the server persists the exchange as dialogue, so
-        // a refresh keeps it too.
-        live.settle(orderId, localId, {
-          kind: 'asked',
-          id: reply.dialogueId,
-          text: message,
-          question: reply.question,
-        });
-        return;
-      }
-      const { request, duplicate } = reply;
-      live.settle(orderId, localId, {
-        kind: 'replied',
-        id: request.id,
-        text: message,
-        result: {
-          decision: request.decision.decision,
-          refundAmountCents: request.decision.refundAmountCents,
-          responseText: request.responseText,
-        },
-        duplicate: duplicate ?? null,
-      });
+      settleReply(orderId, localId, message, reply, live);
     } catch (cause: unknown) {
       setError(describe(cause));
       live.abandon(orderId, localId);
@@ -314,7 +322,70 @@ export function useConversation(
     }
   }, [busy, customerId, draft, live, orderId]);
 
-  return { turns, draft, busy, error: error.length > 0 ? error : stored.error, blocked, loading: stored.loading, setDraft, send };
+  return {
+    turns,
+    draft,
+    busy,
+    error: error.length > 0 ? error : stored.error,
+    blocked,
+    loading: stored.loading,
+    setDraft,
+    send,
+    refresh: stored.reload,
+  };
+}
+
+/**
+ * Resolves a sent message into its live turn, by reply shape.
+ *
+ * A question is not a decision: the turn settles into its own shape and the
+ * composer stays open, because the customer's next message is the answer to it,
+ * and the server persists the exchange as dialogue so a refresh keeps it too.
+ * A takeover routes the message to a person instead of the pipeline: the words
+ * are stored on the takeover's thread and the agent is told, and the customer's
+ * turn settles so they see their words like any other exchange - the agent's
+ * reply arrives later over the socket. Only a decided request settles as a
+ * replied turn.
+ */
+function settleReply(
+  orderId: string,
+  localId: string,
+  message: string,
+  reply: Awaited<ReturnType<typeof api.sendMessage>>,
+  live: { settle: (order: string, id: string, turn: Turn) => void },
+): void {
+  if ('question' in reply) {
+    live.settle(orderId, localId, {
+      kind: 'asked',
+      id: reply.dialogueId,
+      text: message,
+      question: reply.question,
+    });
+    return;
+  }
+  if ('received' in reply) {
+    live.settle(orderId, localId, {
+      kind: 'agent',
+      id: reply.message.id,
+      text: message,
+      sender: 'customer',
+      createdAt: reply.message.createdAt,
+      media: reply.message.media ?? null,
+    });
+    return;
+  }
+  const { request, duplicate } = reply;
+  live.settle(orderId, localId, {
+    kind: 'replied',
+    id: request.id,
+    text: message,
+    result: {
+      decision: request.decision.decision,
+      refundAmountCents: request.decision.refundAmountCents,
+      responseText: request.responseText,
+    },
+    duplicate: duplicate ?? null,
+  });
 }
 
 /**
@@ -332,6 +403,19 @@ function toTurn(stored: StoredTurn): Turn {
   }
   if (stored.kind === 'dialogue') {
     return { kind: 'storedAsk', id: stored.id, text: stored.message, question: stored.question };
+  }
+  if (stored.kind === 'agent') {
+    return {
+      kind: 'agent',
+      id: stored.id,
+      text: stored.body,
+      sender: stored.sender,
+      createdAt: stored.createdAt,
+      media: stored.media ?? null,
+    };
+  }
+  if (stored.kind === 'handoff') {
+    return { kind: 'handoff', id: stored.id, text: stored.body };
   }
   return {
     kind: 'stored',

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Bot, Send, ShieldCheck } from 'lucide-react';
+import { Bot, Headset, Send, ShieldCheck } from 'lucide-react';
 import { ErrorNote } from './components';
 import { formatCents } from './format';
 import { useConversation, type Conversation, type ReplyBody, type Turn } from './useConversation';
-import { money, shopApi, type ShopOrder } from './shop/api';
+import { money, shopApi, type ShopOrder, describe } from './shop/api';
 import type { DuplicateNotice } from './api';
 import { reasonFor, REASONS } from './shop/issueReasons';
 import { useAsyncData } from './shop/hooks';
@@ -45,6 +45,7 @@ export function ChatPage(): ReactNode {
   const selected = useSelectedOrder(orderList, handoff?.orderId ?? null);
 
   const chat = useConversation(customerId, selected.orderId, complaintFor(handoff?.issue ?? null));
+  useShopSocket(customerId, chat.refresh);
 
   return (
     <div className="chat-layout">
@@ -74,6 +75,58 @@ export function ChatPage(): ReactNode {
  * the turns change, so a message that arrives does not push the composer's
  * context out of view.
  */
+interface ChatThreadDeps {
+  readonly chat: Conversation;
+  readonly inHandoff: boolean;
+  readonly appealState: { readonly requestId: string; readonly reason: string; readonly submitting: boolean } | null;
+  readonly setAppealState: React.Dispatch<React.SetStateAction<{ readonly requestId: string; readonly reason: string; readonly submitting: boolean } | null>>;
+}
+
+function handleAttachPhoto(deps: ChatThreadDeps): void {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/jpeg,image/png,image/gif,image/webp';
+  input.onchange = () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Image must be at most 5 MB');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result as string;
+      const requestTurn = deps.chat.turns.find((t) => t.kind === 'replied' || t.kind === 'stored');
+      const orderId = requestTurn ? null : undefined;
+      try {
+        await shopApi.chatMedia({ orderId: orderId ?? null, caption: '', media: { dataUrl } });
+        deps.chat.refresh();
+      } catch (cause) {
+        alert(describe(cause));
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+  input.click();
+}
+
+async function handleAppeal(deps: ChatThreadDeps, requestId: string): Promise<void> {
+  const reason = prompt('Why do you think this decision was wrong?');
+  if (!reason || reason.trim().length < 10) {
+    alert('Please provide a reason (at least 10 characters).');
+    return;
+  }
+  deps.setAppealState({ requestId, reason: reason.trim(), submitting: true });
+  try {
+    await shopApi.fileAppeal(requestId, reason.trim());
+    deps.setAppealState(null);
+    deps.chat.refresh();
+  } catch (cause) {
+    alert(describe(cause));
+    deps.setAppealState(null);
+  }
+}
+
 function ChatThread({ chat }: { chat: Conversation }): ReactNode {
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -84,6 +137,12 @@ function ChatThread({ chat }: { chat: Conversation }): ReactNode {
     }
   }, [chat.turns]);
 
+  const inHandoff = chat.turns.some((turn) => turn.kind === 'handoff');
+
+  const [appealState, setAppealState] = useState<{ requestId: string; reason: string; submitting: boolean } | null>(null);
+
+  const deps: ChatThreadDeps = { chat, inHandoff, appealState, setAppealState };
+
   return (
     <section className="chat-main">
       <div className="chat-log" ref={logRef}>
@@ -93,7 +152,7 @@ function ChatThread({ chat }: { chat: Conversation }): ReactNode {
             brief and states itself. */}
         {chat.loading || chat.turns.length > 0 ? null : <Greeting onPick={chat.setDraft} />}
         {chat.turns.map((turn) => (
-          <TurnView key={turn.id} turn={turn} />
+          <TurnView key={turn.id} turn={turn} {...(turn.kind === 'replied' && turn.result.decision === 'denied' ? { onAppeal: (id: string) => handleAppeal(deps, id) } : {})} />
         ))}
       </div>
 
@@ -103,7 +162,10 @@ function ChatThread({ chat }: { chat: Conversation }): ReactNode {
         blocked={chat.blocked}
         onDraft={chat.setDraft}
         onSend={chat.send}
+        inHandoff={inHandoff}
+        onAttachPhoto={() => handleAttachPhoto(deps)}
       />
+      {appealState && <p className="muted small">Sending your appeal…</p>}
       {chat.error.length > 0 ? <ErrorNote error={chat.error} /> : null}
     </section>
   );
@@ -136,6 +198,40 @@ function useSelectedOrder(
     return { orderId: chosen, select: setChosen };
   }
   return { orderId: handoffValid ? handoffOrderId : fallback, select: setChosen };
+}
+
+/**
+ * The live part of the conversation: somebody is *here* now.
+ *
+ * The shop socket only announces that something changed - "an agent is with
+ * you", "an agent wrote back", "the takeover is over". The thread itself is
+ * always re-read over REST, so what the customer sees is exactly what is stored,
+ * which is exactly what the agent sees. The socket is small and one-directional;
+ * the customer's own messages already go over the same REST call the pipeline
+ * used, the server routes them to the agent, and this channel is just how they
+ * learn the reply landed.
+ */
+function useShopSocket(customerId: string | null, onEvent: () => void): void {
+  const handler = useRef(onEvent);
+
+  // Written in an effect, not during render: a ref that is updated while the
+  // component draws can be stale for a render the socket fires between, and it
+  // is what the refs rule is about.
+  useEffect(() => {
+    handler.current = onEvent;
+  }, [onEvent]);
+
+  useEffect(() => {
+    if (customerId === null) {
+      return;
+    }
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${scheme}://${location.host}/api/shop/chat/ws`);
+    socket.onmessage = () => handler.current();
+    // `onclose` needs no special handling: the thread is re-read on every event,
+    // so a dropped socket costs nothing but the notice arriving later.
+    return () => socket.close();
+  }, [customerId]);
 }
 
 /**
@@ -312,12 +408,16 @@ function Composer({
   blocked,
   onDraft,
   onSend,
+  inHandoff,
+  onAttachPhoto,
 }: {
   draft: string;
   busy: boolean;
   blocked: string | null;
   onDraft: (next: string) => void;
   onSend: () => Promise<void>;
+  inHandoff: boolean;
+  onAttachPhoto: () => void;
 }): ReactNode {
   return (
     <form
@@ -334,6 +434,21 @@ function Composer({
         placeholder="Describe what went wrong…"
         onChange={(event) => onDraft(event.target.value)}
       />
+      {inHandoff && (
+        <button
+          type="button"
+          disabled={busy}
+          aria-label="Attach a photo"
+          onClick={onAttachPhoto}
+          className="composer-photo"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <polyline points="21 15 16 10 5 21" />
+          </svg>
+        </button>
+      )}
       <button type="submit" disabled={busy || blocked !== null} aria-label="Send">
         <Send size={16} />
         <span className="sr-only">Send</span>
@@ -343,44 +458,138 @@ function Composer({
   );
 }
 
-function TurnView({ turn }: { turn: Turn }): ReactNode {
+function TurnView({ turn, onAppeal }: { turn: Turn; onAppeal?: (requestId: string) => void | Promise<void> }): ReactNode {
   if (turn.kind === 'pending') {
-    return <p className="bubble-pending">Checking the policy…</p>;
+    return <PendingBubble text={turn.text} />;
+  }
+  if (turn.kind === 'handoff') {
+    return <AgentNotice text={turn.text} />;
+  }
+  if (turn.kind === 'agent') {
+    return <AgentBubble turn={turn} />;
   }
   if (turn.kind === 'update') {
     return <FollowUpNotice text={turn.text} />;
   }
   if (turn.kind === 'stored') {
-    // No duplicate notice: a suppressed repeat was never stored, so the history
-    // is the original message and nothing needs explaining.
+    return <StoredDecisionBubble turn={turn} {...(onAppeal !== undefined ? { onAppeal } : {})} />;
+  }
+  if (turn.kind === 'storedAsk' || turn.kind === 'asked') {
+    return <QuestionBubble turn={turn} />;
+  }
+  return <LiveDecisionBubble turn={turn} {...(onAppeal !== undefined ? { onAppeal } : {})} />;
+}
+
+function PendingBubble({ text }: { text: string }): ReactNode {
+  return (
+    <>
+      <p className="bubble-me">{text}</p>
+      <TypingBubble />
+    </>
+  );
+}
+
+function AgentBubble({ turn }: { turn: Turn & { kind: 'agent' } }): ReactNode {
+  if (turn.sender === 'customer') {
     return (
       <>
         <p className="bubble-me">{turn.text}</p>
-        <Reply result={turn.result} duplicate={null} />
+        {turn.media && <img src={turn.media.url} alt="Photo from customer" className="chat-media" />}
       </>
     );
   }
-  if (turn.kind === 'storedAsk') {
-    return (
-      <>
-        <p className="bubble-me">{turn.text}</p>
-        <Question reply={turn.question} />
-      </>
-    );
-  }
-  if (turn.kind === 'asked') {
-    return (
-      <>
-        <p className="bubble-me">{turn.text}</p>
-        <Question reply={turn.question} />
-      </>
-    );
-  }
+  return <AgentReply text={turn.text} media={turn.media ?? null} />;
+}
+
+function QuestionBubble({ turn }: { turn: Turn & { kind: 'storedAsk' | 'asked' } }): ReactNode {
   return (
     <>
       <p className="bubble-me">{turn.text}</p>
-      <Reply result={turn.result} duplicate={turn.duplicate} />
+      <Question reply={turn.question} />
     </>
+  );
+}
+
+function StoredDecisionBubble({
+  turn,
+  onAppeal,
+}: { turn: Turn & { kind: 'stored' }; onAppeal?: (requestId: string) => void | Promise<void> }): ReactNode {
+  return (
+    <>
+      <p className="bubble-me">{turn.text}</p>
+      <Reply result={turn.result} duplicate={null} requestId={turn.id} {...(onAppeal !== undefined ? { onAppeal } : {})} />
+    </>
+  );
+}
+
+function LiveDecisionBubble({
+  turn,
+  onAppeal,
+}: { turn: Turn & { kind: 'replied' }; onAppeal?: (requestId: string) => void | Promise<void> }): ReactNode {
+  return (
+    <>
+      <p className="bubble-me">{turn.text}</p>
+      <Reply result={turn.result} duplicate={turn.duplicate} requestId={turn.id} {...(onAppeal !== undefined ? { onAppeal } : {})} />
+    </>
+  );
+}
+
+/**
+ * The assistant at work: the customer's own bubble, then a thinking bubble in
+ * the assistant's place style. Replaces the old plain "Checking the policy…"
+ * label, which read as a system message rather than as the assistant replying.
+ */
+function TypingBubble(): ReactNode {
+  return (
+    <div className="bubble-them bubble-typing" role="status" aria-live="polite">
+      <Bot size={16} />
+      <span className="typing-dots" aria-hidden="true">
+        <span className="typing-dot" />
+        <span className="typing-dot" />
+        <span className="typing-dot" />
+      </span>
+      <span className="sr-only">Checking the refund policy</span>
+    </div>
+  );
+}
+
+/**
+ * The moment a person took over the thread.
+ *
+ * The notice is derived from the takeover row, not stored as a message, and it
+ * is the one thing in the thread that says *who* is answering now. Without it, a
+ * person's first reply would read exactly like an assistant reply - and the
+ * customer would be right to wonder which script said that.
+ */
+function AgentNotice({ text }: { text: string }): ReactNode {
+  return (
+    <div className="bubble-them">
+      <div className="row">
+        <Headset size={16} />
+        <span className="pill pill-escalated">A customer agent is with you</span>
+      </div>
+      <p>{text}</p>
+    </div>
+  );
+}
+
+/**
+ * A customer agent's reply, marked as a person's.
+ *
+ * Deliberately not a `Reply`: there is no decision, no amount, and no status
+ * pill, because this is a conversation, not an outcome - the customer is talking
+ * to a person who is deciding with them, not after them.
+ */
+function AgentReply({ text, media }: { text: string; media: { type: string; url: string; bytes: number } | null }): ReactNode {
+  return (
+    <div className="bubble-them bubble-agent">
+      <p>{text}</p>
+      {media && <img src={media.url} alt="Photo from agent" className="chat-media" />}
+      <footer className="row small muted">
+        <Headset size={14} />
+        Customer agent
+      </footer>
+    </div>
   );
 }
 
@@ -413,7 +622,7 @@ function Question({ reply }: { reply: string }): ReactNode {
  * replies and the customer concludes the second one was ignored - which is
  * closer to the truth than it should be, and sends them off to try a third time.
  */
-function Reply({ result, duplicate }: { result: ReplyBody; duplicate: DuplicateNotice | null }): ReactNode {
+function Reply({ result, duplicate, onAppeal, requestId }: { result: ReplyBody; duplicate: DuplicateNotice | null; onAppeal?: (requestId: string) => void | Promise<void>; requestId?: string }): ReactNode {
   return (
     <div className="bubble-them">
       <div className="row">
@@ -432,6 +641,18 @@ function Reply({ result, duplicate }: { result: ReplyBody; duplicate: DuplicateN
         {result.decision === 'escalated' ? (
           <span className="muted">Someone confirms this by hand before anything is paid.</span>
         ) : null}
+        {result.decision === 'denied' && onAppeal !== undefined && requestId !== undefined && (
+          <button
+            type="button"
+            className="button-secondary small"
+            onClick={() => {
+              void onAppeal(requestId);
+            }}
+            aria-label="Appeal this decision"
+          >
+            Appeal this decision
+          </button>
+        )}
       </footer>
     </div>
   );

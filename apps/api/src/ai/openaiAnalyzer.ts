@@ -12,6 +12,9 @@ import {
   type AnalyzerInput,
   type AnalyzerOrder,
   type AttemptObserver,
+  type ChatInput,
+  type ChatReply,
+  type ChatTool,
 } from './analyzer.js';
 import type { OrderRecord } from '../db/records.js';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -311,6 +314,111 @@ export class OpenAiAnalyzer implements AIAnalyzer {
       });
       return { ok: false, ...failure };
     }
+  }
+  }
+
+  async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+
+    const systemPrompt = `You are a helpful customer support assistant for a refund service. A human agent has taken over this conversation and is reviewing the case. Your role is to be helpful, conversational, and empathetic while the human agent reviews the case.
+
+IMPORTANT: You have NO authority to make monetary decisions, approve refunds, deny claims, or make any financial commitments. Your role is purely conversational - be helpful, empathetic, and keep the customer informed.
+
+You have ONE tool available:
+- remind_admin: Use this when the customer is pushing for a response, seems frustrated, has been waiting a long time, or explicitly asks for the human agent. This notifies the human agent that the customer is waiting.
+
+Guidelines:
+- Be warm, empathetic, and conversational - like a helpful colleague keeping the customer company
+- Acknowledge their frustration if they express it
+- Reassure them that a human agent is reviewing their case
+- Never make promises about refunds, approvals, denials, or timelines
+- If they ask about money/refunds, say you don't have that authority and the human agent is reviewing
+- If they seem frustrated or have been waiting, use the remind_admin tool
+- Keep responses concise but warm and human`;
+
+    const historyText = input.history
+      .map((line) => `${line.role}: ${line.text}`)
+      .join('\n');
+
+    const userContent = `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${input.tools.map((t) => t.name).join(', ')}`;
+
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+
+    for (const model of this.candidates) {
+      for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
+        if (budget.aborted) {
+          throw new AiUnavailableError(`chat time budget exhausted`);
+        }
+
+        try {
+          const completion = await this.client.chat.completions.create(
+            {
+              model,
+              temperature: 0.7,
+              max_tokens: this.env.AI_MAX_TOKENS,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userContent },
+              ],
+              tools: input.tools.length > 0 ? [
+                {
+                  type: 'function',
+                  function: {
+                    name: 'remind_admin',
+                    description: 'Notify the human agent that the customer is waiting or pushing for a response.',
+                    parameters: { type: 'object', properties: {}, additionalProperties: false },
+                  },
+                },
+              ] : undefined,
+              tool_choice: input.tools.length > 0 ? 'auto' : undefined,
+            },
+            { signal: budget },
+          );
+
+          const text = firstMessage(completion);
+          if (text.trim().length === 0) {
+            continue;
+          }
+
+          const toolCalls = completion.choices[0]?.message.tool_calls;
+          if (toolCalls && toolCalls.length > 0) {
+            const toolCall = toolCalls[0];
+            if (toolCall.function.name === 'remind_admin') {
+              observer({
+                model,
+                attempt,
+                ok: true,
+                latencyMs: 0,
+                promptTokens: null,
+                completionTokens: null,
+                error: null,
+              });
+              return { kind: 'tool_call', tool: 'remind_admin', model };
+            }
+          }
+
+          if (text.trim().length > 0) {
+            observer({
+              model,
+              attempt,
+              ok: true,
+              latencyMs: 0,
+              promptTokens: null,
+              completionTokens: null,
+              error: null,
+            });
+            return { kind: 'text', text, model };
+          }
+        } catch (error) {
+          const failure = classifyProviderFailure(error);
+          if (!failure.retryable || attempt >= this.env.AI_MAX_ATTEMPTS) {
+            continue;
+          }
+        }
+      }
+    }
+
+    throw new AiUnavailableError(`all ${this.candidates.length} model(s) failed for chat`);
   }
 }
 

@@ -8,6 +8,7 @@ import { RefundsPage } from './RefundsPage';
 import { RequestDetailPage } from './RequestDetailPage';
 import { RequestsPage } from './RequestsPage';
 import { ScenariosPage } from './ScenariosPage';
+import { LiveConversationsPage } from './LiveConversationsPage';
 import { StaffGate } from './StaffGate';
 import { useAsyncData, useSession, Spinner } from './shop/hooks';
 import { addToCart, cartLines, refillCart, clearCart, type CartLine } from './shop/cartStore';
@@ -55,6 +56,7 @@ export function App(): ReactNode {
         }
       >
         <Route index element={<DashboardPage />} />
+        <Route path="live" element={<LiveConversationsPage />} />
         <Route path="refunds" element={<RefundsPage />} />
         <Route path="requests" element={<RequestsPage />} />
         <Route path="requests/:id" element={<RequestDetailPage />} />

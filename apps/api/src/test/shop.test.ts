@@ -439,22 +439,23 @@ describe('storefront', () => {
         },
       });
 
+      if (response.statusCode !== 201) {
+        console.error('Test failed:', response.statusCode, response.body);
+      }
       expect(response.statusCode).toBe(201);
       const { request } = response.json<{ request: { customerId: string } }>();
       expect(request.customerId).toBe(customerId);
     });
 
-    it('falls back to the body customer when there is no session', async () => {
-      // This is the honest limitation: without a session the value is trusted.
+    it('rejects requests without a session', async () => {
+      // The chat endpoint now requires a valid shopper session.
       const fixture = scenario('S-01');
       const response = await call('POST', '/api/chat/messages', {
         payload: { customerId: fixture.customer.key, orderId: fixture.orderId, message: fixture.message },
       });
 
-      expect(response.statusCode).toBe(201);
-      expect(response.json<{ request: { customerId: string } }>().request.customerId).toBe(
-        fixture.customer.key,
-      );
+      expect(response.statusCode).toBe(401);
+      expect(response.json<ErrorBody>().error).toBe('unauthorized');
     });
   });
 

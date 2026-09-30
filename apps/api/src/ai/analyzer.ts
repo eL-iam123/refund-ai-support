@@ -80,6 +80,44 @@ export type AgentReply =
       readonly model: string;
     };
 
+/**
+ * Input for chat mode (escalated conversations).
+ *
+ * The AI acts as a helpful conversational assistant with no monetary authority.
+ * It can respond naturally and has one tool: remind_admin.
+ */
+export interface ChatInput {
+  readonly message: string;
+  readonly order: AnalyzerOrder | null;
+  readonly history: readonly DialogueLine[];
+  readonly tools: readonly ChatTool[];
+}
+
+/**
+ * Tool available in chat mode.
+ */
+export interface ChatTool {
+  readonly name: 'remind_admin';
+  readonly description: 'Notify the human agent that the customer is waiting or pushing for a response.';
+}
+
+/**
+ * Reply in chat mode.
+ *
+ * Two options: a conversational text response, or a tool call to remind the admin.
+ */
+export type ChatReply =
+  | {
+      readonly kind: 'text';
+      readonly text: string;
+      readonly model: string;
+    }
+  | {
+      readonly kind: 'tool_call';
+      readonly tool: 'remind_admin';
+      readonly model: string;
+    };
+
 export interface ProviderAttempt {
   readonly model: string;
   readonly attempt: number;
@@ -127,6 +165,15 @@ export interface AIAnalyzer {
    * escalate - the decision is computed from order facts either way.
    */
   analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply>;
+  /**
+   * Chat mode for escalated conversations.
+   *
+   * Used when a human agent has taken over but the customer is still chatting.
+   * The AI acts as a helpful conversational assistant with no monetary authority.
+   * It can respond naturally and has one tool: remind_admin (notifies the human
+   * agent that the customer is waiting/pushing).
+   */
+  chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply>;
 }
 
 /** Every configured model failed, or none of them answered with valid JSON. */

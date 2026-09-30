@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { LightMyRequestResponse } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { authHeader, scenario, testEnv, TEST_NOW, type AppHarness } from './helpers.js';
+import { shopHarness, signIn, type SignedIn } from './shop-helpers.js';
 import { readEnv } from '../config/env.js';
 import { appHarness } from './helpers.js';
 import { mintToken, verifyToken, AuthError } from '../auth/tokens.js';
@@ -49,9 +50,12 @@ const STAFF_ROUTES: readonly { method: 'GET' | 'POST'; url: string; role: 'agent
 
 describe('staff authorization', () => {
   let harness: AppHarness;
+  let shopper: { cookie: string; customerId: string; orderId: string };
 
   beforeEach(async () => {
-    harness = await appHarness();
+    harness = await shopHarness();
+    const signedIn = await signIn(harness, 'dana@shop.demo');
+    shopper = { cookie: signedIn.cookie, customerId: signedIn.customerId, orderId: signedIn.orderId };
   });
 
   afterEach(async () => {
@@ -74,11 +78,15 @@ describe('staff authorization', () => {
 
   async function makeRequest(): Promise<string> {
     const fixture = scenario('S-01');
-    const response = await call('POST', '/api/chat/messages', {}, {
-      customerId: fixture.customer.key,
-      orderId: fixture.orderId,
-      message: fixture.message,
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: shopper.cookie },
+      payload: { customerId: shopper.customerId, orderId: shopper.orderId, message: fixture.message },
     });
+    if (response.statusCode !== 201) {
+      console.error('makeRequest failed:', response.statusCode, response.body, 'shopper:', shopper);
+    }
     expect(response.statusCode).toBe(201);
     return response.json<{ request: { id: string } }>().request.id;
   }
@@ -196,12 +204,13 @@ describe('staff authorization', () => {
       expect(response.statusCode).toBe(200);
     });
 
-    it('leaves the customer chat endpoint open', async () => {
+    it('allows the customer chat endpoint with a valid session', async () => {
       const fixture = scenario('S-01');
-      const response = await call('POST', '/api/chat/messages', {}, {
-        customerId: fixture.customer.key,
-        orderId: fixture.orderId,
-        message: fixture.message,
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/chat/messages',
+        headers: { cookie: shopper.cookie },
+        payload: { customerId: shopper.customerId, orderId: shopper.orderId, message: fixture.message },
       });
 
       expect(response.statusCode).toBe(201);
@@ -226,10 +235,11 @@ describe('staff authorization', () => {
   describe('request cost controls', () => {
     it('rejects an oversized message before it reaches the model', async () => {
       const fixture = scenario('S-01');
-      const response = await call('POST', '/api/chat/messages', {}, {
-        customerId: fixture.customer.key,
-        orderId: fixture.orderId,
-        message: 'x'.repeat(5000),
+      const response = await harness.app.inject({
+        method: 'POST',
+        url: '/api/chat/messages',
+        headers: { cookie: shopper.cookie },
+        payload: { customerId: shopper.customerId, orderId: shopper.orderId, message: 'x'.repeat(5000) },
       });
 
       expect(response.statusCode).toBe(400);

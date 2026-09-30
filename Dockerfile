@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # One image for the whole product: API, staff console, and storefront.
 #
 # The storefront is served from this process on purpose. Its session cookie has

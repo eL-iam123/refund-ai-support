@@ -1,5 +1,6 @@
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { appHarness, TEST_NOW, type AppHarness } from './helpers.js';
+import type { Behaviour } from './fakeAnalyzer.js';
 import { seedShop } from '../shop/seed.js';
 
 /**
@@ -28,8 +29,8 @@ export function cookiesOf(session: SignedIn): string {
 }
 
 /** A harness with the shop's products and demo accounts seeded. */
-export async function shopHarness(): Promise<AppHarness> {
-  const harness = await appHarness();
+export async function shopHarness(behaviour: Behaviour = { kind: 'heuristic' }): Promise<AppHarness> {
+  const harness = await appHarness(behaviour);
   seedShop(harness.db, TEST_NOW);
   return harness;
 }

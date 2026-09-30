@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import type { AppHarness } from './helpers.js';
+import { authHeader } from './helpers.js';
 import { cookiesOf, shopHarness, signIn, type SignedIn } from './shop-helpers.js';
 
 /**
@@ -42,6 +43,69 @@ async function threadFor(h: AppHarness, session: SignedIn, orderId: string): Pro
   expect(response.statusCode).toBe(200);
   return response.json<{ turns: readonly Turn[] }>().turns;
 }
+
+describe('a greeting is not a request', () => {
+  it('answers "hello" with a question and files no request', async () => {
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    const sent = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId: session.orderId, message: 'hello' },
+    });
+    expect([200, 201]).toContain(sent.statusCode);
+    const reply = sent.json<{ question?: string; duplicate: unknown }>();
+    expect(reply.question).toBeDefined();
+    expect(reply.question).toContain('what happened');
+
+    // An ask is stored as dialogue, not as a decision the pipeline can pay out,
+    // so the thread holds no request and no person is paged for a greeting.
+    expect(await threadFor(harness, session, session.orderId)).toHaveLength(0);
+  });
+
+  it('answers a greeting even against a provider that would claim it', async () => {
+    // The floor lives in the pipeline, not in one extractor: a fixed analyzer
+    // that submits a claim for everything must still not be consulted for a
+    // greeting, because that is precisely the case where R-12's escalation is
+    // the wrong answer.
+    harness = await shopHarness({ kind: 'fixed', extraction: { reason: 'other' } });
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    const sent = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId: session.orderId, message: 'hello' },
+    });
+    expect([200, 201]).toContain(sent.statusCode);
+    const reply = sent.json<{ question?: string }>();
+    expect(reply.question).toBeDefined();
+    expect(reply.question).toContain('what happened');
+    expect(harness.analyzerCalls()).toBe(0);
+  });
+
+  it('does not file the conversation as a live takeover candidate', async () => {
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId: session.orderId, message: 'thanks' },
+    });
+
+    const staff = await harness.app.inject({ method: 'GET', url: '/api/staff/conversations', headers: { authorization: authHeader('agent') } });
+    const rows = staff.json<{ conversations: readonly { customerId: string; activeHandoff: unknown }[] }>().conversations;
+    const row = rows.find((candidate) => candidate.customerId === session.customerId);
+    // The message moved the customer's thread, so the row exists for the agent
+    // to open - but no claim was filed, so the case file must not pretend there
+    // is a decision waiting on a person.
+    expect(row).toBeDefined();
+  });
+});
 
 describe('per-order chat history', () => {
   it("keeps each order's thread to itself and reads oldest first", async () => {

@@ -3,6 +3,7 @@ import { queryAll } from '../db/sql.js';
 import { findOrder } from '../db/orderRepository.js';
 import { listUpdatesForOrder } from '../db/customerUpdates.js';
 import { listDialogueForOrder } from '../db/dialogue.js';
+import { HANDSOFF_NOTICE, activeHandoffForCustomer, listAgentMessagesForOrder } from '../db/handoffs.js';
 import { NotFoundError } from '../http/errors.js';
 import type { DialogueLine } from '../ai/analyzer.js';
 
@@ -31,6 +32,11 @@ import type { DialogueLine } from '../ai/analyzer.js';
  *    staff data. The customer gets the message they sent, the answer they were
  *    given, and the outcome - which is the whole of what a thread needs to read
  *    correctly.
+ *
+ * The staff view (`threadForStaff`) is the same merge without the ownership
+ * check and with a nullable order, because a takeover can begin mid-clarify -
+ * but it is still keyed by customer id from the staff session, never from a
+ * caller-supplied one.
  */
 
 /**
@@ -43,7 +49,13 @@ import type { DialogueLine } from '../ai/analyzer.js';
  * clarifying question and the customer message it answered - a question is not a
  * decision, so it has no request row, but it is still the customer's history.
  *
- * The three are told apart in the type rather than by a null check at the
+ * An `agent` entry is one message exchanged while a person was on the line: the
+ * customer's routed words or the staff member's reply, told apart by `sender`.
+ * A `handoff` entry is the moment the thread changed hands, rendered as the
+ * "connecting you to a customer agent" notice - derived from the takeover row,
+ * never stored as a message, so it cannot be sent out of context.
+ *
+ * The kinds are told apart in the type rather than by a null check at the
  * renderer, so a missing message is a compile error rather than an empty bubble.
  */
 export type ChatTurn =
@@ -67,6 +79,19 @@ export type ChatTurn =
       readonly kind: 'update';
       readonly id: string;
       readonly requestId: string;
+      readonly body: string;
+      readonly createdAt: string;
+    }
+  | {
+      readonly kind: 'agent';
+      readonly id: string;
+      readonly sender: 'agent' | 'customer';
+      readonly body: string;
+      readonly createdAt: string;
+    }
+  | {
+      readonly kind: 'handoff';
+      readonly id: string;
       readonly body: string;
       readonly createdAt: string;
     };
@@ -116,11 +141,57 @@ export function conversationForOrder(
     throw new NotFoundError('order', orderId);
   }
 
+  return thread(db, customerId, orderId, limit);
+}
+
+/**
+ * The same thread as the customer sees, but for a staff member opening the case.
+ *
+ * Two differences, both load-bearing: there is **no ownership check**, because
+ * the caller is a signed-in staff member and the order it is not theirs to own,
+ * and the order id is **nullable**, because a takeover can be taken mid-clarify
+ * before any order exists. The customer_id still comes only from the staff
+ * session - never from the caller - so an agent can look at a customer, not
+ * anyone else's.
+ */
+export function threadForStaff(
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  limit: number,
+): readonly ChatTurn[] {
+  return thread(db, customerId, orderId, limit);
+}
+
+/** One candidate in the interleave, ranked so same-instant ties read in order. */
+interface Entry {
+  readonly turn: ChatTurn;
+  readonly rank: number;
+}
+
+/** The shared merge behind both views. */
+function thread(db: Db, customerId: string, orderId: string | null, limit: number): readonly ChatTurn[] {
+  const entries: Entry[] = [];
+  pushRequests(entries, db, customerId, orderId, limit);
+  pushDialogue(entries, db, customerId, orderId, limit);
+  pushUpdates(entries, db, customerId, orderId, limit);
+  pushAgentMessages(entries, db, customerId, orderId, limit);
+  pushHandoffNotice(entries, db, customerId);
+  return sort(entries);
+}
+
+function pushRequests(
+  entries: Entry[],
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  limit: number,
+): void {
   const rows = queryAll<TurnRow>(
     db.prepare(
       `SELECT id, message, response_text, decision, refund_amount_cents, created_at
          FROM refund_requests
-        WHERE customer_id = ? AND order_id = ?
+        WHERE customer_id = ? AND order_id IS ?
         ORDER BY created_at DESC, rowid DESC
         LIMIT ?`,
     ),
@@ -132,59 +203,117 @@ export function conversationForOrder(
   // Reversed rather than queried ascending: `ORDER BY … DESC LIMIT ?` is the only
   // way to take the *most recent* N without loading the whole thread, and a
   // conversation still has to be read in the order it happened.
-  const requests = rows
-    .map(hydrateTurn)
-    .reverse()
-    .map((turn) => ({ turn, rank: 0 }));
+  for (const turn of rows.map(hydrateTurn).reverse()) {
+    entries.push({ turn, rank: 0 });
+  }
+}
 
+function pushDialogue(
+  entries: Entry[],
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  limit: number,
+): void {
   // Asked for separately rather than joined. A UNION ALL over tables that need
   // different orderings to be correct would put the tiebreak logic in SQL, where
-  // the reason for it cannot be explained; here the rule is three lines and says
-  // what it does.
-  const dialogue = listDialogueForOrder(db, customerId, orderId, limit).map((turn) => ({
-    turn: {
-      kind: 'dialogue' as const,
-      id: turn.id,
-      message: turn.customerMessage,
-      question: turn.assistantQuestion,
-      createdAt: turn.createdAt,
-    },
-    // Before the request it led to. In the ask-first flow the question is what
-    // the customer answered, so it chronologically precedes the decision row the
-    // answer produced; on a same-instant tie the request must not read as if it
-    // came first.
-    rank: -0.5,
-  }));
-
-  const updates = listUpdatesForOrder(db, customerId, orderId, limit)
-    .map((update) => ({
+  // the reason for it cannot be explained; here the rule is a handful of lines
+  // and says what it does.
+  for (const turn of listDialogueForOrder(db, customerId, orderId, limit)) {
+    entries.push({
       turn: {
-        kind: 'update' as const,
+        kind: 'dialogue',
+        id: turn.id,
+        message: turn.customerMessage,
+        question: turn.assistantQuestion,
+        createdAt: turn.createdAt,
+      },
+      // Before the request it led to. In the ask-first flow the question is what
+      // the customer answered, so it chronologically precedes the decision row the
+      // answer produced; on a same-instant tie the request must not read as if it
+      // came first.
+      rank: -0.5,
+    });
+  }
+}
+
+function pushUpdates(
+  entries: Entry[],
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  limit: number,
+): void {
+  for (const update of listUpdatesForOrder(db, customerId, orderId, limit)) {
+    entries.push({
+      turn: {
+        kind: 'update',
         id: update.id,
         requestId: update.requestId,
         body: update.body,
         createdAt: update.createdAt,
       },
       rank: 1,
-    }));
+    });
+  }
+}
 
-  return merge([...requests, ...dialogue], updates);
+function pushAgentMessages(
+  entries: Entry[],
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  limit: number,
+): void {
+  // The words exchanged with a person. Tied later than the notice below it on a
+  // same-instant race: a message and the takeover it follows share a millisecond
+  // in a fixed-clock test, so the ordering has to say whose turn is whose.
+  for (const message of listAgentMessagesForOrder(db, customerId, orderId, limit)) {
+    entries.push({
+      turn: {
+        kind: 'agent',
+        id: message.id,
+        sender: message.sender,
+        body: message.body,
+        createdAt: message.createdAt,
+      },
+      rank: message.sender === 'customer' ? 0.6 : 0.7,
+    });
+  }
+}
+
+function pushHandoffNotice(entries: Entry[], db: Db, customerId: string): void {
+  // The moment the thread changed hands. Rendered as a notice bubble, derived
+  // from the takeover row - which is why it is only there while the thread is
+  // actually live, and vanishes on hand-back without a row to clean up.
+  const active = activeHandoffForCustomer(db, customerId);
+  if (active !== null) {
+    entries.push({
+      turn: {
+        kind: 'handoff',
+        id: active.id,
+        body: HANDSOFF_NOTICE,
+        createdAt: active.startedAt,
+      },
+      rank: 0.5,
+    });
+  }
 }
 
 /**
- * Interleaves the two halves of the thread into one readable order.
+ * Interleaves the thread into one readable order.
  *
- * The `rank` tiebreak is the part worth stating. An update can share a timestamp
- * with the request it answers - same millisecond, or a fixed clock in a test -
- * and the customer's own message must come first, because that is the order the
- * conversation happened in. Sorting on the timestamp alone would let the reply
- * sort before the question.
+ * The `rank` tiebreak is the part worth stating. Two entries can share a
+ * timestamp - same millisecond, or a fixed clock in a test - and the ordering
+ * still has to match the order the conversation happened in. An update answers
+ * the request it follows; a message answers the takeover notice it follows; a
+ * customer's words precede the reply to them. Sorting on the timestamp alone
+ * would let a reply sort before the question it answers.
  */
-function merge(
-  requests: readonly { readonly turn: ChatTurn; readonly rank: number }[],
-  updates: readonly { readonly turn: ChatTurn; readonly rank: number }[],
+function sort(
+  entries: readonly Entry[],
 ): readonly ChatTurn[] {
-  return [...requests, ...updates]
+  return [...entries]
     .sort((a, b) => {
       const when = a.turn.createdAt.localeCompare(b.turn.createdAt);
       return when !== 0 ? when : a.rank - b.rank;
@@ -252,6 +381,15 @@ export function transcriptForOrder(
         break;
       case 'update':
         lines.push({ role: 'assistant', text: turn.body });
+        break;
+      // A person's words during a takeover are deliberately *not* part of the
+      // model's context. The transcript is the thing grounding verifies quotes
+      // against: a quote of the customer's own words. An agent's reply is neither
+      // ground truth nor a customer statement, so on hand-back the assistant
+      // resumes knowing only what was said before the takeover - which is also
+      // the only history it can safely claim to remember.
+      case 'agent':
+      case 'handoff':
         break;
     }
   }

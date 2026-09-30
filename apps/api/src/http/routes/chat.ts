@@ -1,17 +1,12 @@
-import { createHash, randomUUID } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
-import {
-  CreateRefundRequestSchema,
-  type ClaimExtraction,
-  type CreateRefundRequest,
-  type GroundingResult,
-  type RefundDecision,
-  type RefundRequestDto,
-} from '@refund/shared';
+import { randomUUID } from 'node:crypto';
+import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { CreateRefundRequestSchema, type CreateRefundRequest, type RefundRequestDto } from '@refund/shared';
 import type { AppContext } from '../context.js';
 import { processRefundRequest, type ProcessResult } from '../../orchestrator.js';
-import { findRequestById, messageFingerprint, type NewRequestRow } from '../../db/requestRepository.js';
+import { findRequestById } from '../../db/requestRepository.js';
+import type { PersistedRequest } from '../../db/records.js';
 import { persistDecision } from '../../db/persistDecision.js';
+import { rowFromDecision } from '../../db/requestRow.js';
 import { recordDialogueTurn } from '../../db/dialogue.js';
 import {
   duplicateResponseText,
@@ -22,6 +17,8 @@ import {
 import { toRequestDto } from '../serialize.js';
 import { HttpError, badRequest } from '../errors.js';
 import { resolveShopSession, SESSION_COOKIE } from '../../shop/auth.js';
+import { activeHandoffForCustomer, recordAgentMessage, type AgentMessage } from '../../db/handoffs.js';
+import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
 
 /**
@@ -31,107 +28,119 @@ import type { Db } from '../../db/connection.js';
  * `refund_requests` row. That is what makes "every persisted decision came
  * out of the resolver" a property of the code rather than a convention.
  */
-export function registerChatRoutes(app: FastifyInstance, ctx: AppContext): void {
-  app.post('/api/chat/messages', async (request, reply) => {
-    const body = CreateRefundRequestSchema.safeParse(request.body);
-    if (!body.success) {
-      throw badRequest(
-        'invalid request body',
-        body.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
-      );
-    }
-    // Enforced here rather than in the shared schema because the ceiling is
-    // operational, not contractual: it is a token-cost control, and the limit
-    // belongs to the deployment rather than to the wire format.
-    if (body.data.message.length > ctx.env.MAX_MESSAGE_LENGTH) {
-      throw badRequest(
-        'message is too long',
-        [`message: must be at most ${ctx.env.MAX_MESSAGE_LENGTH} characters`],
-      );
-    }
 
-    // A signed-in shopper cannot choose who they are. Without a session the
-    // body value stands, which is why the storefront surfaces this limitation
-    // rather than pretending the login closed it: the public chat endpoint is
-    // still an unauthenticated surface that trusts `customerId`.
-    const cookies = request.cookies as Record<string, string | undefined>;
-    const session = resolveShopSession(ctx.db, cookies[SESSION_COOKIE], ctx.now());
-    const claimedCustomer = session?.customerId ?? body.data.customerId;
+type ChatMessageBody = CreateRefundRequest;
 
-    // The session-resolved customer is what gets persisted, not the body value.
-    // Building the row from `body.data` here would store the claimed customer
-    // while deciding on the real one, which is the worst of both.
-    const resolved: CreateRefundRequest = { ...body.data, customerId: claimedCustomer };
-    const now = ctx.now();
+async function handleChatMessage(
+  request: FastifyRequest<{ Body: ChatMessageBody }>,
+  reply: FastifyReply,
+  ctx: AppContext,
+  hub: LiveHub,
+): Promise<{ received: boolean; agentConnected: boolean; message: AgentMessage } | { question: string; dialogueId: string } | { request: RefundRequestDto }> {
+  const body = CreateRefundRequestSchema.safeParse(request.body);
+  if (!body.success) {
+    throw badRequest(
+      'invalid request body',
+      body.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  if (body.data.message.length > ctx.env.MAX_MESSAGE_LENGTH) {
+    throw badRequest(
+      'message is too long',
+      [`message: must be at most ${ctx.env.MAX_MESSAGE_LENGTH} characters`],
+    );
+  }
 
-    /**
-     * The duplicate gate, before the model and before the resolver.
-     *
-     * Placed here rather than inside the pipeline because the pipeline's output
-     * is a decision, and anything the pipeline returns is persisted as one. A
-     * duplicate that reached it would be a second decision on the second
-     * request row, and an approved decision reserves money - so "recognise the
-     * duplicate" has to happen somewhere that can decline to produce a row at
-     * all. The customer gets their existing request back instead.
-     */
-    const duplicate = findDuplicateReport(ctx.db, resolved.customerId, resolved.message, now, ctx.env.DUPLICATE_WINDOW_HOURS);
-    if (duplicate !== null) {
-      return reply.code(200).send(suppressedDuplicate(ctx.db, duplicate, now));
-    }
+  const cookies = request.cookies as Record<string, string | undefined>;
+  const session = resolveShopSession(ctx.db, cookies[SESSION_COOKIE], ctx.now());
+  if (session === null) {
+    throw new HttpError(401, 'unauthorized', 'sign in to start a refund request');
+  }
+  const resolved: CreateRefundRequest = { ...body.data, customerId: session.customerId };
+  const now = ctx.now();
 
-    const input = toProcessInput(resolved, now);
-    const result = await processRefundRequest(ctx.db, ctx.pipeline, input);
-
-    // The messenger half: the assistant asked a clarifying question. Nothing was
-    // decided, so nothing becomes a request row - the exchange is stored as
-    // dialogue instead, and the question is the whole reply. The customer reads
-    // exactly what the model asked, and the answer they send back becomes the
-    // model's context for the next turn.
-    if (result.stage === 'asked') {
-      // The ask is anchor-neutral on purpose. A question is not a decision: the
-      // customer might answer with a different order than the one the pipeline
-      // had provisionally matched, and anchoring the question to that guess
-      // would make the answer's context miss it (the next turn builds its
-      // transcript from the order the answer resolves to). So the turn is stored
-      // with no order, and `adoptDialogueToOrder` pins it to the order the
-      // customer's answer eventually resolves to.
-      const turn = recordDialogueTurn(ctx.db, {
-        customerId: input.customerId,
-        orderId: null,
-        customerMessage: input.message,
-        assistantQuestion: result.question,
-        now: ctx.now(),
-      });
-      ctx.log.info({ requestId: input.requestId, question: result.question }, 'chat.asked');
-      return reply.code(200).send({ question: result.question, dialogueId: turn.id });
-    }
-
-    const row = buildRow(input.requestId, resolved, result, ctx.now());
-
-    // The reservation lives inside persistDecision rather than here. An approval
-    // that reserved nothing is an approval nothing will ever pay, and R-06b would
-    // not know to hold the balance - so the two cannot be separated by a caller
-    // that forgets one of them.
-    persistDecision(ctx.db, row, {
-      orderId: input.orderId,
-      customerId: input.customerId,
+  const active = activeHandoffForCustomer(ctx.db, session.customerId);
+  if (active !== null) {
+    const message = recordAgentMessage(ctx.db, {
+      handoffId: active.id,
+      sender: 'customer',
+      body: body.data.message,
       now: ctx.now(),
     });
+    hub.notifyStaff({ type: 'customer.message', customerId: session.customerId, message });
+    hub.notifyStaff({ type: 'conversation.updated', customerId: session.customerId, orderId: active.orderId });
+    ctx.log.info({ customerId: session.customerId, handoffId: active.id }, 'chat.routed-to-agent');
+    reply.code(201);
+    return { received: true, agentConnected: true, message };
+  }
 
-    ctx.log.info(
-      { requestId: input.requestId, decision: row.decision, llmCalled: row.llmCalled },
-      'chat.message',
-    );
+  const duplicate = findDuplicateReport(ctx.db, resolved.customerId, resolved.message, now, ctx.env.DUPLICATE_WINDOW_HOURS);
+  if (duplicate !== null) {
+    return suppressedDuplicate(ctx.db, duplicate, now);
+  }
 
-    // Re-read through the repository: the response is the persisted truth, not
-    // a second object built from the same inputs.
-    const stored = findRequestById(ctx.db, input.requestId);
-    if (stored === null) {
-      throw new HttpError(500, 'internal_error', 'request row missing immediately after insert');
-    }
+  const input = toProcessInput(resolved, now);
+  const result = await processRefundRequest(ctx.db, ctx.pipeline, input);
 
-    return reply.code(201).send({ request: toRequestDto(stored) });
+  if (result.stage === 'asked') {
+    const turn = recordDialogueTurn(ctx.db, {
+      customerId: input.customerId,
+      orderId: null,
+      customerMessage: input.message,
+      assistantQuestion: result.question,
+      now: ctx.now(),
+    });
+    ctx.log.info({ requestId: input.requestId, question: result.question }, 'chat.asked');
+    return { question: result.question, dialogueId: turn.id };
+  }
+
+  const stored = storeDecided(ctx, input, result);
+  reply.code(201);
+  return { request: toRequestDto(stored) };
+}
+
+export function registerChatRoutes(app: FastifyInstance, ctx: AppContext, hub: LiveHub): void {
+  app.post('/api/chat/messages', (request, reply) =>
+    handleChatMessage(request as FastifyRequest<{ Body: ChatMessageBody }>, reply, ctx, hub),
+  );
+}
+
+function storeDecided(
+  ctx: AppContext,
+  input: ProcessInputFields,
+  result: Extract<ProcessResult, { stage: 'decided' }>,
+): PersistedRequest {
+  const row = rowFromDecision({
+    requestId: input.requestId,
+    customerId: input.customerId,
+    message: input.message,
+    now: ctx.now(),
+    scenarioId: null,
+    result,
   });
+
+  // The reservation lives inside persistDecision rather than here. An approval
+  // that reserved nothing is an approval nothing will ever pay, and R-06b would
+  // not know to hold the balance - so the two cannot be separated by a caller
+  // that forgets one of them.
+  persistDecision(ctx.db, row, {
+    orderId: input.orderId,
+    customerId: input.customerId,
+    now: ctx.now(),
+  });
+
+  ctx.log.info(
+    { requestId: input.requestId, decision: row.decision, llmCalled: row.llmCalled },
+    'chat.message',
+  );
+
+  // Re-read through the repository: the response is the persisted truth, not
+  // a second object built from the same inputs.
+  const stored = findRequestById(ctx.db, input.requestId);
+  if (stored === null) {
+    throw new HttpError(500, 'internal_error', 'request row missing immediately after insert');
+  }
+  return stored;
 }
 
 interface ProcessInputFields {
@@ -188,69 +197,4 @@ function toProcessInput(data: CreateRefundRequest, now: Date): ProcessInputField
     message: data.message,
     now,
   };
-}
-
-function buildRow(
-  requestId: string,
-  input: CreateRefundRequest,
-  result: Extract<ProcessResult, { stage: 'decided' }>,
-  now: Date,
-): NewRequestRow {
-  return {
-    id: requestId,
-    createdAt: now.toISOString(),
-    customerId: input.customerId,
-    customerName: result.customer.name,
-    orderId: result.resolvedOrderId,
-    message: input.message,
-    // Lets an auditor prove the stored message was not edited after the
-    // decision was made, without keeping a second copy of it anywhere.
-    messageSha256: sha256(input.message),
-    // Derived from the message here, not accepted from the caller. A caller that
-    // supplies its own fingerprint can make two different messages collide, and
-    // a duplicate check that can be defeated by choosing a hash is decoration.
-    messageFingerprint: messageFingerprint(input.message),
-    ...decisionColumns(result.decision),
-    responseText: result.responseText,
-    extractionJson: toJson(result.extraction),
-    groundingJson: toJson(result.grounding),
-    injectionJson: JSON.stringify(result.injection),
-    aiMode: result.aiMode,
-    llmCalled: result.llmCalled,
-    timingsJson: JSON.stringify(result.timings),
-    scenarioId: null,
-  };
-}
-
-function sha256(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
-}
-
-function decisionColumns(decision: RefundDecision): Pick<
-  NewRequestRow,
-  | 'decision'
-  | 'refundAmountCents'
-  | 'eligibleAmountCents'
-  | 'summary'
-  | 'policyRef'
-  | 'traceJson'
-  | 'overridesJson'
-  | 'eligibleItemIdsJson'
-  | 'blockedItemsJson'
-> {
-  return {
-    decision: decision.decision,
-    refundAmountCents: decision.refundAmountCents,
-    eligibleAmountCents: decision.eligibleAmountCents,
-    summary: decision.summary,
-    policyRef: decision.policyRef,
-    traceJson: JSON.stringify(decision.trace),
-    overridesJson: JSON.stringify(decision.overrides),
-    eligibleItemIdsJson: JSON.stringify(decision.eligibleItemIds),
-    blockedItemsJson: JSON.stringify(decision.blockedItems),
-  };
-}
-
-function toJson(value: ClaimExtraction | GroundingResult | null): string | null {
-  return value === null ? null : JSON.stringify(value);
 }

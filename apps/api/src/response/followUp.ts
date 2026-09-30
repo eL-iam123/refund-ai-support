@@ -25,7 +25,9 @@ export type FollowUpKind =
   /** Money actually went out. */
   | 'refund_sent'
   /** A reservation was given back without being paid. */
-  | 'refund_withdrawn';
+  | 'refund_withdrawn'
+  /** The customer asked a person to look at a refusal again. */
+  | 'appeal_submitted';
 
 export interface FollowUpFacts {
   readonly kind: FollowUpKind;
@@ -65,6 +67,11 @@ export function followUpFor(facts: FollowUpFacts): string {
       return (
         `Your refund of ${formatCents(facts.paidCents)}${order} has been sent to your original ` +
         'payment method. Depending on your bank it can take a few days to appear.'
+      );
+    case 'appeal_submitted':
+      return (
+        `Your appeal${order} has been sent to a person. They will look at the decision ` +
+        'again and reply here - you do not need to do anything else.'
       );
     default:
       return (

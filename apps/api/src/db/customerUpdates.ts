@@ -68,14 +68,14 @@ export function recordCustomerUpdate(db: Db, input: RecordUpdateInput): Customer
 export function listUpdatesForOrder(
   db: Db,
   customerId: string,
-  orderId: string,
+  orderId: string | null,
   limit: number,
 ): readonly CustomerUpdate[] {
   const rows = queryAll<UpdateRow>(
     db.prepare(
       `SELECT id, created_at, customer_id, order_id, request_id, kind, body
          FROM customer_updates
-        WHERE customer_id = ? AND order_id = ?
+        WHERE customer_id = ? AND order_id IS ?
         ORDER BY created_at DESC, rowid DESC
         LIMIT ?`,
     ),

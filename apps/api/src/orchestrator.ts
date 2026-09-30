@@ -13,7 +13,7 @@ import type { Db } from './db/connection.js';
 import type { CustomerRecord, OrderRecord } from './db/records.js';
 import { findCustomer, findDuplicateSibling } from './db/orderRepository.js';
 import { verifyGrounding } from './ai/index.js';
-import type { AIAnalyzer, AttemptObserver, ProviderAttempt } from './ai/index.js';
+import type { AIAnalyzer, AttemptObserver, DialogueLine, ProviderAttempt } from './ai/index.js';
 import { toAnalyzerOrder } from './ai/openaiAnalyzer.js';
 import { disputeCeiling, identifyOrder, type Identification } from './retrieval/identifyOrder.js';
 import { scanForInjection } from './security/injection.js';
@@ -26,6 +26,8 @@ import { rulesForStage } from './policy/rules/index.js';
 import { resolve } from './policy/resolver.js';
 import type { PolicyContext } from './policy/types.js';
 import { composeDeterministicResponse } from './response/compose.js';
+import { isNoComplaint, noComplaintQuestion, NO_COMPLAINT_MODEL } from './response/noComplaint.js';
+import { assistantLines, refineQuestion } from './response/questionGuard.js';
 import { formatCents } from './lib/money.js';
 
 /**
@@ -417,7 +419,22 @@ async function analyseClaim(
     return NO_ANALYSIS;
   }
 
-  const history = transcriptForOrder(db, input.customerId, order?.id ?? null, input.now, HISTORY_LIMIT);
+  const history = transcriptForOrder(db, input.customerId, orderIdFor(order), input.now, HISTORY_LIMIT);
+
+  // The deterministic floor before the model: the customer has not said anything
+  // is wrong (a greeting, thanks or small talk). Funnelling that into a claim
+  // would hand R-12 a reason of "other" with nothing grounded and page a person
+  // over a "hello" - so it is answered with a question here, for every provider,
+  // and even a model that insists on claiming is never consulted for it.
+  if (isNoComplaint(input.message)) {
+    log.record('ai_analysis', 'no complaint in the message; answered from the deterministic floor');
+    return respondToQuestion(
+      { kind: 'question', question: noComplaintQuestion(input.message, order !== null), model: NO_COMPLAINT_MODEL },
+      order,
+      history,
+      log,
+    );
+  }
 
   let reply: Awaited<ReturnType<AIAnalyzer['analyze']>>;
   try {
@@ -432,8 +449,7 @@ async function analyseClaim(
   }
 
   if (reply.kind === 'question') {
-    log.record('ai_analysis', `asked the customer the missing detail (${reply.model})`);
-    return { outcome: 'question', question: reply.question, model: reply.model };
+    return respondToQuestion(reply, order, history, log);
   }
 
   // Only the customer's side of the transcript is eligible evidence. The model
@@ -444,7 +460,7 @@ async function analyseClaim(
   log.record(
     'ai_analysis',
     `reason="${reply.extraction.reason}" intent="${reply.extraction.intent}" ` +
-      `lang=${reply.extraction.language} grounded=${String(grounding?.grounded ?? false)} ` +
+      `lang=${reply.extraction.language} grounded=${groundedLabel(grounding)} ` +
       `via ${reply.model}`,
   );
   return {
@@ -453,6 +469,47 @@ async function analyseClaim(
     grounding,
     proposal: reply.proposal,
   };
+}
+
+/**
+ * The deterministic floor under the messenger's questions.
+ *
+ * The prompt tells the model never to open with a greeting, never to demand an
+ * order number the pipeline has resolved, and never to repeat itself; the guard
+ * makes those rules hold when the model ignores them. A canned question is
+ * replaced with a warm restatement, a repeat hands the thread to a person, and
+ * only a real question reaches the customer.
+ */
+function respondToQuestion(
+  reply: Awaited<ReturnType<AIAnalyzer['analyze']>> & { readonly kind: 'question' },
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome {
+  const refined = refineQuestion(reply.question, {
+    orderResolved: order !== null,
+    priorAssistantText: assistantLines(history),
+  });
+  if (refined.kind === 'escalate') {
+    log.record('ai_analysis', 'asked a question already asked; escalating to a person');
+    return NO_ANALYSIS;
+  }
+  const question = refined.kind === 'replace' ? refined.question : reply.question;
+  log.record(
+    'ai_analysis',
+    refined.kind === 'replace'
+      ? `replaced a canned question with a warm restatement (${reply.model})`
+      : `asked the customer the missing detail (${reply.model})`,
+  );
+  return { outcome: 'question', question, model: reply.model };
+}
+
+function orderIdFor(order: OrderRecord | null): string | null {
+  return order?.id ?? null;
+}
+
+function groundedLabel(grounding: GroundingResult | null): string {
+  return String(grounding?.grounded ?? false);
 }
 
 function truncate(text: string, max: number): string {

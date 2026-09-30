@@ -76,14 +76,14 @@ export function recordDialogueTurn(db: Db, input: RecordDialogueInput): Dialogue
 export function listDialogueForOrder(
   db: Db,
   customerId: string,
-  orderId: string,
+  orderId: string | null,
   limit: number,
 ): readonly DialogueTurn[] {
   const rows = queryAll<DialogueRow>(
     db.prepare(
       `SELECT id, created_at, customer_id, order_id, customer_message, assistant_question
          FROM shop_dialogue
-        WHERE customer_id = ? AND order_id = ?
+        WHERE customer_id = ? AND order_id IS ?
         ORDER BY created_at DESC, rowid DESC
         LIMIT ?`,
     ),
