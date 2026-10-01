@@ -9,6 +9,7 @@ import { findCustomer } from '../../db/sql.js';
 import {
   activeHandoffForCustomer,
   endHandoff,
+  claimUnattendedHandoff,
   listConversationCandidates,
   recordAgentMessage,
   startHandoff,
@@ -120,6 +121,17 @@ function takeOver(
   }
 
   const agentId = requirePrincipal(request.principal).subject;
+  // An escalated thread already has the takeover that was raised for a person,
+  // so taking it over is claiming that one rather than opening a second. Without
+  // this the customer who escalated automatically could never be helped by a
+  // human - the very outcome the automatic takeover exists to reach.
+  const claimed = claimUnattendedHandoff(ctx.db, params.customerId, agentId);
+  if (claimed !== null) {
+    ctx.log.info({ customerId: params.customerId, handoffId: claimed.id, agentId }, 'staff.handoff.claimed');
+    announceHandoff(hub, params.customerId, claimed, agentId);
+    return { handoff: claimed };
+  }
+
   let handoff: ActiveHandoff;
   try {
     handoff = startHandoff(ctx.db, {
@@ -142,22 +154,26 @@ function takeOver(
     { customerId: params.customerId, handoffId: handoff.id, agentId },
     'staff.handoff.started',
   );
-
-  hub.notifyStaff({
-    type: 'handoff.started',
-    customerId: params.customerId,
-    orderId: handoff.orderId,
-    agentId: handoff.agentId,
-    since: handoff.startedAt,
-  });
-  hub.notifyCustomer(params.customerId, {
-    type: 'agent.connected',
-    customerId: params.customerId,
-    agentId: handoff.agentId,
-    since: handoff.startedAt,
-  });
+  announceHandoff(hub, params.customerId, handoff, agentId);
 
   return { handoff };
+}
+
+/** The two notifications a customer is now on the line, sent the same way either way. */
+function announceHandoff(hub: LiveHub, customerId: string, handoff: ActiveHandoff, agentId: string): void {
+  hub.notifyStaff({
+    type: 'handoff.started',
+    customerId,
+    orderId: handoff.orderId,
+    agentId,
+    since: handoff.startedAt,
+  });
+  hub.notifyCustomer(customerId, {
+    type: 'agent.connected',
+    customerId,
+    agentId,
+    since: handoff.startedAt,
+  });
 }
 
 function messageCustomer(

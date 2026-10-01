@@ -141,7 +141,7 @@ export function takeoverForEscalated(
   now: Date,
 ): ActiveHandoff | null {
   const live = activeHandoffForCustomer(db, customerId);
-  if (live !== null) {
+  if (live !== null && isThreadOf(live, orderId)) {
     return live;
   }
 
@@ -155,6 +155,27 @@ export function takeoverForEscalated(
   return startHandoff(db, { customerId, orderId: latest.orderId, agentId: ESCALATION_AGENT, now });
 }
 
+/**
+ * Whether an unattended takeover belongs to the thread being messaged.
+ *
+ * A takeover row exists for two reasons now, and they do not have the same
+ * reach. A *person* attached to the customer owns whatever they next talk
+ * about, so a human takeover on one order is customer-wide on purpose. An
+ * unattended escalation marker is not: it exists because this order escalated,
+ * and letting it swallow the next order's thread would move a complaint that
+ * nobody has looked at onto a case file for a different order - quietly denying
+ * a refund claim by burying it, which is worse than the escalation it replaced.
+ *
+ * A person who does mean to help with both orders takes the takeover over, and
+ * that claim is customer-wide.
+ */
+function isThreadOf(handoff: ActiveHandoff, orderId: string | null): boolean {
+  if (handoff.agentId !== ESCALATION_AGENT) {
+    return true;
+  }
+  return handoff.orderId === orderId;
+}
+
 /** Whether a takeover on this thread opened and closed after the escalation. */
 function escalationWasHandled(db: Db, customerId: string, orderId: string | null, escalatedAt: string): boolean {
   const row = db
@@ -165,6 +186,30 @@ function escalationWasHandled(db: Db, customerId: string, orderId: string | null
     )
     .get(customerId, orderId, escalatedAt);
   return row !== undefined;
+}
+
+/**
+ * A person claims a takeover nobody has taken yet.
+ *
+ * The auto-provisioned escalation takeover must not lock a person out of the
+ * thread it exists to get them to: `startHandoff` refuses a second takeover, so
+ * without this the customer who escalated automatically could never be helped by
+ * a human. Returns the takeover now owned by `agentId`, or null when the live one
+ * is already a person's - which is the race, and stays a race.
+ */
+export function claimUnattendedHandoff(db: Db, customerId: string, agentId: string): ActiveHandoff | null {
+  // The sentinel lives in the WHERE clause rather than in a read above it. Two
+  // staff members claiming the same escalated thread is the same race
+  // `startHandoff` refuses, and a read-then-write would let both of them see
+  // `awaiting-agent` and both walk away believing they own it.
+  const claimed = db
+    .prepare(
+      `UPDATE handoffs SET agent_id = ?
+        WHERE customer_id = ? AND ended_at IS NULL AND agent_id = ?
+        RETURNING id, customer_id, order_id, agent_id, started_at`,
+    )
+    .get(agentId, customerId, ESCALATION_AGENT) as HandoffRow | undefined;
+  return claimed === undefined ? null : toActive(claimed);
 }
 
 /** Ends the customer's live takeover, returning what it was, or null. */

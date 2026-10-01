@@ -239,6 +239,65 @@ describe('the live takeover console', () => {
     expect(brief.riskFlags).toEqual([]);
   });
 
+  it('lets a person take over an escalation that raised its own takeover', async () => {
+    // An escalated thread raises a takeover on its own, and a takeover already in
+    // place is exactly what `startHandoff` refuses to duplicate. Without this
+    // the customer who escalated automatically could never be helped by a human
+    // - the automatic takeover would lock the staff out of the very thread it
+    // exists to get them to, and 409 would read as "someone is already on it".
+    harness = await appHarness();
+    seedShop(harness.db, TEST_NOW);
+    const app = harness.app;
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    // Non-delivery escalates: nothing can approve it, so a person is asked.
+    const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
+    expect(escalated.decision).toBe('escalated');
+
+    // The customer is already talking to "someone": the row exists before any
+    // agent has opened the case.
+    const beforeClaim = await app.inject({
+      method: 'GET',
+      url: '/api/staff/conversations',
+      headers: { authorization: agent() },
+    });
+    const listedBefore = beforeClaim
+      .json<{ conversations: readonly { customerId: string; activeHandoff: { agentId: string } | null }[] }>()
+      .conversations.find((row) => row.customerId === session.customerId);
+    expect(listedBefore?.activeHandoff?.agentId).toBe('awaiting-agent');
+
+    const claim = await app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${session.customerId}/take-over`,
+      headers: { authorization: agent() },
+      payload: { orderId: session.orderId },
+    });
+    expect(claim.statusCode).toBe(200);
+    const { handoff } = claim.json<{ handoff: { id: string; agentId: string } }>();
+    expect(handoff.agentId).toBe('test-staff');
+
+    // Claiming it did not open a second takeover, it filled in the existing one,
+    // so the race guard is still the race guard: the next agent still loses.
+    const secondAgent = await app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${session.customerId}/take-over`,
+      headers: { authorization: authHeader('agent', 'another-staff') },
+      payload: { orderId: session.orderId },
+    });
+    expect(secondAgent.statusCode).toBe(409);
+    expect(secondAgent.json<{ error: string }>().error).toBe('handoff_already_active');
+
+    // And the case file now names a person rather than a placeholder.
+    const opened = await app.inject({
+      method: 'GET',
+      url: `/api/staff/conversation?customerId=${encodeURIComponent(session.customerId)}&orderId=${encodeURIComponent(session.orderId)}`,
+      headers: { authorization: agent() },
+    });
+    const brief = opened.json<{ brief: { state: string; agentId: string | null } }>().brief;
+    expect(brief.agentId).toBe('test-staff');
+    expect(brief.state).not.toBe('ai');
+  });
+
   it('briefs a person two agents cannot race for: the second takeover loses', async () => {
     harness = await appHarness();
     seedShop(harness.db, TEST_NOW);

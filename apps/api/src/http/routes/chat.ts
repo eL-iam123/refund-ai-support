@@ -102,6 +102,14 @@ async function handleChatMessage(
   }
 
   const stored = storeDecided(ctx, input, result);
+  // An escalation is the moment this thread starts needing a person, so the
+  // takeover is raised here rather than on the customer's next message. Waiting
+  // for the next message would leave the case invisible on the staff console
+  // for exactly as long as nobody followed up - which is the case that most
+  // needs picking up.
+  if (stored.decision === 'escalated') {
+    takeoverForEscalated(ctx.db, stored.customerId, stored.orderId, ctx.now());
+  }
   reply.code(201);
   return { request: toRequestDto(stored) };
 }

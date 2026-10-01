@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Bot, Headset, Inbox, Send, User, Scale, ShieldAlert } from 'lucide-react';
+import { Bot, FileText, Headset, Inbox, MessageSquare, Send, User, Scale, ShieldAlert } from 'lucide-react';
 import type { RuleOutcome } from '@refund/shared';
 import {
   api,
@@ -38,50 +38,192 @@ export function LiveConversationsPage(): ReactNode {
     () => api.staffAnalytics().then((result) => result.analytics),
     ['live-analytics', version],
   );
+  // Hoisted out of the console because the case file renders in the sidebar and
+  // the thread in the console; one read feeds both.
+  const caseFile = useAsyncData<CaseDetail | null>(
+    () =>
+      selected === null
+        ? Promise.resolve(null)
+        : api.staffConversation(selected.customerId, selected.orderId).then((result) => result),
+    ['live-case', selected?.customerId ?? '', selected?.orderId ?? '', version],
+  );
 
-  // The staff socket announces arrivals and replies; the list and the open case
-  // are both re-read, because the socket carries no bodies on purpose. See the
-  // comment on LiveHub for why notify-then-refetch beats pushing copies.
-  useEffect(() => {
-    const socket = new WebSocket(
-      `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/staff/conversation/ws`,
+  useStaffConversationSocket(() => setVersion((v) => v + 1));
+
+  /**
+   * Select a conversation, or put the current one back if it is clicked again.
+   *
+   * Clicking the open row closes the case, which is what makes the rail feel
+   * reversible: one row is both "open this" and "close this". Comparison is by
+   * conversation identity, not by object, because the list is re-fetched on
+   * every socket message and a fresh object for the same case arrives each time.
+   */
+  const toggleCase = (row: StaffConversation): void => {
+    setSelected((current) =>
+      current !== null && conversationKey(current) === conversationKey(row) ? null : row,
     );
-    socket.onmessage = () => setVersion((v) => v + 1);
-    return () => socket.close();
-  }, []);
+  };
 
   return (
     <div className="admin-page">
-      <div className="console-intro">
-        <h1>Live</h1>
-        {/*
-          The heading and its explanation sit on one line rather than stacked, so
-          the page header costs a single row instead of the four that a block
-          heading over a wrapped paragraph produced.
-        */}
-        <p className="lede">
-          Conversations that moved in the last 24 hours. Pick one to read the case, or answer the
-          customer yourself if a colleague has taken it over.
-        </p>
-      </div>
-      <div className="live-layout">
+      {/*
+        No visible page heading. The topbar already shows "Live" as the active
+        nav item, so a second one said it again and cost a whole row. The
+        guidance it carried moved to the empty state, where an agent actually
+        needs it, and the heading stays in the document for screen readers.
+      */}
+      <h1 className="sr-only">Live</h1>
+      <div className={`live-layout ${selected === null ? 'rail-queue' : 'rail-case'}`}>
         <AnalyticsStrip analytics={analytics} />
-        <ConversationList conversations={conversations} selected={selected} onSelect={setSelected} />
+        <Rail
+          conversations={conversations}
+          selected={selected}
+          onSelect={toggleCase}
+          detail={caseFile.data}
+          error={caseFile.error}
+        />
         <section className="live-console">
-          {selected === null ? (
-            <p className="empty">No conversation open. Choose one from the list.</p>
-          ) : (
-            <TakeoverConsole
-              key={conversationKey(selected)}
-              conversation={selected}
-              version={version}
-              onChanged={() => setVersion((v) => v + 1)}
-            />
-          )}
+          <ConsoleBody
+            conversation={selected}
+            detail={caseFile.data}
+            onChanged={() => setVersion((v) => v + 1)}
+          />
         </section>
       </div>
     </div>
   );
+}
+
+/**
+ * Re-read everything when the staff socket says something moved.
+ *
+ * The socket announces arrivals and replies but carries no bodies, on purpose:
+ * the server is the only thing that can assemble a thread and a briefing
+ * consistently, so the client is told there is something new and re-reads it.
+ * See the comment on LiveHub for why notify-then-refetch beats pushing copies.
+ */
+function useStaffConversationSocket(onChange: () => void): void {
+  useEffect(() => {
+    const socket = new WebSocket(
+      `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/staff/conversation/ws`,
+    );
+    socket.onmessage = onChange;
+    return () => socket.close();
+  }, [onChange]);
+}
+
+/**
+ * The rail: two panels, one column, one open at a time.
+ *
+ * Both panels are always rendered, so the rail reads as a pair of tabs rather
+ * than as content that appears and vanishes. The open one is on top and fills the
+ * rail; the closed one is a tab beneath it. They swap places as the selection
+ * changes, so whichever panel is live is always the one at the top - the active
+ * control never moves.
+ */
+function Rail({
+  conversations,
+  selected,
+  onSelect,
+  detail,
+  error,
+}: {
+  conversations: { readonly data: readonly StaffConversation[] | null; readonly error: string | null };
+  selected: StaffConversation | null;
+  onSelect: (row: StaffConversation) => void;
+  detail: CaseDetail | null;
+  error: string | null;
+}): ReactNode {
+  return (
+    <aside className="live-rail">
+      <ConversationList
+        conversations={conversations}
+        selected={selected}
+        onSelect={onSelect}
+        active={selected === null}
+      />
+      {error !== null ? <p className="error">{error}</p> : null}
+      <CaseBrief brief={detail?.brief ?? null} active={selected !== null} />
+    </aside>
+  );
+}
+
+/**
+ * One rail tab.
+ *
+ * Both panels use this, so their headers are the same height and the same
+ * structure by construction rather than by two rules happening to agree - they
+ * were built from `.panel-head` and a bespoke `.case-brief-summary`, which
+ * drifted apart in height and padding.
+ */
+function RailTab({
+  icon,
+  title,
+  note,
+}: {
+  icon: ReactNode;
+  title: string;
+  note: string;
+}): ReactNode {
+  return (
+    <summary className="rail-tab">
+      <span className="rail-tab-title">
+        {icon}
+        {title}
+      </span>
+      <span className="rail-tab-note">{note}</span>
+    </summary>
+  );
+}
+
+/**
+ * What the console shows for the current selection.
+ *
+ * Split out so the three states - nothing chosen, chosen but still loading, and
+ * chosen and loaded - read as a list rather than as nested ternaries in the
+ * middle of the page layout.
+ */
+function ConsoleBody({
+  conversation,
+  detail,
+  onChanged,
+}: {
+  conversation: StaffConversation | null;
+  detail: CaseDetail | null;
+  onChanged: () => void;
+}): ReactNode {
+  if (conversation === null) {
+    return (
+      // The page heading's explanation lived here rather than in a header row:
+      // this is the only moment it is true, and it tells the agent what the
+      // console is for at the moment they are deciding what to do with it.
+      <div className="console-empty">
+        <h2>No conversation open</h2>
+        <p>
+          Pick a conversation from the queue to read the case. If a colleague has already taken it
+          over, you can answer the customer yourself.
+        </p>
+      </div>
+    );
+  }
+  if (detail === null) {
+    return <Spinner />;
+  }
+  return (
+    <TakeoverConsole
+      key={conversationKey(conversation)}
+      conversation={conversation}
+      thread={detail.thread}
+      brief={detail.brief}
+      onChanged={onChanged}
+    />
+  );
+}
+
+/** What the staff conversation endpoint returns for the open case. */
+interface CaseDetail {
+  readonly thread: readonly StaffThreadTurn[];
+  readonly brief: HandoffBrief;
 }
 
 /**
@@ -151,20 +293,25 @@ function ConversationList({
   conversations,
   selected,
   onSelect,
+  active,
 }: {
   conversations: { readonly data: readonly StaffConversation[] | null; readonly error: string | null };
   selected: StaffConversation | null;
   onSelect: (row: StaffConversation) => void;
+  active: boolean;
 }): ReactNode {
   return (
-    <aside className="live-list panel">
-      <div className="panel-head">
-        <h2>Conversations</h2>
-        <span className="muted small">{conversations.data === null ? '' : `${conversations.data.length} open`}</span>
+    <details className="live-panel panel" open={active}>
+      <RailTab
+        icon={<MessageSquare size={14} aria-hidden="true" />}
+        title="Conversations"
+        note={conversations.data === null ? '' : `${conversations.data.length} open`}
+      />
+      <div className="panel-body">
+        {conversations.error !== null ? <p className="error">{conversations.error}</p> : null}
+        {renderRows(conversations.data, selected, onSelect)}
       </div>
-      {conversations.error !== null ? <p className="error">{conversations.error}</p> : null}
-      {renderRows(conversations.data, selected, onSelect)}
-    </aside>
+    </details>
   );
 }
 
@@ -233,32 +380,26 @@ function renderRows(
 }
 
 /**
- * One conversation: the case file, the thread, and the takeover verbs.
+ * The open case: header, thread, and the takeover verbs.
  *
  * The briefing and the thread come from the staff endpoint in one read, so two
  * agents opening the same conversation see the same case - the briefing is
- * derived, not cached, and the freshness is the point.
+ * derived, not cached, and the freshness is the point. That read is hoisted to
+ * the page because the case file renders in the sidebar while the thread renders
+ * here; fetching in each would issue the request twice.
  */
 function TakeoverConsole({
   conversation,
-  version,
+  thread,
+  brief,
   onChanged,
 }: {
   conversation: StaffConversation;
-  version: number;
+  thread: readonly StaffThreadTurn[];
+  brief: HandoffBrief;
   onChanged: () => void;
 }): ReactNode {
-  const caseFile = useAsyncData(
-    () => api.staffConversation(conversation.customerId, conversation.orderId).then((result) => result),
-    ['live-case', conversation.customerId, conversation.orderId, version],
-  );
   const [errand, setErrand] = useState<string>('');
-
-  if (caseFile.data === null) {
-    return caseFile.error !== null ? <p className="error">{caseFile.error}</p> : <Spinner />;
-  }
-
-  const { thread, brief } = caseFile.data;
   const active = conversation.activeHandoff;
 
   const run = async (verb: () => Promise<unknown>): Promise<void> => {
@@ -280,21 +421,9 @@ function TakeoverConsole({
         onHandBack={() => void run(() => api.staffHandBack(conversation.customerId))}
       />
       {errand.length > 0 ? <p className="error">{errand}</p> : null}
-
-      {/*
-        The thread leads and the case file supports it. An agent opens a case to
-        read what was said and answer; the derived facts are the reference they
-        check against, so putting the case file first meant the conversation -
-        the reason they are here - was pushed to the right and down.
-      */}
-      <div className="case-split">
-        <div className="case-thread">
-          <ThreadView thread={thread} />
-          {active !== null ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
-        </div>
-        <div className="case-file">
-          <CaseBrief brief={brief} />
-        </div>
+      <div className="case-thread">
+        <ThreadView thread={thread} />
+        {active !== null ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
       </div>
     </div>
   );
@@ -364,21 +493,24 @@ function CaseHead({
  * defaulting it open meant every reply started with a wall of `pass` before the
  * customer's actual problem.
  */
-function CaseBrief({ brief }: { brief: HandoffBrief }): ReactNode {
+function CaseBrief({ brief, active }: { brief: HandoffBrief | null; active: boolean }): ReactNode {
   return (
-    <div className="case-brief">
-      <RiskFlags brief={brief} />
-      <details>
-        <summary>
-          <span className="summary-title">Case file</span>
-          <span className="summary-note">What was asked, what was checked, what was decided</span>
-        </summary>
-        <div className="case-columns">
-          <WordsColumn brief={brief} />
-          <EvidenceColumn brief={brief} />
+    <details className="live-panel case-brief" open={active && brief !== null}>
+      <RailTab
+        icon={<FileText size={14} aria-hidden="true" />}
+        title="Case file"
+        note={brief === null ? 'Nothing open' : brief.customerName}
+      />
+      {brief === null ? null : (
+        <div className="panel-body">
+          <RiskFlags brief={brief} />
+          <div className="case-columns">
+            <WordsColumn brief={brief} />
+            <EvidenceColumn brief={brief} />
+          </div>
         </div>
-      </details>
-    </div>
+      )}
+    </details>
   );
 }
 

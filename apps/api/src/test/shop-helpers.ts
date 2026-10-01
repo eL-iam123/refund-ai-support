@@ -23,7 +23,22 @@ export interface SignedIn {
   readonly orderId: string;
   /** Buys a different product, giving this customer a second order to talk about. */
   buyAgain: () => Promise<string>;
-  send: (orderId: string, message: string) => Promise<{ decision: string; duplicate: unknown }>;
+  send: (orderId: string, message: string) => Promise<SendResult>;
+}
+
+/**
+ * What one message came back as.
+ *
+ * Two shapes, and a test that assumes one of them is lying about the product.
+ * A message that reaches the pipeline comes back as a decision; a message that
+ * lands on an escalated thread - one a person is already looking at - comes
+ * back as a conversation instead, because the pipeline does not run again there.
+ */
+export interface SendResult {
+  readonly decision: string | null;
+  readonly duplicate: unknown;
+  /** Set when the message went to a takeover rather than to the resolver. */
+  readonly handedOver: boolean;
 }
 
 export function cookiesOf(session: SignedIn): string {
@@ -71,14 +86,24 @@ export async function signIn(h: AppHarness, email: string): Promise<SignedIn> {
         headers: { cookie },
         payload: { customerId: user.customerId, orderId: target, message },
       });
-      // 201 for a new decision, 200 for a recognised repeat. Both are successes
-      // and both return a request, so both are accepted here; the duplicate
-      // assertions check the body rather than the status.
+      // 201 for a new decision, 200 for a recognised repeat, 201 for a message
+      // routed to a person. All three are successes; which one happened is read
+      // off the body rather than the status, because all three are 201.
       if (sent.statusCode !== 200 && sent.statusCode !== 201) {
         throw new Error(`send returned ${sent.statusCode}: ${sent.body}`);
       }
-      const body = sent.json<{ request: { decision: { decision: string } }; duplicate: unknown }>();
-      return { decision: body.request.decision.decision, duplicate: body.duplicate };
+      const body = sent.json<{
+        request?: { decision: { decision: string } };
+        duplicate?: unknown;
+        received?: boolean;
+      }>();
+      if (body.received === true) {
+        return { decision: null, duplicate: body.duplicate, handedOver: true };
+      }
+      if (body.request === undefined) {
+        throw new Error(`send returned neither a decision nor a handoff: ${sent.body}`);
+      }
+      return { decision: body.request.decision.decision, duplicate: body.duplicate, handedOver: false };
     },
   };
 }

@@ -321,7 +321,16 @@ function sort(
     .map((entry) => entry.turn);
 }
 
-/** Total messages per order, for the "3 messages" badge on the order list. */
+/**
+ * Total messages per order, for the "3 messages" badge on the order list.
+ *
+ * Counts the customer's own turns across every table they can appear in, which
+ * includes what they said while a person was on the line. A badge that said "1"
+ * on a thread the customer can plainly see three messages in is worse than no
+ * badge: it is the storefront contradicting itself about whether the customer
+ * has been heard from. Agent replies are not counted, because the badge is
+ * about the customer's messages, not the length of the transcript.
+ */
 export function conversationCounts(db: Db, customerId: string): ReadonlyMap<string, number> {
   const requests = queryAll<{ order_id: string; n: number }>(
     db.prepare(
@@ -341,11 +350,18 @@ export function conversationCounts(db: Db, customerId: string): ReadonlyMap<stri
     ),
     customerId,
   );
+  const saidDuringHandoff = queryAll<{ order_id: string; n: number }>(
+    db.prepare(
+      `SELECT h.order_id, COUNT(*) AS n
+         FROM agent_messages m
+         JOIN handoffs h ON h.id = m.handoff_id
+        WHERE h.customer_id = ? AND h.order_id IS NOT NULL AND m.sender = 'customer'
+        GROUP BY h.order_id`,
+    ),
+    customerId,
+  );
   const counts = new Map<string, number>();
-  for (const row of requests) {
-    counts.set(row.order_id, (counts.get(row.order_id) ?? 0) + row.n);
-  }
-  for (const row of dialogue) {
+  for (const row of [...requests, ...dialogue, ...saidDuringHandoff]) {
     counts.set(row.order_id, (counts.get(row.order_id) ?? 0) + row.n);
   }
   return counts;

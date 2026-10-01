@@ -115,16 +115,24 @@ describe('per-order chat history', () => {
     // Two messages about one order, one about another, for the same customer.
     // The second order is what makes this a test of partitioning rather than of
     // counting: a single shared thread would satisfy every count below.
-    await session.send(session.orderId, 'The charger never arrived and I want my money back');
-    await session.send(session.orderId, 'Still nothing. This is the third time I have asked.');
+    //
+    // Each message names an item the order it is sent against really contains,
+    // which is what makes it a decided request rather than a filed-without-one
+    // question: naming something the order does not have is read as the customer
+    // disagreeing with the order they were sent. The first order is the lamp and
+    // the second is the coat, so a thread that mixed them up would show it in the
+    // text rather than only in the counts.
+    //
+    // Grounded damage rather than non-delivery, so every message is decided.
+    // That matters in a second way: an escalation raises a takeover, and a
+    // takeover turns later messages on that order into conversation instead of
+    // requests, which would reshape the thread for reasons that have nothing to
+    // do with partitioning.
+    await session.send(session.orderId, 'The lamp arrived with a cracked shade');
+    await session.send(session.orderId, 'The lamp shade is still cracked after I unpacked it');
     const other = await session.buyAgain();
     expect(other).not.toBe(session.orderId);
-    // The message names something this order actually contains. That is not
-    // incidental: naming an item the order does not have is treated as the
-    // customer disagreeing with the order they were sent, and the request is
-    // filed without one - which is the behaviour that would otherwise make this
-    // test look like a history bug.
-    await session.send(other, 'The coat arrived with a tear in the lining');
+    await session.send(other, 'The zip on my coat is broken and unusable');
 
     const first = await threadFor(harness, session, session.orderId);
     const second = await threadFor(harness, session, other);
@@ -134,23 +142,59 @@ describe('per-order chat history', () => {
 
     // Oldest first. A thread read newest-first puts the answer to the first
     // question below every question asked after it was already answered.
-    expect(first[0]?.message).toContain('never arrived');
-    expect(first[1]?.message).toContain('third time');
-    expect(second[0]?.message).toContain('lining');
+    expect(first[0]?.message).toContain('cracked shade');
+    expect(first[1]?.message).toContain('still cracked');
+    expect(second[0]?.message).toContain('zip');
 
     // The part that actually matters: neither thread contains the other's turns.
     for (const turn of first) {
-      expect(turn.message).not.toContain('lining');
+      expect(turn.message).not.toContain('coat');
     }
     for (const turn of second) {
-      expect(turn.message).not.toContain('never arrived');
+      expect(turn.message).not.toContain('lamp');
     }
+  });
+
+  it('keeps an escalated order from swallowing the next one', async () => {
+    // The reason this exists: raising a takeover for an escalated thread means
+    // later messages on that thread stop being decisions. Done per *customer*
+    // instead of per thread, it also swallows the next order - and a complaint
+    // nobody has looked at being filed under a different order is a refund
+    // quietly lost, which is worse than the escalation it replaced.
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    // Non-delivery escalates: no grounded damage, no duplicate charge, so
+    // nothing can approve it and a person is asked to decide.
+    const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
+    expect(escalated.decision).toBe('escalated');
+
+    const other = await session.buyAgain();
+    expect(other).not.toBe(session.orderId);
+    // The coat, which is a final-sale item, so the resolver denies it on its own
+    // evidence. The decision value is not the point: the point is that a decision
+    // came back at all rather than the message being swallowed.
+    const second = await session.send(other, 'The zip on my coat is broken and unusable');
+
+    expect(second.handedOver).toBe(false);
+    expect(second.decision).toBe('denied');
+
+    // The escalation still holds on the order it belongs to.
+    const stillEscalated = await session.send(session.orderId, 'Still nothing, this is the third time I have asked');
+    expect(stillEscalated.handedOver).toBe(true);
+    expect(stillEscalated.decision).toBeNull();
   });
 
   it('returns the same thread after a reload, and still declines a repeat', async () => {
     harness = await shopHarness();
     const session = await signIn(harness, 'sam@shop.demo');
-    await session.send(session.orderId, 'The item never arrived and I want my money back');
+    // Grounded damage on an item this order really has, so it is decided and the
+    // thread is made of requests. Duplicate suppression only has something to
+    // suppress on a thread the pipeline is still deciding: a message that lands
+    // on an escalated thread is answered as conversation, and there is no second
+    // decision for the gate to avoid.
+    const complaint = 'The lamp arrived with a cracked shade';
+    await session.send(session.orderId, complaint);
 
     const before = await threadFor(harness, session, session.orderId);
     const after = await threadFor(harness, session, session.orderId);
@@ -158,7 +202,7 @@ describe('per-order chat history', () => {
 
     // Resending the same complaint is still suppressed, not decided twice, and
     // the suppressed message does not appear in the thread a second time.
-    const repeat = await session.send(session.orderId, 'The item never arrived and I want my money back');
+    const repeat = await session.send(session.orderId, complaint);
     expect(repeat.duplicate).not.toBeNull();
     expect(await threadFor(harness, session, session.orderId)).toHaveLength(before.length);
   });
@@ -166,7 +210,7 @@ describe('per-order chat history', () => {
   it("will not show one customer another customer's history", async () => {
     harness = await shopHarness();
     const mine = await signIn(harness, 'sam@shop.demo');
-    await mine.send(mine.orderId, 'The item never arrived and I want my money back');
+    await mine.send(mine.orderId, 'The lamp arrived with a cracked shade');
 
     const theirs = await signIn(harness, 'priya@shop.demo');
 
@@ -185,8 +229,8 @@ describe('per-order chat history', () => {
   it('reports message counts per order', async () => {
     harness = await shopHarness();
     const session = await signIn(harness, 'sam@shop.demo');
-    await session.send(session.orderId, 'The item never arrived and I want my money back');
-    await session.send(session.orderId, 'Still nothing, this is the third time I have asked.');
+    await session.send(session.orderId, 'The lamp arrived with a cracked shade');
+    await session.send(session.orderId, 'The lamp shade is still cracked after I unpacked it');
 
     const response = await harness.app.inject({
       method: 'GET',
@@ -194,6 +238,29 @@ describe('per-order chat history', () => {
       headers: { cookie: cookiesOf(session) },
     });
     expect(response.statusCode).toBe(200);
+    const counts = response.json<{ counts: readonly { orderId: string; count: number }[] }>().counts;
+    expect(counts.find((row) => row.orderId === session.orderId)?.count).toBe(2);
+  });
+
+  it('counts what the customer said while an agent was on the line', async () => {
+    // The badge is a claim about whether this customer has been heard from. If
+    // it stops counting once a person takes the thread - the moment the
+    // customer's messages stop being refund_requests rows - it reads "1" beside
+    // a conversation the customer can plainly see three messages in, and the
+    // storefront contradicts itself about the same thread.
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+    const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
+    expect(escalated.decision).toBe('escalated');
+
+    const duringTakeover = await session.send(session.orderId, 'Any update on this?');
+    expect(duringTakeover.handedOver).toBe(true);
+
+    const response = await harness.app.inject({
+      method: 'GET',
+      url: '/api/shop/chat/summary',
+      headers: { cookie: cookiesOf(session) },
+    });
     const counts = response.json<{ counts: readonly { orderId: string; count: number }[] }>().counts;
     expect(counts.find((row) => row.orderId === session.orderId)?.count).toBe(2);
   });
