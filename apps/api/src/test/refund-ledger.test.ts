@@ -230,14 +230,42 @@ describe('the ledger cannot be made to pay twice', () => {
     expect(findRefundByIdempotencyKey(fixture.db, refund.idempotencyKey)?.id).toBe(refund.id);
   });
 
-  it('refuses to settle more than the order was worth', () => {
+  it('refuses a reservation that exceeds the remaining order balance', () => {
     const fixture = refundableOrder();
-    // Reserved past the order total: the table cannot know the order's total, so
-    // this is the layer that has to catch it.
-    const refund = authoriseFixture(fixture, fixture.totalCents + 1000);
+    authoriseFixture(fixture, fixture.totalCents - 1000);
+
+    expect(() => authoriseFixture(fixture, 2000, 'REQ-LEDGER-OVER')).toThrow(/only 1000 cents remaining/);
+    expect(pendingCentsForOrder(fixture.db, fixture.orderId)).toBe(fixture.totalCents - 1000);
+  });
+
+  it('does not reserve a legacy-refunded balance a second time', () => {
+    const fixture = refundableOrder();
+    fixture.db.prepare('UPDATE orders SET refunded_cents = 2000 WHERE id = ?').run(fixture.orderId);
+
+    expect(() => authoriseFixture(fixture, fixture.totalCents, 'REQ-LEDGER-LEGACY')).toThrow(
+      /only .* cents remaining/,
+    );
+    expect(pendingCentsForOrder(fixture.db, fixture.orderId)).toBe(0);
+  });
+
+  it('settles an authorised balance without overwriting pre-ledger refunded cents', () => {
+    const fixture = refundableOrder();
+    const legacyRefunded = 2000;
+    fixture.db.prepare('UPDATE orders SET refunded_cents = ? WHERE id = ?').run(legacyRefunded, fixture.orderId);
+    const refund = authoriseFixture(fixture, fixture.totalCents - legacyRefunded, 'REQ-LEDGER-LEGACY-SETTLE');
+
+    settleRefund(fixture.db, refund.id, 'alice', TEST_NOW);
+
+    expect(findOrder(fixture.db, fixture.customerId, fixture.orderId, TEST_NOW)?.refundedCents).toBe(fixture.totalCents);
+  });
+
+  it('refuses settlement if an external legacy refund consumed the reserved balance meanwhile', () => {
+    const fixture = refundableOrder();
+    const refund = authoriseFixture(fixture, fixture.totalCents, 'REQ-LEDGER-LEGACY-RACE');
+    fixture.db.prepare('UPDATE orders SET refunded_cents = 2000 WHERE id = ?').run(fixture.orderId);
 
     expect(() => settleRefund(fixture.db, refund.id, 'alice', TEST_NOW)).toThrow(/more than was paid/);
-    expect(settledCentsForOrder(fixture.db, fixture.orderId)).toBe(0);
+    expect(findOrder(fixture.db, fixture.customerId, fixture.orderId, TEST_NOW)?.refundedCents).toBe(2000);
   });
 
   it('will not reopen a reservation that has already been paid', () => {
@@ -406,16 +434,24 @@ describe('the human verification endpoints', () => {
 
   /** An approval against the app harness's own seeded database. */
   function authoriseIn(db: Db, requestId: string, amountCents: number): RefundRecord {
-    const customer = rows<{ id: string }>(db, 'SELECT id FROM customers ORDER BY id LIMIT 1')[0];
-    const order = rows<{ id: string }>(db, 'SELECT id FROM orders ORDER BY id LIMIT 1')[0];
-    if (customer === undefined || order === undefined) {
+    const ownedOrder = rows<{ order_id: string; customer_id: string }>(
+      db,
+      'SELECT id AS order_id, customer_id FROM orders ORDER BY id LIMIT 1',
+    )[0];
+    if (ownedOrder === undefined) {
       throw new Error('seed produced no customer or order');
     }
-    insertRequest(db, { ...approvedRequestRow({ db, customerId: customer.id, orderId: order.id, totalCents: amountCents }, amountCents), id: requestId });
+    insertRequest(db, {
+      ...approvedRequestRow(
+        { db, customerId: ownedOrder.customer_id, orderId: ownedOrder.order_id, totalCents: amountCents },
+        amountCents,
+      ),
+      id: requestId,
+    });
     return authoriseRefund(db, {
       requestId,
-      orderId: order.id,
-      customerId: customer.id,
+      orderId: ownedOrder.order_id,
+      customerId: ownedOrder.customer_id,
       amountCents,
       now: TEST_NOW,
     });

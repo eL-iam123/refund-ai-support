@@ -2,6 +2,7 @@ import type { ErrorResponseDto } from '@refund/shared';
 import { UnknownCustomerError } from '../orchestrator.js';
 import { AiUnavailableError } from '../ai/analyzer.js';
 import { ShopAuthError } from '../shop/auth.js';
+import { RefundBalanceExceededError } from '../db/refundLedger.js';
 
 /**
  * One place that decides what a failure looks like on the wire.
@@ -94,22 +95,56 @@ export class IncoherentDecisionError extends HttpError {
   }
 }
 
-/** Maps any thrown value onto a status code and a stable error code. */
-export function toHttpError(error: unknown): HttpError {
-  if (error instanceof HttpError) {
-    return error;
+/** Safe mapping for client failures raised by Fastify before route handlers. */
+function frameworkClientError(error: object): HttpError | null {
+  if (!('statusCode' in error)) {
+    return null;
   }
+  const statusCode = Number(error.statusCode);
+  if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode >= 500) {
+    return null;
+  }
+  switch (statusCode) {
+    case 413:
+      return new HttpError(413, 'payload_too_large', 'request body is too large');
+    case 429:
+      return new HttpError(429, 'rate_limited', 'too many requests; try again later');
+    default:
+      return new HttpError(statusCode, 'bad_request', 'request could not be parsed');
+  }
+}
+
+/** Maps any thrown value onto a status code and a stable error code. */
+function knownDomainError(error: unknown): HttpError | null {
   if (error instanceof ShopAuthError) {
     return new HttpError(error.statusCode, error.statusCode === 401 ? 'unauthorized' : 'bad_request', error.message);
+  }
+  if (error instanceof RefundBalanceExceededError) {
+    return new HttpError(409, 'refund_balance_exceeded', error.message);
   }
   if (error instanceof UnknownCustomerError) {
     return new HttpError(404, 'unknown_customer', error.message);
   }
   if (error instanceof AiUnavailableError) {
-    // A lost model call is not a client error: the pipeline still produced a
-    // decision, so the request succeeded. This only appears if the failure
-    // escaped the fail-soft path entirely.
     return new HttpError(503, 'ai_unavailable', 'the model provider is unavailable');
+  }
+  return null;
+}
+
+/** Maps any thrown value onto a status code and a stable error code. */
+export function toHttpError(error: unknown): HttpError {
+  if (error instanceof HttpError) {
+    return error;
+  }
+  const domain = knownDomainError(error);
+  if (domain !== null) {
+    return domain;
+  }
+  if (typeof error === 'object' && error !== null) {
+    const mapped = frameworkClientError(error);
+    if (mapped !== null) {
+      return mapped;
+    }
   }
   if (error instanceof Error) {
     return new HttpError(500, 'internal_error', 'an unexpected error occurred');

@@ -249,14 +249,14 @@ export interface DuplicateMatch {
 export function findDuplicateRequests(
   db: Db,
   customerId: string,
+  orderId: string | null,
   fingerprint: string,
   sinceIso: string,
   limit: number,
 ): readonly DuplicateMatch[] {
-  // A duplicate is judged on the message. Scoping by order as well would be
-  // stricter, but a customer who names no order in either message is describing
-  // the same situation, and requiring an order match would let them bypass the
-  // check simply by leaving the order out.
+  // The message fingerprint alone is insufficient: the same wording can
+  // describe two different orders. Match the deterministic order resolution as
+  // well, including NULL for a genuinely unresolved/mid-clarify thread.
   const rows = queryAll<{
     id: string;
     order_id: string | null;
@@ -269,12 +269,14 @@ export function findDuplicateRequests(
       `SELECT id, order_id, decision, created_at, message, refund_amount_cents
          FROM refund_requests
         WHERE customer_id = ?
+          AND order_id IS ?
           AND message_fingerprint = ?
           AND created_at >= ?
         ORDER BY created_at DESC, id DESC
         LIMIT ?`,
     ),
     customerId,
+    orderId,
     fingerprint,
     sinceIso,
     limit,

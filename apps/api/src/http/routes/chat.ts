@@ -22,8 +22,9 @@ import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
 import { toAnalyzerOrder } from '../../ai/openaiAnalyzer.js';
 import { transcriptForOrder } from '../../retrieval/conversation.js';
-import { findOrder } from '../../db/orderRepository.js';
+import { findCustomer, findOrder } from '../../db/orderRepository.js';
 import type { ChatInput, ChatReply } from '../../ai/analyzer.js';
+import { identifyOrder } from '../../retrieval/identifyOrder.js';
 
 /**
  * POST /api/chat/messages
@@ -53,35 +54,22 @@ async function handleChatMessage(
   ctx: AppContext,
   hub: LiveHub,
 ): Promise<HandoffBody | { question: string; dialogueId: string } | { request: RefundRequestDto }> {
-  const body = CreateRefundRequestSchema.safeParse(request.body);
-  if (!body.success) {
-    throw badRequest(
-      'invalid request body',
-      body.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
-    );
-  }
-  if (body.data.message.length > ctx.env.MAX_MESSAGE_LENGTH) {
-    throw badRequest(
-      'message is too long',
-      [`message: must be at most ${ctx.env.MAX_MESSAGE_LENGTH} characters`],
-    );
-  }
-
+  const body = parseChatBody(request, ctx);
   const cookies = request.cookies as Record<string, string | undefined>;
   const session = resolveShopSession(ctx.db, cookies[SESSION_COOKIE], ctx.now());
   if (session === null) {
     throw new HttpError(401, 'unauthorized', 'sign in to start a refund request');
   }
-  const resolved: CreateRefundRequest = { ...body.data, customerId: session.customerId };
+  const resolved: CreateRefundRequest = { ...body, customerId: session.customerId };
   const now = ctx.now();
 
   const takeover = takeoverForEscalated(ctx.db, session.customerId, resolved.orderId, now);
   if (takeover !== null) {
     reply.code(201);
-    return await chatDuringHandoff(ctx, hub, takeover, body.data.message, now);
+    return await chatDuringHandoff(ctx, hub, takeover, body.message, now);
   }
 
-  const duplicate = findDuplicateReport(ctx.db, resolved.customerId, resolved.message, now, ctx.env.DUPLICATE_WINDOW_HOURS);
+  const duplicate = duplicateForSubmission(ctx, resolved, now);
   if (duplicate !== null) {
     return suppressedDuplicate(ctx.db, duplicate, now);
   }
@@ -112,6 +100,40 @@ async function handleChatMessage(
   }
   reply.code(201);
   return { request: toRequestDto(stored) };
+}
+
+function parseChatBody(
+  request: FastifyRequest<{ Body: ChatMessageBody }>,
+  ctx: AppContext,
+): CreateRefundRequest {
+  const body = CreateRefundRequestSchema.safeParse(request.body);
+  if (!body.success) {
+    throw badRequest(
+      'invalid request body',
+      body.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  if (body.data.message.length > ctx.env.MAX_MESSAGE_LENGTH) {
+    throw badRequest('message is too long', [`message: must be at most ${ctx.env.MAX_MESSAGE_LENGTH} characters`]);
+  }
+  return body.data;
+}
+
+function duplicateForSubmission(
+  ctx: AppContext,
+  input: CreateRefundRequest,
+  now: Date,
+): DuplicateReport | null {
+  const customer = findCustomer(ctx.db, input.customerId, now);
+  const identified = customer === null ? null : identifyOrder(ctx.db, customer, input.orderId, input.message, now);
+  return findDuplicateReport(
+    ctx.db,
+    input.customerId,
+    identified?.order?.id ?? null,
+    input.message,
+    now,
+    ctx.env.DUPLICATE_WINDOW_HOURS,
+  );
 }
 
 /**
@@ -206,7 +228,7 @@ function storeDecided(
   // not know to hold the balance - so the two cannot be separated by a caller
   // that forgets one of them.
   persistDecision(ctx.db, row, {
-    orderId: input.orderId,
+    orderId: result.resolvedOrderId,
     customerId: input.customerId,
     now: ctx.now(),
   });

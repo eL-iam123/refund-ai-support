@@ -30,6 +30,7 @@ export const HARD_BLOCK_RULES: ReadonlySet<RuleId> = new Set<RuleId>([
   'R-02', // final sale
   'R-05', // digital goods already downloaded
   'R-06', // payment already settled or refunded
+  'R-06b', // no refundable balance remains after settled and pending refunds
   'R-14', // policy override attempt
 ]);
 

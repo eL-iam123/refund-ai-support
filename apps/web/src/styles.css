@@ -233,21 +233,20 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .rail-tab::-webkit-details-marker { display: none; }
 .rail-tab-title { display: inline-flex; align-items: center; gap: 7px; font-weight: 750; }
 .rail-tab-note { color: var(--ink-faint); font-size: .72rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Open panel fills the rail and scrolls inside; closed panel is just its tab. */
+/* The minimised queue is a button carrying the same tab rule, so the two tabs
+   stay the same height even though one is a summary and the other a button. */
+.rail-tab-button { width: 100%; color: var(--ink-soft); background: none; border: 0; font: inherit; text-align: left; }
+.rail-tab-button:hover { color: var(--ink); }
+.rail-tab-button:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+/* Open panel fills the rail and scrolls inside; a minimised panel is just its tab. */
 .live-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; overflow: hidden; }
 .live-panel[open] { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
-.live-panel:not([open]) { background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; }
-.live-panel:not([open]) .rail-tab { color: var(--ink-soft); }
-.live-panel:not([open]) .rail-tab::after { content: 'open'; margin-left: auto; color: var(--brand-deep); font-size: .68rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+.live-panel-tab { background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; grid-template-rows: auto; }
 .panel-body { min-height: 0; overflow-y: auto; }
-/* The rail is two slots: the open panel takes the tall one, the closed tab sits
-   under it. `order` is what swaps them, so the live panel is always on top and
-   the closed one is always the tab beneath - the active control never moves. */
+/* Two slots: the open panel takes the tall one, the minimised tab sits under it.
+   Order is markup order - the open panel is written first - so no ordering rules
+   are needed and the active control can never be pushed below the other. */
 .live-rail { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 10px; min-width: 0; min-height: 0; }
-.live-rail > .live-panel:first-of-type { order: 1; }
-.live-rail > .live-panel:last-of-type { order: 2; }
-.rail-case .live-rail > .live-panel:first-of-type { order: 2; }
-.rail-case .live-rail > .live-panel:last-of-type { order: 1; }
 .live-console { display: grid; gap: 16px; align-content: start; min-height: 0; }
 /* Foldable panels. `summary` is the control, so it carries the panel head's
    look and stays clickable; the marker is hidden because the caret is not

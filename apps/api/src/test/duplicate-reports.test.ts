@@ -151,6 +151,16 @@ describe('recognising a report the customer has already made', () => {
     expect(otherAmount.statusCode).toBe(201);
   });
 
+  it('does not suppress the same words when they refer to a different order', async () => {
+    const message = 'The item arrived damaged and I want a refund.';
+    const first = await send(message, LAMP_ORDER);
+    const second = await send(message, HEADPHONE_ORDER);
+
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    expect(second.json<CreatedResponse>().request.orderId).toBe(HEADPHONE_ORDER);
+  });
+
   it('writes the suppressed attempt to the audit chain', async () => {
     const { request: original } = (await send(MESSAGE)).json<CreatedResponse>();
     await send(MESSAGE);

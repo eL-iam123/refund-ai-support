@@ -75,10 +75,11 @@ export function LiveConversationsPage(): ReactNode {
       <h1 className="sr-only">Live</h1>
       <div className={`live-layout ${selected === null ? 'rail-queue' : 'rail-case'}`}>
         <AnalyticsStrip analytics={analytics} />
-        <Rail
+<Rail
           conversations={conversations}
           selected={selected}
           onSelect={toggleCase}
+          onClose={() => setSelected(null)}
           detail={caseFile.data}
           error={caseFile.error}
         />
@@ -125,54 +126,47 @@ function Rail({
   conversations,
   selected,
   onSelect,
+  onClose,
   detail,
   error,
 }: {
   conversations: { readonly data: readonly StaffConversation[] | null; readonly error: string | null };
   selected: StaffConversation | null;
   onSelect: (row: StaffConversation) => void;
+  onClose: () => void;
   detail: CaseDetail | null;
   error: string | null;
 }): ReactNode {
+  // The case file does not exist until a conversation is open. There is no
+  // "closed" state for it to sit in - an empty case file is not something an
+  // agent needs to look at, so it is not rendered at all.
+  if (selected === null || detail === null) {
+    return (
+      <aside className="live-rail">
+        <ConversationList
+          conversations={conversations}
+          selected={selected}
+          onSelect={onSelect}
+          active
+        />
+      </aside>
+    );
+  }
   return (
+    // With a case open the panels swap: the case file takes the rail's top slot
+    // and the queue becomes the tab beneath it. They are in this order in the
+    // markup, so the open panel is always first with no ordering rules.
     <aside className="live-rail">
+      <CaseBrief brief={detail.brief} />
       <ConversationList
         conversations={conversations}
         selected={selected}
         onSelect={onSelect}
-        active={selected === null}
+        onClose={onClose}
+        active={false}
       />
       {error !== null ? <p className="error">{error}</p> : null}
-      <CaseBrief brief={detail?.brief ?? null} active={selected !== null} />
     </aside>
-  );
-}
-
-/**
- * One rail tab.
- *
- * Both panels use this, so their headers are the same height and the same
- * structure by construction rather than by two rules happening to agree - they
- * were built from `.panel-head` and a bespoke `.case-brief-summary`, which
- * drifted apart in height and padding.
- */
-function RailTab({
-  icon,
-  title,
-  note,
-}: {
-  icon: ReactNode;
-  title: string;
-  note: string;
-}): ReactNode {
-  return (
-    <summary className="rail-tab">
-      <span className="rail-tab-title">
-        {icon}
-        {title}
-      </span>
-      <span className="rail-tab-note">{note}</span>
-    </summary>
   );
 }
 
@@ -198,10 +192,10 @@ function ConsoleBody({
       // this is the only moment it is true, and it tells the agent what the
       // console is for at the moment they are deciding what to do with it.
       <div className="console-empty">
-        <h2>No conversation open</h2>
+        <h2>No support conversation open</h2>
         <p>
-          Pick a conversation from the queue to read the case. If a colleague has already taken it
-          over, you can answer the customer yourself.
+          Pick a case from the queue to review the customer issue, the assistant's notes, and the
+          policy outcome before responding or taking over.
         </p>
       </div>
     );
@@ -294,19 +288,45 @@ function ConversationList({
   selected,
   onSelect,
   active,
+  onClose,
 }: {
   conversations: { readonly data: readonly StaffConversation[] | null; readonly error: string | null };
   selected: StaffConversation | null;
   onSelect: (row: StaffConversation) => void;
   active: boolean;
+  onClose?: () => void;
 }): ReactNode {
+  const title = (
+    <span className="rail-tab-title">
+      <MessageSquare size={14} aria-hidden="true" /> Conversations
+    </span>
+  );
+  const note = conversations.data === null ? '' : `${conversations.data.length} open`;
+
+  if (!active) {
+    /*
+      Minimised, the queue is a plain button and not a disclosure. As a
+      `<details>` its own summary would expand the list on click while the case
+      file stayed open, putting both on screen - the exact thing this rail is
+      built to prevent. One control, one effect: put the case down and bring the
+      queue back up.
+    */
+    return (
+      <div className="live-panel live-panel-tab">
+        <button type="button" className="rail-tab rail-tab-button" onClick={onClose}>
+          {title}
+          <span className="rail-tab-note">{note}</span>
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <details className="live-panel panel" open={active}>
-      <RailTab
-        icon={<MessageSquare size={14} aria-hidden="true" />}
-        title="Conversations"
-        note={conversations.data === null ? '' : `${conversations.data.length} open`}
-      />
+    <details className="live-panel panel" open>
+      <summary className="rail-tab">
+        {title}
+        <span className="rail-tab-note">{note}</span>
+      </summary>
       <div className="panel-body">
         {conversations.error !== null ? <p className="error">{conversations.error}</p> : null}
         {renderRows(conversations.data, selected, onSelect)}
@@ -493,23 +513,22 @@ function CaseHead({
  * defaulting it open meant every reply started with a wall of `pass` before the
  * customer's actual problem.
  */
-function CaseBrief({ brief, active }: { brief: HandoffBrief | null; active: boolean }): ReactNode {
+function CaseBrief({ brief }: { brief: HandoffBrief }): ReactNode {
   return (
-    <details className="live-panel case-brief" open={active && brief !== null}>
-      <RailTab
-        icon={<FileText size={14} aria-hidden="true" />}
-        title="Case file"
-        note={brief === null ? 'Nothing open' : brief.customerName}
-      />
-      {brief === null ? null : (
-        <div className="panel-body">
-          <RiskFlags brief={brief} />
-          <div className="case-columns">
-            <WordsColumn brief={brief} />
-            <EvidenceColumn brief={brief} />
-          </div>
+    <details className="live-panel case-brief" open>
+      <summary className="rail-tab">
+        <span className="rail-tab-title">
+          <FileText size={14} aria-hidden="true" /> Case file
+        </span>
+        <span className="rail-tab-note">{brief.customerName}</span>
+      </summary>
+      <div className="panel-body">
+        <RiskFlags brief={brief} />
+        <div className="case-columns">
+          <WordsColumn brief={brief} />
+          <EvidenceColumn brief={brief} />
         </div>
-      )}
+      </div>
     </details>
   );
 }

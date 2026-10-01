@@ -203,6 +203,11 @@ describe('staff authorization', () => {
       expect(response.statusCode).toBe(200);
     });
 
+    it('keeps scenario fixtures behind staff authentication', async () => {
+      const response = await call('GET', '/api/scenarios');
+      expect(response.statusCode).toBe(401);
+    });
+
     it('allows the customer chat endpoint with a valid session', async () => {
       const fixture = scenario('S-01');
       const response = await harness.app.inject({

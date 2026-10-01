@@ -155,7 +155,7 @@ function firstCookie(response: LightMyRequestResponse): string {
  * again - this writes the account row and mints the session directly, so the
  * thing under test stays "can this customer post as themselves".
  */
-export async function sessionFor(h: AppHarness, customerId: string): Promise<string> {
+export function sessionFor(h: AppHarness, customerId: string): Promise<string> {
   const customer = h.db.prepare('SELECT id, name, email FROM customers WHERE id = ?').get(customerId) as
     | { id: string; name: string; email: string }
     | undefined;
@@ -163,7 +163,7 @@ export async function sessionFor(h: AppHarness, customerId: string): Promise<str
     throw new Error(`no seeded customer with id ${customerId}`);
   }
 
-  return `${SESSION_COOKIE}=${startSession(h.db, accountFor(h, customer), TEST_NOW).token}`;
+  return Promise.resolve(`${SESSION_COOKIE}=${startSession(h.db, accountFor(h, customer), TEST_NOW).token}`);
 }
 
 /**

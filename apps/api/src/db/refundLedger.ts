@@ -67,6 +67,14 @@ export class RefundLedgerError extends Error {
   }
 }
 
+/** The order no longer has enough uncommitted balance for this reservation. */
+export class RefundBalanceExceededError extends RefundLedgerError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RefundBalanceExceededError';
+  }
+}
+
 const COLUMNS = `
   id, request_id, order_id, customer_id, amount_cents, currency, status,
   idempotency_key, created_at, verified_by, verified_at, settled_at,
@@ -127,31 +135,38 @@ export interface AuthoriseInput {
  * row unchanged, so a caller can treat this as "ensure authorised".
  */
 export function authoriseRefund(db: Db, input: AuthoriseInput): RefundRecord {
-  if (input.amountCents <= 0) {
+  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
     // Only money is reserved. An approval of $0 is a decision, not a payment.
-    throw new RefundLedgerError(`refund authorisation must be for a positive amount, got ${input.amountCents}`);
+    throw new RefundLedgerError(`refund authorisation must be for a positive whole-cent amount, got ${input.amountCents}`);
   }
 
-  const existing = findRefundByRequestId(db, input.requestId);
-  if (existing !== null) {
-    // Released means the approval that created it was undone. If the decision is
-    // approved again, the reservation is correct again, and the same
-    // idempotency key has to come back with it - it identifies the authorisation
-    // of this request, not a particular attempt at it.
-    if (existing.status !== 'released') {
-      return existing;
+  return db.transaction((): RefundRecord => {
+    const existing = findRefundByRequestId(db, input.requestId);
+    if (existing !== null) {
+      if (
+        existing.orderId !== input.orderId ||
+        existing.customerId !== input.customerId ||
+        existing.amountCents !== input.amountCents
+      ) {
+        throw new RefundLedgerError(`refund request ${input.requestId} was reused with different authorisation details`);
+      }
+      // Released means the approval that created it was undone. If the decision
+      // is approved again, reserve the balance again, but never past what remains.
+      if (existing.status !== 'released') {
+        return existing;
+      }
+      assertRefundableBalance(db, input);
+      reopenReleased(db, existing.id);
+      const reopened = findRefundById(db, existing.id);
+      if (reopened === null) {
+        throw new RefundLedgerError(`refund ${existing.id} vanished while being reopened`);
+      }
+      return reopened;
     }
-    reopenReleased(db, existing.id);
-    const reopened = findRefundById(db, existing.id);
-    if (reopened === null) {
-      throw new RefundLedgerError(`refund ${existing.id} vanished while being reopened`);
-    }
-    return reopened;
-  }
 
-  const id = `RFD-${randomUUID()}`;
-  const createdAt = input.now.toISOString();
-  try {
+    assertRefundableBalance(db, input);
+    const id = `RFD-${randomUUID()}`;
+    const createdAt = input.now.toISOString();
     db.prepare(
       `INSERT INTO refunds (
          id, request_id, order_id, customer_id, amount_cents, currency, status,
@@ -167,21 +182,37 @@ export function authoriseRefund(db: Db, input: AuthoriseInput): RefundRecord {
       idempotencyKeyFor(input.requestId, input.orderId, input.amountCents),
       createdAt,
     );
-  } catch (error) {
-    // A concurrent writer beat us to it. The other row is equally valid, so read
-    // it back rather than failing a request that has already been decided.
-    const raced = findRefundByRequestId(db, input.requestId);
-    if (raced !== null) {
-      return raced;
+
+    const created = findRefundById(db, id);
+    if (created === null) {
+      throw new RefundLedgerError(`refund ${id} vanished immediately after insert`);
     }
-    throw error;
+    return created;
+  })();
+}
+
+/** Enforces the balance at the write boundary, including legacy settled money. */
+function assertRefundableBalance(db: Db, input: AuthoriseInput): void {
+  const order = db
+    .prepare(
+      `SELECT o.customer_id, o.refunded_cents,
+              COALESCE(SUM(i.unit_price_cents * i.quantity), 0) AS total_cents
+         FROM orders o LEFT JOIN order_items i ON i.order_id = o.id
+        WHERE o.id = ? GROUP BY o.id`,
+    )
+    .get(input.orderId) as { customer_id: string; refunded_cents: number; total_cents: number } | undefined;
+  if (order === undefined || order.customer_id !== input.customerId) {
+    throw new RefundLedgerError(`order ${input.orderId} does not belong to customer ${input.customerId}`);
   }
 
-  const created = findRefundById(db, id);
-  if (created === null) {
-    throw new RefundLedgerError(`refund ${id} vanished immediately after insert`);
+  const settled = Math.max(order.refunded_cents, settledCentsForOrder(db, input.orderId));
+  const pending = pendingCentsForOrder(db, input.orderId);
+  const remaining = order.total_cents - settled - pending;
+  if (input.amountCents > remaining) {
+    throw new RefundBalanceExceededError(
+      `cannot reserve ${input.amountCents} cents: order ${input.orderId} has only ${Math.max(0, remaining)} cents remaining`,
+    );
   }
-  return created;
 }
 
 /**
@@ -283,15 +314,25 @@ export function settleRefund(db: Db, id: string, agentId: string, now: Date): Re
       );
     }
 
-    const orderTotal = db
-      .prepare('SELECT COALESCE(SUM(unit_price_cents * quantity), 0) AS total FROM order_items WHERE order_id = ?')
-      .get(refund.orderId) as { total: number };
-    const already = settledCentsForOrder(db, refund.orderId);
+    const order = db
+      .prepare(
+        `SELECT o.refunded_cents,
+                COALESCE(SUM(i.unit_price_cents * i.quantity), 0) AS total
+           FROM orders o LEFT JOIN order_items i ON i.order_id = o.id
+          WHERE o.id = ? GROUP BY o.id`,
+      )
+      .get(refund.orderId) as { refunded_cents: number; total: number } | undefined;
+    if (order === undefined) {
+      throw new RefundLedgerError(`order ${refund.orderId} no longer exists`);
+    }
+    // Preserve money settled before the ledger existed. The order column and
+    // ledger are two views of settled refunds; take the larger, never their sum.
+    const already = Math.max(order.refunded_cents, settledCentsForOrder(db, refund.orderId));
 
-    if (already + refund.amountCents > orderTotal.total) {
+    if (already + refund.amountCents > order.total) {
       throw new RefundLedgerError(
         `settling ${refund.amountCents} cents would take this order to ${already + refund.amountCents} of ` +
-          `${orderTotal.total} cents refunded, which is more than was paid`,
+          `${order.total} cents refunded, which is more than was paid`,
       );
     }
 

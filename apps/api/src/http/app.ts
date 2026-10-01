@@ -71,9 +71,19 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
   const hub = registerWebSockets(app, ctx);
 
+  // The plugin's global mode only instruments routes present when its onRoute
+  // hook is installed. Routes are registered below, so we use its explicit
+  // handler from a root onRequest hook instead of silently leaving those routes
+  // outside its encapsulated registration scope.
   void app.register(rateLimit, {
+    global: false,
     max: options.env.RATE_LIMIT_MAX,
     timeWindow: options.env.RATE_LIMIT_WINDOW,
+  });
+  let enforceRateLimit: ReturnType<typeof app.rateLimit> | null = null;
+  app.addHook('onRequest', (request, reply) => {
+    enforceRateLimit ??= app.rateLimit.call(app);
+    return enforceRateLimit.call(app, request, reply);
   });
 
   app.setErrorHandler((error, request, reply) => {

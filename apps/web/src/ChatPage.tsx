@@ -50,7 +50,7 @@ export function ChatPage(): ReactNode {
   return (
     <div className="chat-layout">
       <aside className="chat-context">
-        <h1>Get help</h1>
+        <h1>Get help with this order</h1>
         <OrderScope
           orders={orderList}
           loading={orders.data === null && orders.error === null}
@@ -343,7 +343,7 @@ function complaintFor(issue: string | null): string {
   return reasonFor(issue)?.complaint ?? '';
 }
 
-const GREETING = "Tell me what went wrong and I'll check what the refund policy allows.";
+const GREETING = "Tell me what went wrong with this order and I'll check what the refund policy allows.";
 
 function Greeting({ onPick }: { onPick: (text: string) => void }): ReactNode {
   return (
@@ -395,8 +395,8 @@ function AssistantStatus(): ReactNode {
       </p>
       <p className="small">{aiNote}</p>
       <p className="small">
-        Nothing is broken while this is the case: every answer still comes from the written policy,
-        and anything that needs a claim goes to a person for review.
+        The written policy still handles the case, and any request that needs a refund decision is
+        sent to a person for review instead of being guessed by a model.
       </p>
     </div>
   );

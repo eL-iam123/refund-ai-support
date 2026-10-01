@@ -80,11 +80,9 @@ const EnvSchema = z.object({
    * boot cannot queue the requests for a person, and "needs a human" is the only
    * outcome a missing model is allowed to produce.
    *
-   * `local` is the deliberate version of the same idea: a pattern matcher, named
-   * as one, for running the product and its test scenarios with no credentials.
-   * It is refused in production below, so it cannot be the accidental answer to
-   * a forgotten key - an absent key degrades to *no claims*, never to *weaker
-   * claims that still look like a model read*.
+  * `local` is an explicit development-only pattern matcher. An absent provider
+  * and absent key instead resolve to an unavailable analyzer, so the product
+  * reports the missing model and escalates rather than making heuristic claims.
    */
   AI_PROVIDER: z.enum(['groq', 'openrouter', 'openai', 'nvidia', 'gemini', 'anthropic', 'local']).optional(),
   /**
@@ -475,10 +473,9 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
  * model at all and reports nothing. A refusal naming the problem at boot is
  * better than either, and a key that identifies itself cannot cause it.
  *
- * With no key and no provider there is nothing to be had, so the answer is
- * `local` - the named pattern matcher - and requests escalate. That is the
- * one-command demo, and production refuses `local` outright, so it can never be
- * the accidental answer to a forgotten key.
+ * With no key and no provider, choose a real provider preset without credentials.
+ * `createAnalyzer` then produces an unavailable analyzer; it does not silently
+ * turn a missing key into heuristic claim extraction.
  */
 function resolveProvider(parsed: z.infer<typeof EnvSchema>): Env {
   if (parsed.AI_PROVIDER !== undefined) {
@@ -499,7 +496,7 @@ function resolveProvider(parsed: z.infer<typeof EnvSchema>): Env {
     );
   }
 
-  return { ...parsed, AI_PROVIDER: 'local' };
+  return { ...parsed, AI_PROVIDER: 'openai' };
 }
 
 /** The prefixes `providerFromKey` recognises, in one place for the error above. */

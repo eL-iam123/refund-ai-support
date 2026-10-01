@@ -61,16 +61,16 @@ function Overview({ stats }: { stats: AdminStatsDto }): ReactNode {
     <>
       <section className="console-intro">
         <div>
-          <p className="eyebrow">Operations workspace</p>
+          <p className="eyebrow">Refund support operations</p>
           <h1>Overview</h1>
-          <p className="lede">A clear view of queue health, resolution outcomes, and policy controls.</p>
+          <p className="lede">Review customer issues, monitor escalations, and keep policy decisions lined up with the written rules.</p>
         </div>
-        <span className="console-status"><span aria-hidden="true" />Resolver online</span>
+        <span className="console-status"><span aria-hidden="true" />Support resolver online</span>
       </section>
-      <Panel title="Queue health" action={<Link className="panel-action" to="/admin/requests?decision=escalated">Open review queue</Link>}>
+      <Panel title="Support queue health" action={<Link className="panel-action" to="/admin/requests?decision=escalated">Review escalated cases</Link>}>
         <div className="tiles tiles-primary">
           <Tile
-            label="Needs review"
+            label="Escalated"
             value={String(stats.byDecision.escalated ?? 0)}
             tone="escalated"
             to="/admin/requests?decision=escalated"

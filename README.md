@@ -13,7 +13,13 @@ refund button. See [ADR 0001](docs/adr/0001-resolver-is-sole-authority.md).
 
 ## What it does
 
-- **Customer chat** — a real chat UI; the customer's message is the only input
+This project is intentionally a support assistant for a customer's own orders, not a
+broad shopping concierge. The assistant is scoped to the problem a customer is
+reporting about an order: damaged items, incorrect deliveries, refund questions,
+policy explanations, and escalation to a human when the issue needs review.
+
+- **Customer support chat** — a real chat UI scoped to the signed-in shopper and
+  their own orders; the customer's message is the only claim input
 - **Grounded extraction** — a model classifies the reason and quotes the customer;
   every quote is verified as a verbatim substring of their message
 - **17-rule policy engine** — windows, final sale, digital goods, payment state,
@@ -35,6 +41,31 @@ refund button. See [ADR 0001](docs/adr/0001-resolver-is-sole-authority.md).
   average takeover duration; rendered as a metrics strip on the Live page
 - **Conformance suite** — 18 scenarios pinning the behaviour, including the
   documented attack that the injection scanner is designed to miss
+
+### Scope boundary
+
+This assistant is intentionally not a general shopping adviser. It is not built to
+answer broad product-discovery questions, make lifestyle recommendations, or act as
+an all-purpose storefront concierge. The product's strongest value is order-aware
+support: helping someone explain an issue, decide whether the written policy allows
+money back, and hand off to a human when the problem needs a person.
+
+That boundary is deliberate. A broad shopping assistant would blur the trust model
+between product recommendations, order facts, and refund policy, and this project's
+core design constraint is that the policy engine owns money decisions.
+
+### Support operations boundary
+
+The admin backend is scoped to refund support operations, not general storefront
+administration. Staff pages review live customer issues, open handoffs, appeal
+status, override decisions, and policy-driven payment approvals. They are not a
+catalogue management console, a marketing dashboard, or a general commerce
+command center.
+
+This separation matters. The admin console exists to review and resolve customer
+problems at the policy boundary, not to manage the whole store. The shop and the
+staff console therefore share the same domain model and the same trust rules: the
+policy engine owns the decision, and a person only reviews or overrides it.
 
 ## Quick start
 
@@ -74,14 +105,14 @@ at, because the only available guess is a vendor you never named. Set
 `AI_PROVIDER` explicitly for a self-hosted or OpenAI-compatible endpoint, and
 `AI_BASE_URL` alongside it.
 
-`AI_PROVIDER=local` runs the pattern matcher with no network at all — the named
-version of "no model", and refused when `NODE_ENV=production`. It is also what
-an empty configuration resolves to, so a deployment with no key at all is
-visibly running a pattern matcher rather than quietly dialling a provider.
+`AI_PROVIDER=local` explicitly runs the development pattern matcher with no
+network, and is refused when `NODE_ENV=production`. It is never selected
+implicitly: an empty provider/key configuration reports the model as unavailable
+and escalates claims rather than silently running heuristics.
 
 **No key is needed to run the product.** With no key the server starts, reports
-the model as unavailable on the staff dashboard, and every request that would
-need a claim escalates to a human. A missing model is a degraded queue, which is
+the model as unavailable on the staff dashboard and storefront, and every
+request that would need a claim escalates to a human. A missing model is a degraded queue, which is
 recoverable; a service that refuses to boot has no queue at all. Set
 `AI_REQUIRED=true` for a deployment that must not run that way — see
 [Configuration](#configuration).
@@ -111,18 +142,19 @@ NODE_ENV=production ADMIN_USERNAME=ops \
 
 ### Without Docker
 
-Requires Node 20+ and pnpm.
+Requires Node 22+ and pnpm.
 
 ```bash
 pnpm install
 cp .env.example .env        # then add a provider key
 pnpm seed                   # 18 scenario fixtures, dated relative to now
-pnpm dev                    # API :4000, staff console :5173, shop :5174
+pnpm dev                    # API :4000 and the combined shop/staff client :5173
 ```
 
-Open http://localhost:5173. The customer view is `/`; the agent console is
-`/admin`; the storefront is http://localhost:5174/shop/ (and, in a production
-build, the same origin at `/shop`).
+Open http://localhost:5173. The storefront/customer view is `/`; the staff
+console is `/admin`. Both use the same Vite client and API proxy during
+development; in production the API serves that same built client from one
+origin.
 
 The staff console needs `ADMIN_USERNAME` and `ADMIN_PASSWORD` in `.env`; without
 them `/admin` does not exist. Set them, restart, and sign in at `/admin` with that
@@ -406,7 +438,7 @@ Nothing else needs setting to run. Every variable below has a default.
 | `INJECTION_ACTION` | `deny` | `deny` \| `escalate`. What a detected policy-override attempt does |
 | `MAX_MESSAGE_LENGTH` | `4000` | Enforced on the request, not by the shared schema — it is a token-cost control, so it belongs to the deployment |
 | `DUPLICATE_WINDOW_HOURS` | `72` | How far back a repeat of the same complaint counts as the same report. 72h spans a weekend, which is the commonest case: sent Friday, heard nothing, sent again Monday |
-| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW` | `30` / `1 minute` | |
+| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW` | `30` / `1 minute` | Applied across HTTP routes, including health and authentication endpoints; the in-memory limiter is per process |
 | `DATABASE_PATH` | `./data/refund.sqlite` | |
 | `CORS_ORIGIN` | localhost:5173,8080 | Comma-separated |
 | `API_PORT` / `API_HOST` / `LOG_LEVEL` / `NODE_ENV` | `4000` / `0.0.0.0` / `info` / `development` | |
@@ -449,10 +481,11 @@ round trip rather than correctness — but there is no reason to pay it.
 Budget for seconds, not milliseconds. A real generation here is ~11s, which is why
 `AI_TOTAL_BUDGET_MS` sits above the worst observed call.
 
-To see the model working without an account, set `AI_PROVIDER=local`. That is a
-pattern matcher with no key and no network: it exists so the project can be
-demonstrated with nothing configured, and it is refused when `NODE_ENV=production`,
-because a refund approved by a regex is not a decision anyone can audit.
+To exercise the heuristic analyzer without an account, explicitly set
+`AI_PROVIDER=local` in development. That is a pattern matcher with no key and no
+network; it is refused when `NODE_ENV=production`, because a refund approved by
+a regex is not a decision anyone can audit. Leaving the provider and key unset
+does not activate it: the unavailable analyzer escalates requests instead.
 
 ### `AI_SHARE_ORDER_FACTS`
 
@@ -496,9 +529,9 @@ human instead. Neither setting can approve anything.
 | Method | Path | |
 |---|---|---|
 | `GET` | `/api/health` | status and the active AI mode |
-| `POST` | `/api/chat/messages` | the pipeline; returns decision, trace, extraction, grounding |
+| `POST` | `/api/chat/messages` | signed-in customer support pipeline; session-scoped customer, returns decision, trace, extraction, grounding |
 | `GET` | `/api/policy` | the live rule table, built from the enforcing objects |
-| `GET` | `/api/scenarios` | the 18 conformance fixtures |
+| `GET` | `/api/scenarios` | the 18 conformance fixtures, staff only |
 | `GET` | `/api/customers`, `/api/customers/:id/orders` | seeded fixtures, staff only |
 | `GET` | `/api/requests`, `/api/requests/:id` | audit history, staff only |
 | `POST` | `/api/requests/:id/override` | human override, admin only, with a required reason |
@@ -656,9 +689,11 @@ the policy and the assistant are untouched by it.
 Beyond that, a staff route needs a valid credential: missing, malformed, forged
 and expired ones all get `401`, and an agent credential on an admin-only route
 gets `403`. Roles are `agent` (read requests, read catalogue and stats) and
-`admin` (plus override). `GET /api/health`, `GET /api/policy`,
-`GET /api/scenarios` and `POST /api/chat/messages` are deliberately public so a
-customer can reach the assistant and read the policy without an account.
+`admin` (plus override). `GET /api/health`, `GET /api/policy` and the public
+catalogue are unauthenticated. `GET /api/scenarios` is staff-only because the
+fixtures expose internal test customers, orders, and expected decisions.
+`POST /api/chat/messages` requires a signed-in shopper session; the session, not
+the request body, determines the customer identity.
 
 **How you get one.** A browser signs in at `POST /api/admin/login` with the
 username and password from the environment and gets an httpOnly `SameSite=Lax`

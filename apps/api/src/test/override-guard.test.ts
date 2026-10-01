@@ -57,9 +57,15 @@ describe('hard block detection', () => {
   });
 
   it('covers every money and integrity rule it claims to', () => {
-    for (const ruleId of ['R-01', 'R-02', 'R-05', 'R-06', 'R-14'] as const) {
+    for (const ruleId of ['R-01', 'R-02', 'R-05', 'R-06', 'R-06b', 'R-14'] as const) {
       expect(hardBlockRuleIds([evaluation(ruleId, 'deny')])).toEqual([ruleId]);
     }
+  });
+
+  it('requires acknowledgement before overriding R-06b refundable-balance denial', () => {
+    const trace = [evaluation('R-06b', 'deny')];
+    expect(checkOverride(attempt({ trace }))?.kind).toBe('needs_acknowledgement');
+    expect(checkOverride(attempt({ trace, acknowledged: true }))).toBeNull();
   });
 });
 

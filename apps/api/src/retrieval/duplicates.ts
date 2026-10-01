@@ -50,12 +50,13 @@ export interface DuplicateReport {
 export function findDuplicateReport(
   db: Db,
   customerId: string,
+  orderId: string | null,
   message: string,
   now: Date,
   windowHours: number,
 ): DuplicateReport | null {
   const since = new Date(now.getTime() - windowHours * 60 * 60 * 1000).toISOString();
-  const matches = findDuplicateRequests(db, customerId, messageFingerprint(message), since, MAX_MATCHES);
+  const matches = findDuplicateRequests(db, customerId, orderId, messageFingerprint(message), since, MAX_MATCHES);
   // `findDuplicateRequests` returns newest-first for the admin listing, so the
   // original is the last of them. The length check above proves the index is in
   // range; the guard is here because the array type cannot say so.

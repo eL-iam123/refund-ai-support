@@ -76,6 +76,14 @@ function envWith(overrides: Record<string, string>): Env {
 }
 
 describe('choosing an analyzer', () => {
+  it('does not select the heuristic analyzer when no provider or key is configured', () => {
+    const analyzer = createAnalyzer(envWith({}));
+
+    expect(analyzer.label).toBe('unconfigured');
+    expect(analyzer.available).toBe(false);
+    expect(analyzer.unavailableReason).toMatch(/AI_API_KEY is not set/);
+  });
+
   it('builds the OpenAI-compatible client for the providers that expose one', () => {
     // Groq, OpenRouter, OpenAI, NVIDIA and Google all serve the same
     // chat-completions shape, so they are configuration rather than subclasses.

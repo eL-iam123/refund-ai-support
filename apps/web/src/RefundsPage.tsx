@@ -19,8 +19,9 @@ import { formatCents } from './format';
  * would make the unreviewed path as easy to take as the reviewed one.
  */
 export function RefundsPage(): ReactNode {
+  const [version, setVersion] = useState(0);
   const load = useCallback(async () => (await api.pendingRefunds()).refunds, []);
-  const state = useAsyncData(load, 'refunds');
+  const state = useAsyncData(load, `refunds:${version}`);
 
   if (state.status === 'error') {
     return <ErrorNote error={state.error} />;
@@ -28,10 +29,10 @@ export function RefundsPage(): ReactNode {
   if (state.status === 'loading') {
     return <Loading label="Loading the queue…" />;
   }
-  return <Queue refunds={state.value} />;
+  return <Queue refunds={state.value} onChanged={() => setVersion((current) => current + 1)} />;
 }
 
-function Queue({ refunds }: { refunds: RefundDto[] }): ReactNode {
+function Queue({ refunds, onChanged }: { refunds: RefundDto[]; onChanged: () => void }): ReactNode {
   if (refunds.length === 0) {
     return (
       <Panel title="Awaiting verification">
@@ -66,7 +67,7 @@ function Queue({ refunds }: { refunds: RefundDto[] }): ReactNode {
         </thead>
         <tbody>
           {refunds.map((refund) => (
-            <Row key={refund.id} refund={refund} />
+            <Row key={refund.id} refund={refund} onChanged={onChanged} />
           ))}
         </tbody>
       </table>
@@ -85,7 +86,7 @@ interface RowState {
 
 const INITIAL: RowState = { reason: '', busy: null, error: '', done: '' };
 
-function useRowAction(refund: RefundDto): {
+function useRowAction(refund: RefundDto, onChanged: () => void): {
   state: RowState;
   setReason: (next: string) => void;
   act: (action: Action) => Promise<void>;
@@ -107,6 +108,7 @@ function useRowAction(refund: RefundDto): {
         await api.releaseRefund(id, state.reason.trim());
         setState({ ...state, busy: null, error: '', done: 'Reservation released. The order is claimable again.' });
       }
+      onChanged();
     } catch (cause: unknown) {
       setState({ ...state, busy: null, error: describe(cause), done: '' });
     }
@@ -115,8 +117,8 @@ function useRowAction(refund: RefundDto): {
   return { state, setReason: (next: string) => setState({ ...state, reason: next }), act };
 }
 
-function Row({ refund }: { refund: RefundDto }): ReactNode {
-  const { state, setReason, act } = useRowAction(refund);
+function Row({ refund, onChanged }: { refund: RefundDto; onChanged: () => void }): ReactNode {
+  const { state, setReason, act } = useRowAction(refund, onChanged);
 
   return (
     <tr>

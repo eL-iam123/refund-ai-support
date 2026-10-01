@@ -108,16 +108,14 @@ describe('a process that requires a model refuses to start without one', () => {
     // two that break a default `docker compose up`, and they break it as a crash
     // loop with an enum error that reads like a config mistake.
     //
-    // With both empty there is no provider and no key, so the resolved answer is
-    // `local`: the named pattern matcher. That used to fall back to a vendor
-    // nobody asked for, which meant an empty configuration reported a missing
-    // Groq key - sending whoever was setting the stack up to a company they had
-    // no account with.
+    // With both empty there is no configured model. The resolved provider name
+    // is only a placeholder for the unavailable analyzer; it must not activate
+    // the local heuristic matcher implicitly.
     process.env.NODE_ENV = 'development';
     delete process.env.AI_REQUIRED;
     process.env.AI_PROVIDER = '';
     process.env.AI_API_KEY = '';
-    expect(readEnv(NO_FILE).AI_PROVIDER).toBe('local');
+    expect(readEnv(NO_FILE).AI_PROVIDER).toBe('openai');
   });
 
   it('treats an empty AI_REQUIRED as unset, not as invalid', () => {

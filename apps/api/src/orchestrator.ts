@@ -184,7 +184,7 @@ export async function processRefundRequest(
       : `${gates.blockedItems.length} item(s) excluded, ${formatCents(gates.eligibleAmountCents)} eligible`,
   );
 
-  const analysis = await analyseClaim(db, deps, input, gates, retrieval.order, observer, log);
+  const analysis = await analyseRequest(db, deps, input, gates, retrieval, intake, observer, log);
   if (analysis.outcome === 'question') {
     return askedResult(analysis.question, retrieval.order, intake, true, mode, log);
   }
@@ -225,6 +225,28 @@ export async function processRefundRequest(
     timings: log.all(),
     resolvedOrderId: retrieval.order?.id ?? null,
   };
+}
+
+function analyseRequest(
+  db: Db,
+  deps: PipelineDeps,
+  input: ProcessInput,
+  gates: GateResult,
+  retrieval: Retrieval,
+  intake: Intake,
+  observer: AttemptObserver,
+  log: StageLog,
+): Promise<AnalyseOutcome> {
+  return analyseClaim(
+    db,
+    deps,
+    input,
+    gates,
+    retrieval.order,
+    intake.injection.detected,
+    observer,
+    log,
+  );
 }
 
 /**
@@ -411,6 +433,7 @@ async function analyseClaim(
   input: ProcessInput,
   gates: GateResult,
   order: OrderRecord | null,
+  injectionDetected: boolean,
   observer: AttemptObserver,
   log: StageLog,
 ): Promise<AnalyseOutcome> {
@@ -449,6 +472,14 @@ async function analyseClaim(
   }
 
   if (reply.kind === 'question') {
+    // A flagged message cannot leave through the question branch: doing so
+    // would let model-authored text bypass R-14's denial/escalation entirely.
+    // Discard the model response and continue with no claim so the resolver
+    // records the configured integrity outcome.
+    if (injectionDetected) {
+      log.record('ai_analysis', 'discarded model question after an injection signal');
+      return NO_ANALYSIS;
+    }
     return respondToQuestion(reply, order, history, log);
   }
 
