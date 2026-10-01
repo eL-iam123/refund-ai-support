@@ -10,6 +10,7 @@ import {
   Package,
   ShieldCheck,
   ShoppingBag,
+  Search,
   ShoppingCart,
   User,
   Wallet,
@@ -38,21 +39,25 @@ import { cartCount, subscribeToCart } from './shop/cartStore';
 export function ShopperLayout(): ReactNode {
   const count = useCartCount();
   return (
-    <div className="app">
+    <div className="app shopper-app">
       <header className="topbar">
-        <div className="brand">
+        <NavLink className="brand" to="/" aria-label="Refund Store home">
           <span className="brand-mark">R</span>
           <div>
             Refund Store
-            <small>the policy decides; the model only explains</small>
+            <small>everyday finds, clearly handled</small>
           </div>
+        </NavLink>
+        <div className="shop-search" role="search">
+          <Search size={18} aria-hidden="true" />
+          <span>What are you looking for?</span>
         </div>
         <nav>
-          <NavLink to="/"><ShoppingBag size={16} /> Shop</NavLink>
-          <NavLink to="/cart"><ShoppingCart size={16} /> Cart{count > 0 ? ` (${count})` : ''}</NavLink>
-          <NavLink to="/orders"><Package size={16} /> Orders</NavLink>
-          <NavLink to="/help"><MessageSquare size={16} /> Get help</NavLink>
-          <NavLink to="/account"><User size={16} /> Account</NavLink>
+          <NavLink to="/"><ShoppingBag size={18} aria-hidden="true" /><span>Shop</span></NavLink>
+          <NavLink to="/orders"><Package size={18} aria-hidden="true" /><span>Orders</span></NavLink>
+          <NavLink to="/help"><MessageSquare size={18} aria-hidden="true" /><span>Help</span></NavLink>
+          <NavLink to="/account"><User size={18} aria-hidden="true" /><span>Account</span></NavLink>
+          <NavLink to="/cart" className="cart-link"><ShoppingCart size={18} aria-hidden="true" /><span>Cart</span>{count > 0 && <b>{count}</b>}</NavLink>
         </nav>
       </header>
       <main className="main">
@@ -70,17 +75,17 @@ export function ShopperLayout(): ReactNode {
 export function AdminLayout(): ReactNode {
   const signedIn = useStaffSession();
   return (
-    <div className="app">
+    <div className="app admin-app">
       <header className="topbar topbar-admin">
         <div className="brand">
           <span className="brand-mark">R</span>
           <div>
-            Refund review
-            <small>every decision, and the reasoning behind it</small>
+            Refund Console
+            <small>operations</small>
           </div>
         </div>
         <nav>
-          <NavLink to="/admin"><LayoutDashboard size={16} /> Queue</NavLink>
+          <NavLink to="/admin" end><LayoutDashboard size={16} /> Overview</NavLink>
           <NavLink to="/admin/live"><Headset size={16} /> Live</NavLink>
           <NavLink to="/admin/refunds"><Wallet size={16} /> Payouts</NavLink>
           <NavLink to="/admin/requests"><Inbox size={16} /> All requests</NavLink>

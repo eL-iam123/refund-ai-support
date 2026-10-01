@@ -55,6 +55,11 @@ export type StaffSocketEvent =
       readonly orderId: string | null;
     }
   | { readonly type: 'customer.message'; readonly customerId: string; readonly message: AgentMessage }
+  | {
+      readonly type: 'customer.pushing';
+      readonly customerId: string;
+      readonly orderId: string | null;
+    }
   | { readonly type: 'conversation.updated'; readonly customerId: string; readonly orderId: string | null };
 
 export interface LiveHub {

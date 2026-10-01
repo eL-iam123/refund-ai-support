@@ -5,6 +5,8 @@ import {
   type AIAnalyzer,
   type AnalyzerInput,
   type AttemptObserver,
+  type ChatInput,
+  type ChatReply,
 } from '../ai/analyzer.js';
 import { LocalAnalyzer } from '../ai/localAnalyzer.js';
 
@@ -75,6 +77,18 @@ function fixedAnalyzer(behaviour: { readonly extraction: Partial<ClaimExtraction
       recordOk(observer, 'fake-fixed-v1');
       return Promise.resolve(claimReply(extraction, 'fake-fixed-v1'));
     },
+    chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
+      observer({
+        model: 'fake-fixed-v1',
+        attempt: 1,
+        ok: true,
+        latencyMs: 0,
+        promptTokens: null,
+        completionTokens: null,
+        error: null,
+      });
+      return Promise.resolve({ kind: 'text', text: "I'm here to help while your agent reviews your case.", model: 'fake-fixed-v1' });
+    },
   };
 }
 
@@ -104,6 +118,18 @@ function askAnalyzer(behaviour: {
       }
       return Promise.resolve(claimReply(extraction, 'fake-ask-v1'));
     },
+    chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
+      observer({
+        model: 'fake-ask-v1',
+        attempt: 1,
+        ok: true,
+        latencyMs: 0,
+        promptTokens: null,
+        completionTokens: null,
+        error: null,
+      });
+      return Promise.resolve({ kind: 'text', text: "I'm here to help while your agent reviews your case.", model: 'fake-ask-v1' });
+    },
   };
 }
 
@@ -131,6 +157,10 @@ function unavailableAnalyzer(message: string): AIAnalyzer {
     available: false,
     unavailableReason: message,
     analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
+      recordOk(observer, 'fake-unavailable-v1');
+      return Promise.reject(new AiUnavailableError(message));
+    },
+    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       recordOk(observer, 'fake-unavailable-v1');
       return Promise.reject(new AiUnavailableError(message));
     },

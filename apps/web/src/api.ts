@@ -10,6 +10,7 @@ import type {
   PolicyDocumentDto,
   RefundRequestDto,
   RefundRequestSummaryDto,
+  RuleOutcome,
   Scenario,
 } from '@refund/shared';
 

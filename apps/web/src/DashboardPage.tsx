@@ -58,33 +58,36 @@ function AiStatusBanner({ stats }: { stats: AdminStatsDto }): ReactNode {
 
 function Overview({ stats }: { stats: AdminStatsDto }): ReactNode {
   return (
-    <Panel title="Overview">
-      <div className="tiles">
-        <Tile label="Requests" value={String(stats.total)} />
-        <Tile label="Approved" value={String(stats.byDecision.approved ?? 0)} tone="approved" />
-        <Tile label="Denied" value={String(stats.byDecision.denied ?? 0)} tone="denied" />
-        <Tile
-          label="Escalated"
-          value={String(stats.byDecision.escalated ?? 0)}
-          tone="escalated"
-          to="/admin/requests?decision=escalated"
-        />
-        <Tile label="Model calls" value={String(stats.llmCalls)} />
-        <Tile label="Override attempts" value={String(stats.injectionAttempts)} tone={tone(stats.injectionAttempts)} />
-        <Tile label="Model clamped" value={String(stats.clampsFired)} tone={tone(stats.clampsFired)} />
-        <Tile label="Human overrides" value={String(stats.humanOverrides)} />
-        <Tile label="Avg pipeline" value={`${stats.averageLatencyMs}ms`} />
-      </div>
-      <p className="muted">
-        <strong>Model clamped</strong> counts requests where the resolver overruled the model's
-        proposed decision or amount. It is the metric that shows the policy is actually in charge,
-        so it is the one to read next to the override attempts.
-      </p>
-      <p className="muted">
-        <strong>Escalated</strong> is a person's queue, not a number: it links to every request
-        awaiting a human decision. Open it, decide, and the tile empties.
-      </p>
-    </Panel>
+    <>
+      <section className="console-intro">
+        <div>
+          <p className="eyebrow">Operations workspace</p>
+          <h1>Overview</h1>
+          <p className="lede">A clear view of queue health, resolution outcomes, and policy controls.</p>
+        </div>
+        <span className="console-status"><span aria-hidden="true" />Resolver online</span>
+      </section>
+      <Panel title="Queue health" action={<Link className="panel-action" to="/admin/requests?decision=escalated">Open review queue</Link>}>
+        <div className="tiles tiles-primary">
+          <Tile
+            label="Needs review"
+            value={String(stats.byDecision.escalated ?? 0)}
+            tone="escalated"
+            to="/admin/requests?decision=escalated"
+          />
+          <Tile label="Total requests" value={String(stats.total)} />
+          <Tile label="Approved" value={String(stats.byDecision.approved ?? 0)} tone="approved" />
+          <Tile label="Denied" value={String(stats.byDecision.denied ?? 0)} tone="denied" />
+        </div>
+        <div className="system-metrics" aria-label="System metrics">
+          <Metric label="Model calls" value={String(stats.llmCalls)} />
+          <Metric label="Overrides attempted" value={String(stats.injectionAttempts)} tone={tone(stats.injectionAttempts)} />
+          <Metric label="Resolver corrections" value={String(stats.clampsFired)} tone={tone(stats.clampsFired)} />
+          <Metric label="Human overrides" value={String(stats.humanOverrides)} />
+          <Metric label="Average pipeline" value={`${stats.averageLatencyMs}ms`} />
+        </div>
+      </Panel>
+    </>
   );
 }
 
@@ -117,5 +120,14 @@ function Tile({
     <Link className={`${className} tile-link`} to={to}>
       {body}
     </Link>
+  );
+}
+
+function Metric({ label, value, tone }: { label: string; value: string; tone?: 'warn' | undefined }): ReactNode {
+  return (
+    <div className={tone === 'warn' ? 'system-metric metric-warn' : 'system-metric'}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }

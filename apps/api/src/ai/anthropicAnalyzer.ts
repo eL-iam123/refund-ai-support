@@ -11,6 +11,8 @@ import {
   type AIAnalyzer,
   type AnalyzerInput,
   type AttemptObserver,
+  type ChatInput,
+  type ChatReply,
 } from './analyzer.js';
 
 /**
@@ -38,6 +40,9 @@ import {
  *    on whatever prose arrived instead.
  *  - The assistant has no `system` role. The system prompt is a top-level field
  *    and is not part of the message list.
+ *
+ * Chat mode (escalated conversations) shares the same transport but trades the
+ * extraction tools for a single `remind_admin` tool and no monetary authority.
  */
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 529]);
@@ -47,15 +52,15 @@ const MAX_ERROR_LENGTH = 500;
 const ANTHROPIC_VERSION = '2023-06-01';
 
 /**
- * The two tools the model may call, mirroring the OpenAI adapter's union.
- *
- * Both are declared here as first-class tools so the model is pushed through
- * the discriminator by the provider rather than asked to respect a prose mode
- * string. `ask_question` is the messenger exit; `decide_claim` is the engine
- * exit. The answer is read back off whichever tool was called.
+ * The two tools the model may call in analysis mode, mirroring the OpenAI
+ * adapter's union. Both are declared as first-class tools so the model is
+ * pushed through the discriminator by the provider rather than asked to respect
+ * a prose mode string. `ask_question` is the messenger exit; `decide_claim` is
+ * the engine exit. The answer is read back off whichever tool was called.
  */
 const ASK_TOOL = 'ask_question';
 const DECIDE_TOOL = 'decide_claim';
+const REMIND_TOOL = 'remind_admin';
 
 interface MessageResponse {
   readonly content?: readonly {
@@ -75,6 +80,22 @@ interface MessageResponse {
 function cap(message: string): string {
   return redactSecrets(message).slice(0, MAX_ERROR_LENGTH);
 }
+
+const CHAT_SYSTEM_PROMPT = `You are a helpful customer support assistant for a refund service. A human agent has taken over this conversation and is reviewing the case. Your role is to be helpful, conversational, and empathetic while the human agent reviews the case.
+
+IMPORTANT: You have NO authority to make monetary decisions, approve refunds, deny claims, or make any financial commitments. Your role is purely conversational - be helpful, empathetic, and keep the customer informed.
+
+You have ONE tool available:
+- remind_admin: Use this when the customer is pushing for a response, seems frustrated, has been waiting a long time, or explicitly asks for the human agent. This notifies the human agent that the customer is waiting.
+
+Guidelines:
+- Be warm, empathetic, and conversational - like a helpful colleague keeping the customer company
+- Acknowledge their frustration if they express it
+- Reassure them that a human agent is reviewing their case
+- Never make promises about refunds, approvals, denials, or timelines
+- If they ask about money/refunds, say you don't have that authority and the human agent is reviewing
+- If they seem frustrated or have been waiting, use the remind_admin tool
+- Keep responses concise but warm and human`;
 
 export class AnthropicAnalyzer implements AIAnalyzer {
   readonly label: string;
@@ -238,106 +259,87 @@ export class AnthropicAnalyzer implements AIAnalyzer {
       return { ok: false, ...failure };
     }
   }
-}
 
+  /**
+   * Chat mode for escalated conversations: a helpful conversational assistant
+   * with no monetary authority. The customer's message is answered in prose,
+   * or the `remind_admin` tool is called when the customer is pushing.
+   */
   async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-
-    const systemPrompt = `You are a helpful customer support assistant for a refund service. A human agent has taken over this conversation and is reviewing the case. Your role is to be helpful, conversational, and empathetic while the human agent reviews the case.
-
-IMPORTANT: You have NO authority to make monetary decisions, approve refunds, deny claims, or make any financial commitments. Your role is purely conversational - be helpful, empathetic, and keep the customer informed.
-
-You have ONE tool available:
-- remind_admin: Use this when the customer is pushing for a response, seems frustrated, has been waiting a long time, or explicitly asks for the human agent. This notifies the human agent that the customer is waiting.
-
-Guidelines:
-- Be warm, empathetic, and conversational - like a helpful colleague keeping the customer company
-- Acknowledge their frustration if they express it
-- Reassure them that a human agent is reviewing their case
-- Never make promises about refunds, approvals, denials, or timelines
-- If they ask about money/refunds, say you don't have that authority and the human agent is reviewing
-- If they seem frustrated or have been waiting, use the remind_admin tool
-- Keep responses concise but warm and human`;
-
     const historyText = input.history
       .map((line) => `${line.role}: ${line.text}`)
       .join('\n');
-
     const userContent = `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${input.tools.map((t) => t.name).join(', ')}`;
-
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
 
     for (const model of this.candidates) {
       for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
         if (budget.aborted) {
-          throw new AiUnavailableError(`chat time budget exhausted`);
+          throw new AiUnavailableError('chat time budget exhausted');
         }
 
+        const startedAt = Date.now();
         try {
-          const response = await fetch(`${this.baseUrl}/v1/messages`, {
+          const body: Record<string, unknown> = {
+            model,
+            max_tokens: this.env.AI_MAX_TOKENS,
+            temperature: 0.7,
+            system: CHAT_SYSTEM_PROMPT,
+            messages: [{ role: 'user', content: userContent }],
+          };
+          if (input.tools.length > 0) {
+            body.tools = [remindTool()];
+            body.tool_choice = { type: 'auto' };
+          }
+
+          const response = await fetch(`${this.baseUrl}/messages`, {
             method: 'POST',
+            signal: budget,
             headers: {
+              'content-type': 'application/json',
               'x-api-key': this.apiKey,
               'anthropic-version': ANTHROPIC_VERSION,
-              'content-type': 'application/json',
             },
-            body: JSON.stringify({
-              model,
-              max_tokens: this.env.AI_MAX_TOKENS,
-              temperature: 0.7,
-              system: systemPrompt,
-              messages: [{ role: 'user', content: userContent }],
-              tools: input.tools.length > 0 ? [
-                {
-                  name: 'remind_admin',
-                  description: 'Notify the human agent that the customer is waiting or pushing for a response.',
-                  input_schema: { type: 'object', properties: {}, additionalProperties: false },
-                },
-              ] : undefined,
-              tool_choice: input.tools.length > 0 ? { type: 'any' } : undefined,
-            }),
-            { signal: budget },
-          } as Promise<Response>;
-
-          const data = await response.json() as MessageResponse;
+            body: JSON.stringify(body),
+          });
 
           if (!response.ok) {
-            throw new HttpStatusError(response.status, await response.text());
+            const failedBody = await response.text().catch(() => '');
+            throw new HttpStatusError(response.status, failedBody);
+          }
+
+          const data = (await response.json()) as MessageResponse;
+          const usage = {
+            promptTokens: data.usage?.input_tokens ?? null,
+            completionTokens: data.usage?.output_tokens ?? null,
+          };
+
+          const toolUse = data.content?.find((c) => c.type === 'tool_use');
+          if (toolUse && toolUse.name === REMIND_TOOL) {
+            observer({ model, attempt, ok: true, latencyMs: Date.now() - startedAt, ...usage, error: null });
+            return { kind: 'tool_call', tool: REMIND_TOOL, model };
           }
 
           const textContent = data.content?.find((c) => c.type === 'text')?.text ?? '';
-          const toolUse = data.content?.find((c) => c.type === 'tool_use');
-
-          if (toolUse && toolUse.name === 'remind_admin') {
-            observer({
-              model,
-              attempt,
-              ok: true,
-              latencyMs: 0,
-              promptTokens: data.usage?.input_tokens ?? null,
-              completionTokens: data.usage?.output_tokens ?? null,
-              error: null,
-            });
-            return { kind: 'tool_call', tool: 'remind_admin', model };
-          }
-
           if (textContent.trim().length > 0) {
-            observer({
-              model,
-              attempt,
-              ok: true,
-              latencyMs: 0,
-              promptTokens: data.usage?.input_tokens ?? null,
-              completionTokens: data.usage?.output_tokens ?? null,
-              error: null,
-            });
+            observer({ model, attempt, ok: true, latencyMs: Date.now() - startedAt, ...usage, error: null });
             return { kind: 'text', text: textContent, model };
           }
         } catch (error) {
           const failure = classify(error);
+          observer({
+            model,
+            attempt,
+            ok: false,
+            latencyMs: Date.now() - startedAt,
+            promptTokens: null,
+            completionTokens: null,
+            error: failure.error,
+          });
           if (!failure.retryable || attempt >= this.env.AI_MAX_ATTEMPTS) {
-            continue;
+            break;
           }
+          await backoff(attempt, budget);
         }
       }
     }
@@ -370,13 +372,6 @@ class EmptyCompletionError extends Error {
   }
 }
 
-/**
- * The tool whose input schema is the extraction schema.
- *
- * Built from Zod so the prompt and the validator cannot drift. Anthropic accepts
- * a JSON Schema for `input_schema`, and `z.toJSONSchema` produces one, which is
- * the only reason the OpenAI adapter's schema description is reusable here.
- */
 /**
  * The body of one Messages call.
  *
@@ -426,6 +421,14 @@ function decideTool(): { name: string; description: string; input_schema: object
     name: DECIDE_TOOL,
     description: 'Submit the structured refund claim read from the conversation to the decision engine.',
     input_schema: z.toJSONSchema(AgentOutputSchema),
+  };
+}
+
+function remindTool(): { name: string; description: string; input_schema: object } {
+  return {
+    name: REMIND_TOOL,
+    description: 'Notify the human agent that the customer is waiting or pushing for a response.',
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
   };
 }
 

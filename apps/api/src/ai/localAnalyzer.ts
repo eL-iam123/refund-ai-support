@@ -1,5 +1,5 @@
 import type { ClaimExtraction } from '@refund/shared';
-import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver, type ChatInput, type ChatReply, type ChatTool } from './analyzer.js';
+import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
 import { scanForInjection } from '../security/injection.js';
 import { isNoComplaint, noComplaintQuestion } from '../response/noComplaint.js';
 
@@ -337,8 +337,6 @@ export { AiUnavailableError };
  */
 function chatWithHeuristics(input: ChatInput, observer: AttemptObserver): ChatReply {
   observer({ model: MODEL, attempt: 1, ok: true, latencyMs: 0, promptTokens: null, completionTokens: null, error: null });
-
-  const message = input.message.toLowerCase();
 
   // Check if the customer is pushing/waiting - use remind_admin tool
   const isPushing = /(?:where|wait|waiting|anyone|hello|any\s+one|anybody|agent|human|admin|help|anyone\s+there|any\s+updates?|status|waiting|waited|long\s+time|taking\s+long|hurry|urgent|asap|immediately)/i.test(input.message);

@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
-import { authHeader, scenario, testEnv, TEST_NOW, type AppHarness } from './helpers.js';
+import type { LightMyRequestResponse } from 'fastify';
+import { scenario, testEnv, TEST_NOW, type AppHarness } from './helpers.js';
 import { shopHarness, signIn, type SignedIn } from './shop-helpers.js';
 import { readEnv } from '../config/env.js';
-import { appHarness } from './helpers.js';
 import { mintToken, verifyToken, AuthError } from '../auth/tokens.js';
 import { TEST_SECRET } from './helpers.js';
 

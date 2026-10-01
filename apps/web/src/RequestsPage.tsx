@@ -45,10 +45,18 @@ export function RequestsPage(): ReactNode {
   );
   const state = useAsyncData(load, `${filter}|${source}|${search}`);
 
+  const count = state.status === 'ready' ? state.value.requests.length : null;
   return (
-    <Panel
-      title="Requests"
-      action={
+    <div className="admin-page">
+      <section className="admin-page-heading">
+        <div>
+          <p className="eyebrow">Resolution queue</p>
+          <h1>Requests</h1>
+          <p className="lede">Review every decision, its policy basis, and the handoffs that need attention.</p>
+        </div>
+        {count !== null ? <span className="result-count">{count} {count === 1 ? 'request' : 'requests'}</span> : null}
+      </section>
+      <Panel title="All decisions">
         <Filters
           filter={filter}
           source={source}
@@ -57,17 +65,16 @@ export function RequestsPage(): ReactNode {
           onSource={setSource}
           onSearch={setSearch}
         />
-      }
-    >
-      {state.status === 'error' ? <ErrorNote error={state.error} /> : null}
-      {state.status === 'loading' ? <Loading label="Loading requests…" /> : null}
-      {state.status === 'ready' && state.value.requests.length === 0 ? (
-        <Empty>No requests match this filter.</Empty>
-      ) : null}
-      {state.status === 'ready' && state.value.requests.length > 0 ? (
-        <RequestTable requests={state.value.requests} />
-      ) : null}
-    </Panel>
+        {state.status === 'error' ? <ErrorNote error={state.error} /> : null}
+        {state.status === 'loading' ? <Loading label="Loading requests…" /> : null}
+        {state.status === 'ready' && state.value.requests.length === 0 ? (
+          <Empty>No requests match this filter.</Empty>
+        ) : null}
+        {state.status === 'ready' && state.value.requests.length > 0 ? (
+          <RequestTable requests={state.value.requests} />
+        ) : null}
+      </Panel>
+    </div>
   );
 }
 
@@ -87,7 +94,7 @@ function Filters({
   onSearch: (next: string) => void;
 }): ReactNode {
   return (
-    <div className="filters">
+    <div className="filters request-toolbar">
       {FILTERS.map((option) => (
         <button
           key={option.value}
@@ -139,7 +146,7 @@ function RequestTable({ requests }: { requests: readonly RefundRequestSummaryDto
               </span>{' '}
               {row.customerName}
             </td>
-            <td>
+            <td className="request-message">
               <Link to={`/admin/requests/${row.id}`}>{truncate(row.message, 72)}</Link>
               {row.injectionDetected ? <span className="tag tag-warn">override attempt</span> : null}
             </td>

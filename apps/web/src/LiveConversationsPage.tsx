@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Bot, Headset, Inbox, Send, Activity } from 'lucide-react';
+import { Bot, Headset, Inbox, Send, User, Scale, ShieldAlert } from 'lucide-react';
+import type { RuleOutcome } from '@refund/shared';
 import {
   api,
   describe,
@@ -7,7 +8,7 @@ import {
   type StaffConversation,
   type StaffThreadTurn,
 } from './api';
-import { formatCents } from './format';
+import { formatCents, formatTime } from './format';
 import { money } from './shop/api';
 import { useAsyncData, Spinner } from './shop/hooks';
 
@@ -50,24 +51,80 @@ export function LiveConversationsPage(): ReactNode {
   }, []);
 
   return (
-    <div className="live-layout">
-      <AnalyticsStrip analytics={analytics} />
-      <ConversationList conversations={conversations} selected={selected} onSelect={setSelected} />
-      <section className="live-console">
-        {selected === null ? (
-          <p className="empty">Pick a conversation to take over.</p>
-        ) : (
-          <TakeoverConsole
-            key={selected.customerId}
-            conversation={selected}
-            version={version}
-            onChanged={() => setVersion((v) => v + 1)}
-          />
-        )}
-      </section>
+    <div className="admin-page">
+      <div className="console-intro">
+        <div>
+          <h1>Live</h1>
+          <p className="lede">
+            Conversations that moved in the last 24 hours. Pick one to read the case and, if a
+            colleague has taken it over, to answer the customer yourself.
+          </p>
+        </div>
+      </div>
+      <div className="live-layout">
+        <AnalyticsStrip analytics={analytics} />
+        <ConversationList conversations={conversations} selected={selected} onSelect={setSelected} />
+        <section className="live-console">
+          {selected === null ? (
+            <p className="empty">No conversation open. Choose one from the list.</p>
+          ) : (
+            <TakeoverConsole
+              key={conversationKey(selected)}
+              conversation={selected}
+              version={version}
+              onChanged={() => setVersion((v) => v + 1)}
+            />
+          )}
+        </section>
+      </div>
     </div>
   );
 }
+
+/**
+ * What makes one row a distinct case.
+ *
+ * The list is grouped server-side by customer *and* order
+ * (`GROUP BY customer_id, order_id` in `db/handoffs.ts`), so one customer with
+ * three orders is three rows and three separate threads. Comparing on
+ * `customerId` alone therefore lit every row belonging to the customer, which
+ * read as "selecting one selects all".
+ *
+ * Deliberately not widened with `activeHandoff.id` or `lastActivityAt`:
+ * `activeHandoff` is resolved per customer, so it is identical across that
+ * customer's rows and adds nothing, and `lastActivityAt` advances on every
+ * message, which would make the highlight fall off the row you just clicked as
+ * soon as the websocket triggered a refetch. The pair the server groups by is the
+ * only stable identity the payload carries.
+ */
+function conversationKey(row: StaffConversation): string {
+  return row.customerId + ':' + (row.orderId ?? '');
+}
+
+/**
+ * Rule outcomes are `deny` / `escalate` / `approve` / `pass`; the stylesheet
+ * names its pills after decisions - `pill-approved`, `pill-denied`,
+ * `pill-escalated` - which is a different vocabulary. Interpolating
+ * `pill-${outcome}` directly produced `pill-approve`, `pill-deny` and
+ * `pill-escalate`, none of which exist, so every rule pill in the policy trail
+ * rendered as unstyled grey. The mapping is explicit rather than derived so the
+ * two vocabularies can drift apart without silently losing colour again.
+ *
+ * `pass` is the one outcome with no decision counterpart: it means a rule ran and
+ * found nothing blocking, which is worth showing but is not a decision.
+ */
+const OUTCOME_PILL: Record<RuleOutcome, string> = {
+  approve: 'pill-approved',
+  deny: 'pill-denied',
+  escalate: 'pill-escalated',
+  pass: 'pill-pass',
+};
+
+/** What the brief's `state` means, in words an agent would say out loud. */
+const STATE_TEXT: Record<HandoffBrief['state'], string> = {
+  ai: 'Assistant is handling this',
+  handed_off: 'A colleague has taken over',
+};
 
 /** The choose-one list: every conversation that moved in the last 24 hours. */
 function ConversationList({
@@ -80,9 +137,11 @@ function ConversationList({
   onSelect: (row: StaffConversation) => void;
 }): ReactNode {
   return (
-    <aside className="live-list">
-      <h1>Live</h1>
-      <p className="muted small">Conversations moving in the last 24 hours.</p>
+    <aside className="live-list panel">
+      <div className="panel-head">
+        <h2>Conversations</h2>
+        <span className="muted small">{conversations.data === null ? '' : `${conversations.data.length} open`}</span>
+      </div>
       {conversations.error !== null ? <p className="error">{conversations.error}</p> : null}
       {renderRows(conversations.data, selected, onSelect)}
     </aside>
@@ -99,7 +158,7 @@ function renderRows(
   }
   if (rows.length === 0) {
     return (
-      <p className="note">
+      <p className="empty">
         <Inbox size={16} /> Nothing is moving. When a customer writes to the assistant, the
         conversation appears here.
       </p>
@@ -108,23 +167,26 @@ function renderRows(
   return (
     <ul className="live-list-rows">
       {rows.map((row) => (
-        <li key={row.customerId}>
+        <li key={conversationKey(row)}>
           <button
             type="button"
-            className={`live-row ${selected?.customerId === row.customerId ? 'is-active' : ''}`}
+            className={`live-row ${selected !== null && conversationKey(selected) === conversationKey(row) ? 'is-active' : ''}`}
             onClick={() => onSelect(row)}
           >
             <span className="live-row-name">
               {row.customerName}
-              {row.activeHandoff !== null ? <span className="pill pill-escalated">live</span> : null}
-              {row.openAppeals.length > 0 && (
+              {row.activeHandoff !== null ? (
+                <span className="pill pill-escalated" title="A colleague has taken this over">taken over</span>
+              ) : null}
+              {row.openAppeals.length > 0 ? (
                 <span className="pill pill-denied" title={row.openAppeals.map((a) => a.reason).join('; ')}>
                   {row.openAppeals.length} appeal{row.openAppeals.length > 1 ? 's' : ''}
                 </span>
-              )}
+              ) : null}
             </span>
             <span className="small muted">
-              {row.orderId ?? 'no order yet'} · {new Date(row.lastActivityAt).toLocaleTimeString()}
+              {row.orderId ?? 'No order yet'} · {row.activityCount} message{row.activityCount === 1 ? '' : 's'} ·{' '}
+              {formatTime(row.lastActivityAt)}
             </span>
           </button>
         </li>
@@ -173,12 +235,12 @@ function TakeoverConsole({
   };
 
   return (
-    <div className="stack">
-      <div className="row">
+    <div className="case-viewer">
+      <header className="case-head">
         <div>
           <h2>{brief.customerName}</h2>
           <p className="muted small">
-            {brief.orderId ?? 'No order yet'} · state: <strong>{brief.state}</strong>
+            {brief.orderId ?? 'No order yet'} · {STATE_TEXT[brief.state]}
           </p>
         </div>
         {active === null ? (
@@ -190,42 +252,65 @@ function TakeoverConsole({
             Hand back to the assistant
           </button>
         )}
-      </div>
+      </header>
       {errand.length > 0 ? <p className="error">{errand}</p> : null}
 
-      <CaseBrief brief={brief} />
-      <ThreadView thread={thread} />
-      {active !== null ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
+      {/*
+        The case file sits beside the thread rather than above it, because the
+        order an agent works in is: read the conversation, then check what the
+        pipeline concluded before replying. Stacked, the case file pushes the
+        thread below the fold on a long case, and the reply box with it.
+      */}
+      <div className="case-split">
+        <div className="case-file">
+          <CaseBrief brief={brief} />
+        </div>
+        <div className="case-thread">
+          <ThreadView thread={thread} />
+          {active !== null ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
+        </div>
+      </div>
     </div>
   );
 }
 
-/** The deterministic briefing every agent reads before answering. */
+/**
+ * The deterministic briefing every agent reads before answering.
+ *
+ * Collapsed by default, unlike the words and the thread beside it. The two things
+ * an agent always needs are the conversation itself and any risk the pipeline
+ * flagged, so those are the only parts shown before the case file is opened; the
+ * rule trail is a reference an agent consults when a decision looks wrong, and
+ * defaulting it open meant every reply started with a wall of `pass` before the
+ * customer's actual problem.
+ */
 function CaseBrief({ brief }: { brief: HandoffBrief }): ReactNode {
   return (
-    <details className="case-brief" open>
-      <summary>
-        Case file <span className="muted small">- what the customer said, what the assistant secured, what the policy concluded</span>
-      </summary>
-      <div className="case-columns">
-        <WordsColumn brief={brief} />
-        <EvidenceColumn brief={brief} />
-      </div>
+    <div className="case-brief">
       <RiskFlags brief={brief} />
-    </details>
+      <details>
+        <summary>
+          Case file <span className="muted small">what was asked, what was checked, what was decided</span>
+        </summary>
+        <div className="case-columns">
+          <WordsColumn brief={brief} />
+          <EvidenceColumn brief={brief} />
+        </div>
+      </details>
+    </div>
   );
 }
 
 function WordsColumn({ brief }: { brief: HandoffBrief }): ReactNode {
   return (
     <section>
-      <h3>The customer&apos;s words</h3>
+      <h3>In their words</h3>
       {brief.whatTheySaid.length === 0 ? (
         <p className="muted small">Nothing on record yet.</p>
       ) : (
         <ul className="case-quotes">
-          {brief.whatTheySaid.map((line, index) => (
-            <li key={index}>“{line.text}”</li>
+          {brief.whatTheySaid.map((line) => (
+            <li key={line.at}>“{line.text}”</li>
           ))}
         </ul>
       )}
@@ -233,8 +318,8 @@ function WordsColumn({ brief }: { brief: HandoffBrief }): ReactNode {
         <>
           <h3>What the assistant asked</h3>
           <ul className="case-dialogue">
-            {brief.dialogue.map((turn, index) => (
-              <li key={index}>
+            {brief.dialogue.map((turn) => (
+              <li key={turn.question}>
                 <span className="small muted">“{turn.question}”</span>
                 <span>customer: “{turn.answer}”</span>
               </li>
@@ -249,13 +334,13 @@ function WordsColumn({ brief }: { brief: HandoffBrief }): ReactNode {
 function EvidenceColumn({ brief }: { brief: HandoffBrief }): ReactNode {
   return (
     <section>
-      <h3>Evidence the assistant secured</h3>
+      <h3>Evidence confirmed</h3>
       {brief.echoedEvidence.length === 0 ? (
-        <p className="muted small">None verified against the customer&apos;s own words.</p>
+        <p className="muted small">Nothing was verified against the customer&apos;s own words.</p>
       ) : (
         <ul className="case-quotes">
-          {brief.echoedEvidence.map((quote, index) => (
-            <li key={index}>“{quote}”</li>
+          {brief.echoedEvidence.map((quote) => (
+            <li key={quote}>“{quote}”</li>
           ))}
         </ul>
       )}
@@ -267,13 +352,9 @@ function EvidenceColumn({ brief }: { brief: HandoffBrief }): ReactNode {
   );
 }
 
-function ClaimLines({
-  claim,
-}: {
-  claim: HandoffBrief['claim'];
-}): ReactNode {
+function ClaimLines({ claim }: { claim: HandoffBrief['claim'] }): ReactNode {
   if (claim === null) {
-    return <p className="muted small">No claim produced on this thread yet - it may still be mid-clarify.</p>;
+    return <p className="muted small">No claim yet on this thread - the assistant may still be asking.</p>;
   }
   return (
     <dl className="kv">
@@ -281,8 +362,28 @@ function ClaimLines({
       <dd>
         <span className={`pill pill-${claim.decision}`}>{claim.decision}</span>
       </dd>
-      <dt>Authorised amount</dt>
-      <dd>{formatCents(claim.refundAmountCents)}</dd>
+      {/*
+        An escalated claim carries a proposed amount that nobody is authorised to
+        pay yet, and a denied one carries zero. Printing "$0.00" against either
+        reads as a decision about money rather than about the case, which is the
+        one distinction this console exists to keep straight.
+      */}
+      <dt>Amount</dt>
+      <dd>
+        {claim.decision === 'approved' ? (
+          formatCents(claim.refundAmountCents)
+        ) : claim.decision === 'escalated' ? (
+          <span className="muted">{formatCents(claim.refundAmountCents)} proposed - not payable</span>
+        ) : (
+          <span className="muted">Nothing payable</span>
+        )}
+      </dd>
+      {claim.reasonCodes.length > 0 ? (
+        <>
+          <dt>Reasons</dt>
+          <dd className="small">{claim.reasonCodes.join(', ')}</dd>
+        </>
+      ) : null}
       <dt>Summary</dt>
       <dd>{claim.summary}</dd>
       {claim.items.length > 0 ? (
@@ -299,13 +400,17 @@ function PolicyTrail({ brief }: { brief: HandoffBrief }): ReactNode {
   if (brief.policyTrail.length === 0) {
     return null;
   }
+  const blocking = brief.policyTrail.filter((rule) => rule.outcome !== 'pass').length;
   return (
     <>
-      <h3>How the policy decided</h3>
+      <h3>
+        <Scale size={13} aria-hidden="true" /> Rules that ran ({blocking} of {brief.policyTrail.length}{' '}
+        decided)
+      </h3>
       <ul className="case-quotes">
-        {brief.policyTrail.map((rule, index) => (
-          <li key={index}>
-            <span className={`pill pill-${rule.outcome}`}>{rule.ruleId}</span>{' '}
+        {brief.policyTrail.map((rule) => (
+          <li key={rule.ruleId}>
+            <span className={`pill ${OUTCOME_PILL[rule.outcome]}`}>{rule.ruleId}</span>{' '}
             <span className="small">{rule.evidence}</span>
           </li>
         ))}
@@ -320,16 +425,28 @@ function RiskFlags({ brief }: { brief: HandoffBrief }): ReactNode {
   }
   return (
     <div className="risks">
-      {brief.riskFlags.map((flag, index) => (
-        <p key={index} className="note note-warn">
-          <strong>{flag.label}.</strong> {flag.detail}
+      {brief.riskFlags.map((flag) => (
+        <p key={flag.label} className="note note-warn">
+          <ShieldAlert size={16} aria-hidden="true" />
+          <span>
+            <strong>{flag.label}.</strong> {flag.detail}
+          </span>
         </p>
       ))}
     </div>
   );
 }
 
-/** The thread, drawn the way the customer sees it. */
+/**
+ * The thread, drawn as the conversation rather than as the customer saw it.
+ *
+ * The storefront styles a customer message as `bubble-me`, because from that
+ * side the reader *is* the customer. A staff reader is the other party, so the
+ * same class is wrong here: every turn is labelled with who actually spoke, and
+ * the assistant's turns carry the decision they produced. The thread is capped
+ * and scrolled rather than unbounded, so the reply box stays reachable on a long
+ * case.
+ */
 function ThreadView({ thread }: { thread: readonly StaffThreadTurn[] }): ReactNode {
   if (thread.length === 0) {
     return <p className="muted small">No messages yet.</p>;
@@ -359,43 +476,64 @@ function ThreadTurn({ turn }: { turn: StaffThreadTurn }): ReactNode {
 }
 
 /** The live queue snapshot at the top of the page. */
-function AnalyticsStrip({ analytics }: { analytics: { readonly data: { readonly openHandoffs: number; readonly escalatedAwaiting: number; readonly awaitingReviewCents: number; readonly decisionsToday: { readonly approved: number; readonly denied: number; readonly escalated: number }; readonly averageTakeoverMinutes: number | null; readonly since: string } | null; readonly error: string | null } }): ReactNode {
+function AnalyticsStrip({
+  analytics,
+}: {
+  analytics: {
+    readonly data: {
+      readonly openHandoffs: number;
+      readonly escalatedAwaiting: number;
+      readonly awaitingReviewCents: number;
+      readonly decisionsToday: { readonly approved: number; readonly denied: number; readonly escalated: number };
+      readonly averageTakeoverMinutes: number | null;
+      readonly since: string;
+    } | null;
+    readonly error: string | null;
+  };
+}): ReactNode {
   if (analytics.data === null) {
     return analytics.error !== null ? <p className="error">{analytics.error}</p> : <Spinner />;
   }
-  const { openHandoffs, escalatedAwaiting, awaitingReviewCents, decisionsToday, averageTakeoverMinutes, since } = analytics.data;
+  const {
+    openHandoffs,
+    escalatedAwaiting,
+    awaitingReviewCents,
+    decisionsToday,
+    averageTakeoverMinutes,
+    since,
+  } = analytics.data;
+  const waitingOnYou = openHandoffs + escalatedAwaiting;
   return (
     <aside className="live-analytics">
-      <h2><Activity size={16} /> Live queue</h2>
       <ul className="analytics-grid">
         <li className="analytics-item">
-          <span className="analytics-label">Agents with customers</span>
-          <span className="analytics-value"><strong>{openHandoffs}</strong></span>
-        </li>
-        <li className="analytics-item">
-          <span className="analytics-label">Escalated awaiting hand-off</span>
-          <span className="analytics-value"><strong>{escalatedAwaiting}</strong></span>
-        </li>
-        <li className="analytics-item">
-          <span className="analytics-label">Money awaiting review</span>
-          <span className="analytics-value"><strong>{money(awaitingReviewCents)}</strong></span>
-        </li>
-        <li className="analytics-item">
-          <span className="analytics-label">Decided today</span>
-          <span className="analytics-value small">
-            <span className="pill pill-approved">{decisionsToday.approved}</span>
-            <span className="pill pill-denied">{decisionsToday.denied}</span>
-            <span className="pill pill-escalated">{decisionsToday.escalated}</span>
+          <span className="analytics-label">Waiting on an agent</span>
+          <span className="analytics-value">
+            <strong>{waitingOnYou}</strong>
           </span>
         </li>
         <li className="analytics-item">
-          <span className="analytics-label">Avg takeover time</span>
+          <span className="analytics-label">Needs review money</span>
           <span className="analytics-value">
-            {averageTakeoverMinutes !== null ? `${Math.round(averageTakeoverMinutes)} min` : '—'}
+            <strong>{money(awaitingReviewCents)}</strong>
+          </span>
+        </li>
+        <li className="analytics-item">
+          <span className="analytics-label">Decisions today</span>
+          <span className="analytics-value small">
+            <span className="pill pill-approved">{decisionsToday.approved} approved</span>
+            <span className="pill pill-denied">{decisionsToday.denied} denied</span>
+            <span className="pill pill-escalated">{decisionsToday.escalated} escalated</span>
+          </span>
+        </li>
+        <li className="analytics-item">
+          <span className="analytics-label">Average takeover</span>
+          <span className="analytics-value">
+            {averageTakeoverMinutes === null ? 'No data' : `${Math.round(averageTakeoverMinutes)} min`}
           </span>
         </li>
       </ul>
-      <p className="muted small">Since {new Date(since).toLocaleString()}</p>
+      <p className="muted small">Counted from {formatTime(since)}</p>
     </aside>
   );
 }
@@ -404,15 +542,27 @@ function AnalyticsStrip({ analytics }: { analytics: { readonly data: { readonly 
 function RequestTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'request' }> }): ReactNode {
   return (
     <>
-      <p className="bubble-me">{turn.message}</p>
+      <div className="bubble-me">
+        <span className="who">
+          <User size={13} aria-hidden="true" /> Customer
+        </span>
+        <p>{turn.message}</p>
+        <span className="when">{formatTime(turn.createdAt)}</span>
+      </div>
       <div className="bubble-them">
         <div className="row">
-          <Bot size={16} />
+          <Bot size={16} aria-hidden="true" />
           <span className={`pill pill-${turn.decision}`}>{turn.decision}</span>
+          <span className="when">{formatTime(turn.createdAt)}</span>
         </div>
         <p>{turn.responseText}</p>
-        {turn.decision !== 'denied' ? (
-          <footer className="row small">{formatCents(turn.refundAmountCents)}</footer>
+        {/*
+          Only an approval authorises money. The old `!== 'denied'` test printed
+          "$0.00" under every escalation, which is the exact figure a reader
+          should never take away from an escalated case.
+        */}
+        {turn.decision === 'approved' ? (
+          <footer className="row small">{formatCents(turn.refundAmountCents)} authorised</footer>
         ) : null}
       </div>
     </>
@@ -422,11 +572,17 @@ function RequestTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'request
 function DialogueTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'dialogue' }> }): ReactNode {
   return (
     <>
-      <p className="bubble-me">{turn.message}</p>
+      <div className="bubble-me">
+        <span className="who">
+          <User size={13} aria-hidden="true" /> Customer
+        </span>
+        <p>{turn.message}</p>
+      </div>
       <div className="bubble-them">
         <div className="row">
-          <Bot size={16} />
-          <span className="pill pill-escalated">Assistant asked</span>
+          <Bot size={16} aria-hidden="true" />
+          <span className="pill">Assistant asked</span>
+          <span className="when">{formatTime(turn.createdAt)}</span>
         </div>
         <p>{turn.question}</p>
       </div>
@@ -439,6 +595,7 @@ function UpdateTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'update' 
     <div className="bubble-them">
       <span className="pill pill-escalated">Reviewed by a person</span>
       <p>{turn.body}</p>
+      <span className="when">{formatTime(turn.createdAt)}</span>
     </div>
   );
 }
@@ -446,30 +603,32 @@ function UpdateTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'update' 
 function AgentTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'agent' }> }): ReactNode {
   if (turn.sender === 'customer') {
     return (
-      <>
-        <p className="bubble-me">{turn.body}</p>
-        {turn.media && <img src={turn.media.url} alt="Photo from customer" className="chat-media" />}
-      </>
+      <div className="bubble-me">
+        <span className="who">
+          <User size={13} aria-hidden="true" /> Customer
+        </span>
+        <p>{turn.body}</p>
+        {turn.media !== null ? <img src={turn.media.url} alt="Photo sent by the customer" className="chat-media" /> : null}
+        <span className="when">{formatTime(turn.createdAt)}</span>
+      </div>
     );
   }
   return (
     <div className="bubble-them bubble-agent">
+      <span className="who">
+        <Headset size={13} aria-hidden="true" /> Customer agent
+      </span>
       <p>{turn.body}</p>
-      {turn.media && <img src={turn.media.url} alt="Photo from agent" className="chat-media" />}
-      <footer className="row small muted">
-        <Headset size={14} /> Customer agent
-      </footer>
+      {turn.media !== null ? <img src={turn.media.url} alt="Photo sent by the agent" className="chat-media" /> : null}
+      <span className="when">{formatTime(turn.createdAt)}</span>
     </div>
   );
 }
 
 function HandoffTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'handoff' }> }): ReactNode {
   return (
-    <div className="bubble-them">
-      <div className="row">
-        <Headset size={16} />
-        <span className="pill pill-escalated">Takeover live</span>
-      </div>
+    <div className="bubble-them handoff-turn">
+      <span className="when">{formatTime(turn.createdAt)}</span>
       <p>{turn.body}</p>
     </div>
   );

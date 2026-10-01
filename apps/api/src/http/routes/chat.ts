@@ -20,6 +20,10 @@ import { resolveShopSession, SESSION_COOKIE } from '../../shop/auth.js';
 import { activeHandoffForCustomer, recordAgentMessage, type AgentMessage } from '../../db/handoffs.js';
 import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
+import { toAnalyzerOrder } from '../../ai/openaiAnalyzer.js';
+import { transcriptForOrder } from '../../retrieval/conversation.js';
+import { findOrder } from '../../db/orderRepository.js';
+import type { ChatInput, ChatReply } from '../../ai/analyzer.js';
 
 /**
  * POST /api/chat/messages
@@ -36,7 +40,11 @@ async function handleChatMessage(
   reply: FastifyReply,
   ctx: AppContext,
   hub: LiveHub,
-): Promise<{ received: boolean; agentConnected: boolean; message: AgentMessage } | { question: string; dialogueId: string } | { request: RefundRequestDto }> {
+): Promise<
+  | { received: boolean; agentConnected: boolean; message: AgentMessage; aiResponse: string | null }
+  | { question: string; dialogueId: string }
+  | { request: RefundRequestDto }
+> {
   const body = CreateRefundRequestSchema.safeParse(request.body);
   if (!body.success) {
     throw badRequest(
@@ -61,17 +69,68 @@ async function handleChatMessage(
 
   const active = activeHandoffForCustomer(ctx.db, session.customerId);
   if (active !== null) {
-    const message = recordAgentMessage(ctx.db, {
+    // A person is live on the thread. The pipeline is bypassed; the "AI" is
+    // now a conversational assistant with no monetary authority and one tool:
+    // nudging the human agent when the customer is pushing.
+    const history = transcriptForOrder(ctx.db, session.customerId, active.orderId, ctx.now(), 20);
+    const order = active.orderId === null ? null : findOrder(ctx.db, session.customerId, active.orderId, now);
+    const chatInput: ChatInput = {
+      message: body.data.message,
+      order: toAnalyzerOrder(order),
+      history,
+      tools: [{ name: 'remind_admin', description: 'Notify the human agent that the customer is waiting or pushing for a response.' }],
+    };
+
+    let aiResponse: ChatReply;
+    try {
+      aiResponse = await ctx.pipeline.analyzer.chat(chatInput, (attempt) =>
+        ctx.pipeline.recordAttempt('chat', ctx.pipeline.analyzer.label, attempt),
+      );
+    } catch (error) {
+      // If chat fails, fall back to routing straight to the human agent
+      ctx.log.error({ err: error }, 'chat.failed');
+      const message = recordAgentMessage(ctx.db, {
+        handoffId: active.id,
+        sender: 'customer',
+        body: body.data.message,
+        now: ctx.now(),
+      });
+      hub.notifyStaff({ type: 'customer.message', customerId: session.customerId, message });
+      hub.notifyStaff({ type: 'conversation.updated', customerId: session.customerId, orderId: active.orderId });
+      ctx.log.info({ customerId: session.customerId, handoffId: active.id }, 'chat.routed-to-agent');
+      reply.code(201);
+      return { received: true, agentConnected: true, message, aiResponse: null };
+    }
+
+    // Record the customer's message
+    const customerMessage = recordAgentMessage(ctx.db, {
       handoffId: active.id,
       sender: 'customer',
       body: body.data.message,
       now: ctx.now(),
     });
-    hub.notifyStaff({ type: 'customer.message', customerId: session.customerId, message });
+
+    // If AI used remind_admin tool, notify staff
+    if (aiResponse.kind === 'tool_call' && aiResponse.tool === 'remind_admin') {
+      hub.notifyStaff({ type: 'customer.pushing', customerId: session.customerId, orderId: active.orderId });
+    }
+
+    // Record AI's response so the thread stays continuous in the staff view
+    if (aiResponse.kind === 'text') {
+      recordAgentMessage(ctx.db, {
+        handoffId: active.id,
+        sender: 'agent',
+        body: aiResponse.text,
+        now: ctx.now(),
+      });
+    }
+
+    hub.notifyStaff({ type: 'customer.message', customerId: session.customerId, message: customerMessage });
     hub.notifyStaff({ type: 'conversation.updated', customerId: session.customerId, orderId: active.orderId });
     ctx.log.info({ customerId: session.customerId, handoffId: active.id }, 'chat.routed-to-agent');
+
     reply.code(201);
-    return { received: true, agentConnected: true, message };
+    return { received: true, agentConnected: true, message: customerMessage, aiResponse: aiResponse.kind === 'text' ? aiResponse.text : null };
   }
 
   const duplicate = findDuplicateReport(ctx.db, resolved.customerId, resolved.message, now, ctx.env.DUPLICATE_WINDOW_HOURS);

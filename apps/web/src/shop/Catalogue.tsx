@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Coffee, FileText, Headphones, Lamp, Shirt, CupSoda } from 'lucide-react';
 import { money, type Product } from './api';
 
 /**
@@ -47,8 +48,9 @@ function ProductCard({
 
   return (
     <article className="card" style={{ '--hue': String(product.imageHue) } as React.CSSProperties}>
-      <div className="swatch" aria-hidden="true" />
+      <div className="product-visual" aria-hidden="true">{productArt(product.id)}</div>
       <div className="card-body">
+        <p className="product-category">{product.digital ? 'Digital goods' : product.isSubscription ? 'Subscriptions' : 'Home & lifestyle'}</p>
         <h3>{product.name}</h3>
         <p className="blurb">{product.blurb}</p>
         <p className="price">{money(product.priceCents)}</p>
@@ -71,4 +73,14 @@ function ProductCard({
       </div>
     </article>
   );
+}
+
+function productArt(id: string): ReactNode {
+  const props = { size: 76, strokeWidth: 1.35 };
+  if (id.includes('LAMP')) return <Lamp {...props} />;
+  if (id.includes('JACKET')) return <Shirt {...props} />;
+  if (id.includes('COFFEE')) return <Coffee {...props} />;
+  if (id.includes('GUIDE')) return <FileText {...props} />;
+  if (id.includes('MUG')) return <CupSoda {...props} />;
+  return <Headphones {...props} />;
 }

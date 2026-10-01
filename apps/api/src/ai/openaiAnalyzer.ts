@@ -2,7 +2,7 @@ import OpenAI, { APIConnectionError, APIError, APIUserAbortError } from 'openai'
 import type { z } from 'zod';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildAgentUser, EXTRACTION_SYSTEM } from './prompts.js';
+import { buildAgentUser } from './prompts.js';
 import { AgentOutputSchema, type AgentOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
@@ -14,7 +14,6 @@ import {
   type AttemptObserver,
   type ChatInput,
   type ChatReply,
-  type ChatTool,
 } from './analyzer.js';
 import type { OrderRecord } from '../db/records.js';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -111,13 +110,7 @@ export function classifyProviderFailure(error: unknown): ProviderFailure {
   return { error: cap(`unexpected: ${describe(error)}`), retryable: false };
 }
 
-/**
- * The HTTP status, or null.
- *
- * `instanceof` on a generic class widens `status` to `any`, so it is read back
- * through `unknown` and checked. The alternative is trusting a value the compiler
- * has already given up on.
- */
+/** The HTTP status, or null. */
 function statusOf(error: APIError<number | undefined>): number | null {
   const status: unknown = (error as { status?: unknown }).status;
   return typeof status === 'number' ? status : null;
@@ -145,10 +138,6 @@ interface TokenUsage {
 export class OpenAiAnalyzer implements AIAnalyzer {
   readonly label: string;
   readonly model: string;
-  // Constructed only with a non-empty key - `createAnalyzer` returns
-  // `UnavailableAnalyzer` before reaching here otherwise - so a live provider
-  // is available by construction. Availability of a *call* is still decided at
-  // request time, where a 429 or a timeout is a real outcome worth recording.
   readonly available = true;
   readonly unavailableReason = null;
 
@@ -169,7 +158,6 @@ export class OpenAiAnalyzer implements AIAnalyzer {
       apiKey,
       baseURL: env.AI_BASE_URL ?? preset.baseUrl,
       timeout: env.AI_TIMEOUT_MS,
-      // Retries are this file's job, with backoff and failover this file can see.
       maxRetries: 0,
       defaultHeaders: {
         'HTTP-Referer': 'https://github.com/eL-iam123/refund-ai-support',
@@ -179,9 +167,6 @@ export class OpenAiAnalyzer implements AIAnalyzer {
   }
 
   async analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
-    // One deadline for the whole call, shared by every attempt and the repair
-    // pass, so the total time a customer waits is a configured number rather
-    // than candidates x attempts x timeout.
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
     const base = buildAgentUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
     let complaints = 'no completion';
@@ -192,7 +177,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
           ? base
           : `${base}\n\nYour previous reply was rejected: ${complaints}. Reply with valid JSON only.`;
 
-      const completion = await this.complete(EXTRACTION_SYSTEM, user, budget, observer);
+      const completion = await this.complete(base, user, budget, observer);
       const parsed = AgentOutputSchema.safeParse(parseJson(completion.text));
 
       if (parsed.success) {
@@ -200,9 +185,6 @@ export class OpenAiAnalyzer implements AIAnalyzer {
       }
 
       complaints = formatIssues(parsed.error).slice(0, 300);
-      // A schema failure is a failed attempt and belongs in the audit log, the
-      // same as an HTTP failure: "the model was asked and did not deliver" is
-      // exactly the fact an auditor needs.
       observer({
         model: completion.model,
         attempt: repair + 1,
@@ -247,11 +229,10 @@ export class OpenAiAnalyzer implements AIAnalyzer {
         failures.push(`${model}#${attempt} ${outcome.error}`);
 
         const canRetry = attempt < this.env.AI_MAX_ATTEMPTS && outcome.retryable;
-        if (canRetry) {
-          await backoff(attempt, budget);
-        } else if (!outcome.retryable) {
+        if (!canRetry) {
           break;
         }
+        await backoff(attempt, budget);
       }
     }
 
@@ -279,12 +260,6 @@ export class OpenAiAnalyzer implements AIAnalyzer {
             { role: 'system', content: system },
             { role: 'user', content: user },
           ],
-          // `json_object` rather than `json_schema`: every OpenAI-compatible
-          // endpoint supports the former, while several free models reject the
-          // latter outright. Conformance is enforced by Zod below instead.
-          // Providers with no such knob are sent nothing at all, because some
-          // reject an unrecognised `response_format` outright rather than
-          // ignoring it.
           ...(this.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
         },
         { signal: budget },
@@ -315,7 +290,6 @@ export class OpenAiAnalyzer implements AIAnalyzer {
       return { ok: false, ...failure };
     }
   }
-  }
 
   async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
@@ -342,8 +316,6 @@ Guidelines:
 
     const userContent = `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${input.tools.map((t) => t.name).join(', ')}`;
 
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-
     for (const model of this.candidates) {
       for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
         if (budget.aborted) {
@@ -351,6 +323,7 @@ Guidelines:
         }
 
         try {
+          const startedAt = Date.now();
           const completion = await this.client.chat.completions.create(
             {
               model,
@@ -360,55 +333,55 @@ Guidelines:
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userContent },
               ],
-              tools: input.tools.length > 0 ? [
-                {
-                  type: 'function',
-                  function: {
-                    name: 'remind_admin',
-                    description: 'Notify the human agent that the customer is waiting or pushing for a response.',
-                    parameters: { type: 'object', properties: {}, additionalProperties: false },
-                  },
-                },
-              ] : undefined,
-              tool_choice: input.tools.length > 0 ? 'auto' : undefined,
+              ...(input.tools.length > 0
+                ? {
+                    tools: [
+                      {
+                        type: 'function' as const,
+                        function: {
+                          name: 'remind_admin',
+                          description: 'Notify the human agent that the customer is waiting or pushing for a response.',
+                          parameters: { type: 'object', properties: {}, additionalProperties: false },
+                        },
+                      },
+                    ],
+                    tool_choice: 'auto' as const,
+                  }
+                : {}),
             },
             { signal: budget },
           );
 
-          const text = firstMessage(completion);
-          if (text.trim().length === 0) {
-            continue;
-          }
-
-          const toolCalls = completion.choices[0]?.message.tool_calls;
-          if (toolCalls && toolCalls.length > 0) {
-            const toolCall = toolCalls[0];
-            if (toolCall.function.name === 'remind_admin') {
-              observer({
-                model,
-                attempt,
-                ok: true,
-                latencyMs: 0,
-                promptTokens: null,
-                completionTokens: null,
-                error: null,
-              });
-              return { kind: 'tool_call', tool: 'remind_admin', model };
-            }
-          }
-
-          if (text.trim().length > 0) {
+          const message = completion.choices[0]?.message;
+          const toolCall = message?.tool_calls?.[0];
+          if (toolCall !== undefined && 'function' in toolCall && toolCall.function.name === 'remind_admin') {
             observer({
               model,
               attempt,
               ok: true,
-              latencyMs: 0,
+              latencyMs: Date.now() - startedAt,
               promptTokens: null,
               completionTokens: null,
               error: null,
             });
-            return { kind: 'text', text, model };
+            return { kind: 'tool_call', tool: 'remind_admin', model };
           }
+
+          const text = message?.content ?? '';
+          if (text.trim().length === 0) {
+            continue;
+          }
+
+          observer({
+            model,
+            attempt,
+            ok: true,
+            latencyMs: Date.now() - startedAt,
+            promptTokens: null,
+            completionTokens: null,
+            error: null,
+          });
+          return { kind: 'text', text, model };
         } catch (error) {
           const failure = classifyProviderFailure(error);
           if (!failure.retryable || attempt >= this.env.AI_MAX_ATTEMPTS) {

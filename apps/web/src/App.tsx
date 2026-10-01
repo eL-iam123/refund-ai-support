@@ -137,13 +137,15 @@ function ShopRoute(): ReactNode {
   const { products, loading, error } = useCatalogue();
   return (
     <div className="stack">
-      <div>
-        <h1>Everything here is worth testing</h1>
-        <p className="lede">
-          Each product exists to make the refund assistant show a different behaviour. Buy
-          something, then tell it what went wrong.
-        </p>
-      </div>
+      <section className="shop-hero">
+        <div>
+          <p className="eyebrow">Official storefront</p>
+          <h1>Good things, clearly priced.</h1>
+          <p className="lede">Shop practical finds, then manage every order from one simple account.</p>
+        </div>
+        <div className="hero-stat"><strong>6</strong><span>items ready to ship</span></div>
+      </section>
+      <div className="section-heading"><div><p className="eyebrow">Featured catalogue</p><h2>Popular right now</h2></div><span className="muted small">Delivery options shown at checkout</span></div>
       {error !== null ? <p className="error">{error}</p> : null}
       {loading ? <Spinner /> : <Catalogue products={products} onAdd={addToCart} inCart={quantityIn(cartLines())} />}
     </div>

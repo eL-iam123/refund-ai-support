@@ -1,0 +1,18 @@
+- generic [ref=e3]:
+  - heading "Staff access" [level=1] [ref=e4]
+  - paragraph [ref=e5]:
+    - text: This area lists customers, their orders and every decision, so it is closed to anonymous callers. Sign in with the operator account configured in
+    - code [ref=e6]: .env
+    - text: ; the demo credentials are in
+    - code [ref=e7]: admin-login.txt
+    - text: .
+  - paragraph [ref=e8]:
+    - text: The session lives in an httpOnly cookie for eight hours, so this tab holds nothing a script could read. Signing out clears the cookie; changing
+    - code [ref=e9]: ADMIN_API_SECRET
+    - text: invalidates every outstanding session at once.
+  - generic [ref=e10]:
+    - generic [ref=e11]: Username
+    - textbox "Username" [ref=e12]
+    - generic [ref=e13]: Password
+    - textbox "Password" [ref=e14]
+    - button "Sign in" [disabled] [ref=e15]
