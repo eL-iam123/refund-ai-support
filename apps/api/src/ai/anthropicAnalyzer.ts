@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildAgentUser, EXTRACTION_SYSTEM } from './prompts.js';
+import { buildAgentUser, CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM } from './prompts.js';
 import { AgentOutputSchema, type AgentOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
@@ -80,22 +80,6 @@ interface MessageResponse {
 function cap(message: string): string {
   return redactSecrets(message).slice(0, MAX_ERROR_LENGTH);
 }
-
-const CHAT_SYSTEM_PROMPT = `You are a helpful customer support assistant for a refund service. A human agent has taken over this conversation and is reviewing the case. Your role is to be helpful, conversational, and empathetic while the human agent reviews the case.
-
-IMPORTANT: You have NO authority to make monetary decisions, approve refunds, deny claims, or make any financial commitments. Your role is purely conversational - be helpful, empathetic, and keep the customer informed.
-
-You have ONE tool available:
-- remind_admin: Use this when the customer is pushing for a response, seems frustrated, has been waiting a long time, or explicitly asks for the human agent. This notifies the human agent that the customer is waiting.
-
-Guidelines:
-- Be warm, empathetic, and conversational - like a helpful colleague keeping the customer company
-- Acknowledge their frustration if they express it
-- Reassure them that a human agent is reviewing their case
-- Never make promises about refunds, approvals, denials, or timelines
-- If they ask about money/refunds, say you don't have that authority and the human agent is reviewing
-- If they seem frustrated or have been waiting, use the remind_admin tool
-- Keep responses concise but warm and human`;
 
 export class AnthropicAnalyzer implements AIAnalyzer {
   readonly label: string;
@@ -267,10 +251,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
    */
   async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const historyText = input.history
-      .map((line) => `${line.role}: ${line.text}`)
-      .join('\n');
-    const userContent = `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${input.tools.map((t) => t.name).join(', ')}`;
+    const body = chatRequestBody(this.candidates[0] ?? 'unknown', input);
 
     for (const model of this.candidates) {
       for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
@@ -278,73 +259,77 @@ export class AnthropicAnalyzer implements AIAnalyzer {
           throw new AiUnavailableError('chat time budget exhausted');
         }
 
-        const startedAt = Date.now();
-        try {
-          const body: Record<string, unknown> = {
-            model,
-            max_tokens: this.env.AI_MAX_TOKENS,
-            temperature: 0.7,
-            system: CHAT_SYSTEM_PROMPT,
-            messages: [{ role: 'user', content: userContent }],
-          };
-          if (input.tools.length > 0) {
-            body.tools = [remindTool()];
-            body.tool_choice = { type: 'auto' };
-          }
-
-          const response = await fetch(`${this.baseUrl}/messages`, {
-            method: 'POST',
-            signal: budget,
-            headers: {
-              'content-type': 'application/json',
-              'x-api-key': this.apiKey,
-              'anthropic-version': ANTHROPIC_VERSION,
-            },
-            body: JSON.stringify(body),
-          });
-
-          if (!response.ok) {
-            const failedBody = await response.text().catch(() => '');
-            throw new HttpStatusError(response.status, failedBody);
-          }
-
-          const data = (await response.json()) as MessageResponse;
-          const usage = {
-            promptTokens: data.usage?.input_tokens ?? null,
-            completionTokens: data.usage?.output_tokens ?? null,
-          };
-
-          const toolUse = data.content?.find((c) => c.type === 'tool_use');
-          if (toolUse && toolUse.name === REMIND_TOOL) {
-            observer({ model, attempt, ok: true, latencyMs: Date.now() - startedAt, ...usage, error: null });
-            return { kind: 'tool_call', tool: REMIND_TOOL, model };
-          }
-
-          const textContent = data.content?.find((c) => c.type === 'text')?.text ?? '';
-          if (textContent.trim().length > 0) {
-            observer({ model, attempt, ok: true, latencyMs: Date.now() - startedAt, ...usage, error: null });
-            return { kind: 'text', text: textContent, model };
-          }
-        } catch (error) {
-          const failure = classify(error);
-          observer({
-            model,
-            attempt,
-            ok: false,
-            latencyMs: Date.now() - startedAt,
-            promptTokens: null,
-            completionTokens: null,
-            error: failure.error,
-          });
-          if (!failure.retryable || attempt >= this.env.AI_MAX_ATTEMPTS) {
-            break;
-          }
+        const outcome = await this.chatAttempt(model, attempt, { ...body, model }, budget, observer);
+        if (outcome !== null) {
+          return outcome;
+        }
+        if (attempt < this.env.AI_MAX_ATTEMPTS) {
           await backoff(attempt, budget);
         }
       }
     }
 
     throw new AiUnavailableError(`all ${this.candidates.length} model(s) failed for chat`);
+  }
+
+  private async chatAttempt(
+    model: string,
+    attempt: number,
+    body: Record<string, unknown>,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<ChatReply | null> {
+    const startedAt = Date.now();
+    try {
+      const response = await fetch(`${this.baseUrl}/messages`, {
+        method: 'POST',
+        signal: budget,
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': ANTHROPIC_VERSION,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const failedBody = await response.text().catch(() => '');
+        throw new HttpStatusError(response.status, failedBody);
+      }
+
+      const data = (await response.json()) as MessageResponse;
+      const answer = chatAnswer(data, model);
+      if (answer === null) {
+        return null;
+      }
+
+      observer({
+        model,
+        attempt,
+        ok: true,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: data.usage?.input_tokens ?? null,
+        completionTokens: data.usage?.output_tokens ?? null,
+        error: null,
+      });
+      return answer;
+    } catch (error: unknown) {
+      const failure = classify(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      if (!failure.retryable) {
+        return null;
+      }
+      await backoff(attempt, budget);
+      return null;
+    }
   }
 }
 
@@ -430,6 +415,50 @@ function remindTool(): { name: string; description: string; input_schema: object
     description: 'Notify the human agent that the customer is waiting or pushing for a response.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
   };
+}
+
+/**
+ * The Messages body for one chat-mode turn.
+ *
+ * `tool_choice: auto` rather than the analysis adapter's `any`, because the
+ * answer here is usually prose. Forcing a tool would make the model call
+ * `remind_admin` on every message, which is precisely the opposite of the point
+ * of the tool.
+ */
+function chatRequestBody(model: string, input: ChatInput, maxTokens = 4096): Record<string, unknown> {
+  const historyText = input.history.map((line) => `${line.role}: ${line.text}`).join('\n');
+  const body: Record<string, unknown> = {
+    model,
+    max_tokens: maxTokens,
+    temperature: 0.7,
+    system: CHAT_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: 'user',
+        content: `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${input.tools.map((t) => t.name).join(', ')}`,
+      },
+    ],
+  };
+  if (input.tools.length > 0) {
+    body.tools = [remindTool()];
+    body.tool_choice = { type: 'auto' };
+  }
+  return body;
+}
+
+/**
+ * Reads the turn's answer off the response: a `remind_admin` tool call if the
+ * model reached for one, otherwise its prose. Null means nothing usable came
+ * back, which is a miss worth another attempt rather than a reply to send.
+ */
+function chatAnswer(payload: MessageResponse, model: string): ChatReply | null {
+  const toolUse = payload.content?.find((block) => block.type === 'tool_use');
+  if (toolUse !== undefined && toolUse.name === REMIND_TOOL) {
+    return { kind: 'tool_call', tool: REMIND_TOOL, model };
+  }
+
+  const text = payload.content?.find((block) => block.type === 'text')?.text ?? '';
+  return text.trim().length === 0 ? null : { kind: 'text', text, model };
 }
 
 /** The tool call, normalised to the union shape, or null when none was made. */

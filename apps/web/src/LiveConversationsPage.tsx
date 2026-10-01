@@ -53,13 +53,16 @@ export function LiveConversationsPage(): ReactNode {
   return (
     <div className="admin-page">
       <div className="console-intro">
-        <div>
-          <h1>Live</h1>
-          <p className="lede">
-            Conversations that moved in the last 24 hours. Pick one to read the case and, if a
-            colleague has taken it over, to answer the customer yourself.
-          </p>
-        </div>
+        <h1>Live</h1>
+        {/*
+          The heading and its explanation sit on one line rather than stacked, so
+          the page header costs a single row instead of the four that a block
+          heading over a wrapped paragraph produced.
+        */}
+        <p className="lede">
+          Conversations that moved in the last 24 hours. Pick one to read the case, or answer the
+          customer yourself if a colleague has taken it over.
+        </p>
       </div>
       <div className="live-layout">
         <AnalyticsStrip analytics={analytics} />
@@ -79,6 +82,23 @@ export function LiveConversationsPage(): ReactNode {
       </div>
     </div>
   );
+}
+
+/**
+ * The distinguishing tail of an order id.
+ *
+ * Order ids are UUIDs like `ORD-16934234-69a6-42f0-8e94-2a1e5bd32f8b`. The
+ * leading groups are a timestamp and do not differ between orders from the same
+ * run, so printing them is noise that costs three wrapped lines in a 270px
+ * column and nothing in telling one case from another. The last two groups are
+ * kept because they are what actually differs; the full id stays in the title.
+ */
+function shortOrder(orderId: string | null): string {
+  if (orderId === null) {
+    return 'No order';
+  }
+  const segments = orderId.split('-');
+  return segments.length <= 2 ? orderId : `…${segments.slice(-2).join('-')}`;
 }
 
 /**
@@ -173,20 +193,37 @@ function renderRows(
             className={`live-row ${selected !== null && conversationKey(selected) === conversationKey(row) ? 'is-active' : ''}`}
             onClick={() => onSelect(row)}
           >
-            <span className="live-row-name">
-              {row.customerName}
-              {row.activeHandoff !== null ? (
-                <span className="pill pill-escalated" title="A colleague has taken this over">taken over</span>
-              ) : null}
-              {row.openAppeals.length > 0 ? (
-                <span className="pill pill-denied" title={row.openAppeals.map((a) => a.reason).join('; ')}>
-                  {row.openAppeals.length} appeal{row.openAppeals.length > 1 ? 's' : ''}
-                </span>
-              ) : null}
-            </span>
-            <span className="small muted">
-              {row.orderId ?? 'No order yet'} · {row.activityCount} message{row.activityCount === 1 ? '' : 's'} ·{' '}
-              {formatTime(row.lastActivityAt)}
+            {/*
+              Three stacked lines: name, then status, then meta. The pills used
+              to sit beside the name, which squeezed the name into "Dana..." and
+              forced the pills themselves to shrink. Stacked, each line has the
+              full width and nothing has to abbreviate.
+            */}
+            <span className="live-row-name">{row.customerName}</span>
+            {row.activeHandoff !== null || row.openAppeals.length > 0 ? (
+              <span className="live-row-status">
+                {row.activeHandoff !== null ? (
+                  <span className="pill pill-escalated" title="A colleague has taken this over">taken over</span>
+                ) : null}
+                {row.openAppeals.length > 0 ? (
+                  <span className="pill pill-denied" title={row.openAppeals.map((a) => a.reason).join('; ')}>
+                    {row.openAppeals.length} appeal{row.openAppeals.length > 1 ? 's' : ''}
+                  </span>
+                ) : null}
+              </span>
+            ) : null}
+            <span className="live-row-meta">
+              {/*
+                The order id is a UUID, and at 270px it wraps onto three lines,
+                which made row heights step 90 / 110 / 128 and read as ragged.
+                A short form keeps every row one line and one height; the full id
+                stays in the title for anyone who needs to copy it.
+              */}
+              <span className="live-row-order" title={row.orderId ?? undefined}>
+                {shortOrder(row.orderId)}
+              </span>
+              <span className="live-row-count">{row.activityCount} msg</span>
+              <span className="live-row-time">{formatTime(row.lastActivityAt)}</span>
             </span>
           </button>
         </li>
@@ -236,41 +273,84 @@ function TakeoverConsole({
 
   return (
     <div className="case-viewer">
-      <header className="case-head">
-        <div>
-          <h2>{brief.customerName}</h2>
-          <p className="muted small">
-            {brief.orderId ?? 'No order yet'} · {STATE_TEXT[brief.state]}
-          </p>
-        </div>
-        {active === null ? (
-          <button type="button" className="btn" onClick={() => void run(() => api.staffTakeOver(conversation.customerId, conversation.orderId))}>
-            <Headset size={16} /> Take over
-          </button>
-        ) : (
-          <button type="button" className="btn btn-secondary" onClick={() => void run(() => api.staffHandBack(conversation.customerId))}>
-            Hand back to the assistant
-          </button>
-        )}
-      </header>
+      <CaseHead
+        brief={brief}
+        takenOver={active !== null}
+        onTakeOver={() => void run(() => api.staffTakeOver(conversation.customerId, conversation.orderId))}
+        onHandBack={() => void run(() => api.staffHandBack(conversation.customerId))}
+      />
       {errand.length > 0 ? <p className="error">{errand}</p> : null}
 
       {/*
-        The case file sits beside the thread rather than above it, because the
-        order an agent works in is: read the conversation, then check what the
-        pipeline concluded before replying. Stacked, the case file pushes the
-        thread below the fold on a long case, and the reply box with it.
+        The thread leads and the case file supports it. An agent opens a case to
+        read what was said and answer; the derived facts are the reference they
+        check against, so putting the case file first meant the conversation -
+        the reason they are here - was pushed to the right and down.
       */}
       <div className="case-split">
-        <div className="case-file">
-          <CaseBrief brief={brief} />
-        </div>
         <div className="case-thread">
           <ThreadView thread={thread} />
           {active !== null ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
         </div>
+        <div className="case-file">
+          <CaseBrief brief={brief} />
+        </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Who this is, and the one verb that applies to it right now.
+ *
+ * The handoff is per customer rather than per order, so a colleague can hold the
+ * thread while a different order is open. The button therefore reflects the
+ * handoff, not the selected row - and `state` is spelled out in words here
+ * because it is the first thing an agent needs to know before reading anything
+ * else.
+ */
+function CaseHead({
+  brief,
+  takenOver,
+  onTakeOver,
+  onHandBack,
+}: {
+  brief: HandoffBrief;
+  takenOver: boolean;
+  onTakeOver: () => void;
+  onHandBack: () => void;
+}): ReactNode {
+  return (
+    <header className="case-head">
+      <div className="case-id">
+        <h2>{brief.customerName}</h2>
+        {/*
+          Order and state are two separate facts and read as two lines, the way
+          a document lists them. They were joined by a middot on one line, which
+          made the state - the thing an agent checks first - the part most likely
+          to be missed.
+        */}
+        <dl className="case-facts">
+          <div className="kv-pair">
+            <dt>Order</dt>
+            <dd>{brief.orderId ?? 'None yet'}</dd>
+          </div>
+          <div className="kv-pair">
+            <dt>Status</dt>
+            <dd>{STATE_TEXT[brief.state]}</dd>
+          </div>
+        </dl>
+      </div>
+      {takenOver ? (
+        <button type="button" className="btn btn-secondary" onClick={onHandBack}>
+          <Bot size={16} /> Hand back to the assistant
+        </button>
+      ) : (
+        <button type="button" className="btn" onClick={onTakeOver}>
+          <Headset size={16} /> Take over
+        </button>
+      )}
+    </header>
   );
 }
 
@@ -290,7 +370,8 @@ function CaseBrief({ brief }: { brief: HandoffBrief }): ReactNode {
       <RiskFlags brief={brief} />
       <details>
         <summary>
-          Case file <span className="muted small">what was asked, what was checked, what was decided</span>
+          <span className="summary-title">Case file</span>
+          <span className="summary-note">What was asked, what was checked, what was decided</span>
         </summary>
         <div className="case-columns">
           <WordsColumn brief={brief} />
@@ -370,13 +451,7 @@ function ClaimLines({ claim }: { claim: HandoffBrief['claim'] }): ReactNode {
       */}
       <dt>Amount</dt>
       <dd>
-        {claim.decision === 'approved' ? (
-          formatCents(claim.refundAmountCents)
-        ) : claim.decision === 'escalated' ? (
-          <span className="muted">{formatCents(claim.refundAmountCents)} proposed - not payable</span>
-        ) : (
-          <span className="muted">Nothing payable</span>
-        )}
+        <PayableAmount decision={claim.decision} cents={claim.refundAmountCents} />
       </dd>
       {claim.reasonCodes.length > 0 ? (
         <>
@@ -396,6 +471,24 @@ function ClaimLines({ claim }: { claim: HandoffBrief['claim'] }): ReactNode {
   );
 }
 
+/**
+ * What the claim's amount actually means, which is not the same as the number.
+ *
+ * Only an approval authorises payment. An escalation carries a figure the
+ * pipeline proposed and no human has approved, and a denial has nothing to pay.
+ * Showing the raw figure for either invites exactly the misreading the
+ * whole console is built to prevent, so both are stated in words instead.
+ */
+function PayableAmount({ decision, cents }: { decision: string; cents: number }): ReactNode {
+  if (decision === 'approved') {
+    return <>{formatCents(cents)}</>;
+  }
+  if (decision === 'escalated') {
+    return <span className="muted">{formatCents(cents)} proposed, not payable yet</span>;
+  }
+  return <span className="muted">Nothing payable</span>;
+}
+
 function PolicyTrail({ brief }: { brief: HandoffBrief }): ReactNode {
   if (brief.policyTrail.length === 0) {
     return null;
@@ -404,14 +497,21 @@ function PolicyTrail({ brief }: { brief: HandoffBrief }): ReactNode {
   return (
     <>
       <h3>
-        <Scale size={13} aria-hidden="true" /> Rules that ran ({blocking} of {brief.policyTrail.length}{' '}
-        decided)
+        <Scale size={13} aria-hidden="true" /> Rules that ran
+        <span className="h3-note">
+          {blocking} of {brief.policyTrail.length} decided
+        </span>
       </h3>
-      <ul className="case-quotes">
+      {/*
+        Each rule is a document entry: the rule id on its own line above the
+        reason it gave, rather than the pill sitting inline with the evidence and
+        wrapping mid-sentence.
+      */}
+      <ul className="rule-lines">
         {brief.policyTrail.map((rule) => (
           <li key={rule.ruleId}>
-            <span className={`pill ${OUTCOME_PILL[rule.outcome]}`}>{rule.ruleId}</span>{' '}
-            <span className="small">{rule.evidence}</span>
+            <span className={`pill ${OUTCOME_PILL[rule.outcome]}`}>{rule.ruleId}</span>
+            <span className="rule-why">{rule.evidence}</span>
           </li>
         ))}
       </ul>
@@ -426,12 +526,15 @@ function RiskFlags({ brief }: { brief: HandoffBrief }): ReactNode {
   return (
     <div className="risks">
       {brief.riskFlags.map((flag) => (
-        <p key={flag.label} className="note note-warn">
+        <div key={flag.label} className="note note-warn">
           <ShieldAlert size={16} aria-hidden="true" />
-          <span>
-            <strong>{flag.label}.</strong> {flag.detail}
-          </span>
-        </p>
+          <div>
+            <p className="risk-label">
+              <ShieldAlert size={12} aria-hidden="true" /> {flag.label}
+            </p>
+            <p className="risk-detail">{flag.detail}</p>
+          </div>
+        </div>
       ))}
     </div>
   );
@@ -475,86 +578,116 @@ function ThreadTurn({ turn }: { turn: StaffThreadTurn }): ReactNode {
   }
 }
 
-/** The live queue snapshot at the top of the page. */
+/** The shape the staff analytics endpoint returns. */
+interface QueueAnalytics {
+  readonly openHandoffs: number;
+  readonly escalatedAwaiting: number;
+  readonly awaitingReviewCents: number;
+  readonly decisionsToday: { readonly approved: number; readonly denied: number; readonly escalated: number };
+  readonly averageTakeoverMinutes: number | null;
+  readonly since: string;
+}
+
+/**
+ * The queue snapshot at the top of the page.
+ *
+ * One line, read left to right, rather than four tiles spread across 1400px. The
+ * tiles were `auto-fit minmax(130px, 1fr)`, so each metric sat in a column far
+ * wider than its content and the row read as four disconnected figures rather
+ * than one status line. Set as inline label/value pairs it becomes a single
+ * sentence an agent can scan across.
+ *
+ * An agent opening this page has one question - how much is waiting on me - so
+ * the handoffs and the escalations nobody has picked up are summed into a single
+ * "waiting" figure. The rest is context.
+ */
 function AnalyticsStrip({
   analytics,
 }: {
-  analytics: {
-    readonly data: {
-      readonly openHandoffs: number;
-      readonly escalatedAwaiting: number;
-      readonly awaitingReviewCents: number;
-      readonly decisionsToday: { readonly approved: number; readonly denied: number; readonly escalated: number };
-      readonly averageTakeoverMinutes: number | null;
-      readonly since: string;
-    } | null;
-    readonly error: string | null;
-  };
+  analytics: { readonly data: QueueAnalytics | null; readonly error: string | null };
 }): ReactNode {
   if (analytics.data === null) {
     return analytics.error !== null ? <p className="error">{analytics.error}</p> : <Spinner />;
   }
-  const {
-    openHandoffs,
-    escalatedAwaiting,
-    awaitingReviewCents,
-    decisionsToday,
-    averageTakeoverMinutes,
-    since,
-  } = analytics.data;
-  const waitingOnYou = openHandoffs + escalatedAwaiting;
+  const { openHandoffs, escalatedAwaiting, awaitingReviewCents, decisionsToday, averageTakeoverMinutes, since } =
+    analytics.data;
+  const total = decisionsToday.approved + decisionsToday.denied + decisionsToday.escalated;
   return (
     <aside className="live-analytics">
-      <ul className="analytics-grid">
-        <li className="analytics-item">
-          <span className="analytics-label">Waiting on an agent</span>
-          <span className="analytics-value">
-            <strong>{waitingOnYou}</strong>
-          </span>
-        </li>
-        <li className="analytics-item">
-          <span className="analytics-label">Needs review money</span>
-          <span className="analytics-value">
-            <strong>{money(awaitingReviewCents)}</strong>
-          </span>
-        </li>
-        <li className="analytics-item">
-          <span className="analytics-label">Decisions today</span>
-          <span className="analytics-value small">
+      <p className="queue-line">
+        <span className="queue-item">
+          <span className="queue-label">Waiting</span>
+          <strong className="queue-value">{openHandoffs + escalatedAwaiting}</strong>
+        </span>
+        <span className="queue-item">
+          <span className="queue-label">Needs review</span>
+          <strong className="queue-value">{money(awaitingReviewCents)}</strong>
+        </span>
+        <span className="queue-item">
+          <span className="queue-label">Decided today</span>
+          <span className="queue-value">
             <span className="pill pill-approved">{decisionsToday.approved} approved</span>
             <span className="pill pill-denied">{decisionsToday.denied} denied</span>
             <span className="pill pill-escalated">{decisionsToday.escalated} escalated</span>
           </span>
-        </li>
-        <li className="analytics-item">
-          <span className="analytics-label">Average takeover</span>
-          <span className="analytics-value">
-            {averageTakeoverMinutes === null ? 'No data' : `${Math.round(averageTakeoverMinutes)} min`}
-          </span>
-        </li>
-      </ul>
-      <p className="muted small">Counted from {formatTime(since)}</p>
+        </span>
+        <span className="queue-item">
+          <span className="queue-label">Avg takeover</span>
+          <strong className="queue-value">
+            {averageTakeoverMinutes === null ? 'None yet' : `${Math.round(averageTakeoverMinutes)} min`}
+          </strong>
+        </span>
+      </p>
+      <p className="muted small">
+        {total === 0 ? 'No decisions today' : `${total} decision${total === 1 ? '' : 's'} today`} · counted
+        from {formatTime(since)}
+      </p>
     </aside>
   );
 }
 
 
+/**
+ * One document entry, in reading order.
+ *
+ * The thread keeps its chat bubbles, but the text inside them is set as a
+ * document entry rather than as chat chrome: speaker and timestamp share one
+ * left-aligned line, the message follows underneath at full width, and any
+ * attachment or footer closes the entry. Previously the speaker sat on its own
+ * line, the message below it, and the timestamp was pushed to the far right of a
+ * header row - so the eye had to jump right, then back left, for every turn.
+ */
+function TurnHead({
+  children,
+  at,
+}: {
+  children: ReactNode;
+  at: string;
+}): ReactNode {
+  return (
+    <header className="turn-head">
+      <span className="who">{children}</span>
+      <span className="when">{formatTime(at)}</span>
+    </header>
+  );
+}
+
 function RequestTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'request' }> }): ReactNode {
   return (
     <>
       <div className="bubble-me">
-        <span className="who">
+        <TurnHead at={turn.createdAt}>
           <User size={13} aria-hidden="true" /> Customer
-        </span>
+        </TurnHead>
         <p>{turn.message}</p>
-        <span className="when">{formatTime(turn.createdAt)}</span>
       </div>
       <div className="bubble-them">
-        <div className="row">
-          <Bot size={16} aria-hidden="true" />
+        <TurnHead at={turn.createdAt}>
+          <Bot size={14} aria-hidden="true" /> Assistant
+        </TurnHead>
+        <p className="turn-verdict">
           <span className={`pill pill-${turn.decision}`}>{turn.decision}</span>
-          <span className="when">{formatTime(turn.createdAt)}</span>
-        </div>
+        </p>
         <p>{turn.responseText}</p>
         {/*
           Only an approval authorises money. The old `!== 'denied'` test printed
@@ -562,7 +695,7 @@ function RequestTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'request
           should never take away from an escalated case.
         */}
         {turn.decision === 'approved' ? (
-          <footer className="row small">{formatCents(turn.refundAmountCents)} authorised</footer>
+          <footer className="turn-foot">{formatCents(turn.refundAmountCents)} authorised</footer>
         ) : null}
       </div>
     </>
@@ -573,17 +706,15 @@ function DialogueTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'dialog
   return (
     <>
       <div className="bubble-me">
-        <span className="who">
+        <TurnHead at={turn.createdAt}>
           <User size={13} aria-hidden="true" /> Customer
-        </span>
+        </TurnHead>
         <p>{turn.message}</p>
       </div>
       <div className="bubble-them">
-        <div className="row">
-          <Bot size={16} aria-hidden="true" />
-          <span className="pill">Assistant asked</span>
-          <span className="when">{formatTime(turn.createdAt)}</span>
-        </div>
+        <TurnHead at={turn.createdAt}>
+          <Bot size={14} aria-hidden="true" /> Assistant asked
+        </TurnHead>
         <p>{turn.question}</p>
       </div>
     </>
@@ -593,9 +724,10 @@ function DialogueTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'dialog
 function UpdateTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'update' }> }): ReactNode {
   return (
     <div className="bubble-them">
-      <span className="pill pill-escalated">Reviewed by a person</span>
+      <TurnHead at={turn.createdAt}>
+        <span className="pill pill-escalated">Reviewed by a person</span>
+      </TurnHead>
       <p>{turn.body}</p>
-      <span className="when">{formatTime(turn.createdAt)}</span>
     </div>
   );
 }
@@ -604,23 +736,28 @@ function AgentTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'agent' }>
   if (turn.sender === 'customer') {
     return (
       <div className="bubble-me">
-        <span className="who">
+        <TurnHead at={turn.createdAt}>
           <User size={13} aria-hidden="true" /> Customer
-        </span>
+        </TurnHead>
         <p>{turn.body}</p>
-        {turn.media !== null ? <img src={turn.media.url} alt="Photo sent by the customer" className="chat-media" /> : null}
-        <span className="when">{formatTime(turn.createdAt)}</span>
+        {/*
+          Truthiness, not `!== null`: the declared type is `| null` but the wire
+          omits the key entirely on a text message, so `undefined` reaches here
+          too and a strict null check dereferenced it and took the whole page
+          down. This also avoids rendering a literal `0` into the DOM, which is
+          what `media && ...` did when the key was present but null.
+        */}
+        {turn.media ? <img src={turn.media.url} alt="Photo sent by the customer" className="chat-media" /> : null}
       </div>
     );
   }
   return (
     <div className="bubble-them bubble-agent">
-      <span className="who">
+      <TurnHead at={turn.createdAt}>
         <Headset size={13} aria-hidden="true" /> Customer agent
-      </span>
+      </TurnHead>
       <p>{turn.body}</p>
-      {turn.media !== null ? <img src={turn.media.url} alt="Photo sent by the agent" className="chat-media" /> : null}
-      <span className="when">{formatTime(turn.createdAt)}</span>
+      {turn.media ? <img src={turn.media.url} alt="Photo sent by the agent" className="chat-media" /> : null}
     </div>
   );
 }

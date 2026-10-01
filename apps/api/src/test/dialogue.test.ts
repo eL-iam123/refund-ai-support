@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LightMyRequestResponse } from 'fastify';
 import { appHarness, TEST_NOW, type AppHarness } from './helpers.js';
+import { sessionFor } from './shop-helpers.js';
 import { daysAgo } from '../db/seed.js';
 import type { Db } from '../db/connection.js';
 import { listRequests } from '../db/requestRepository.js';
@@ -58,6 +59,7 @@ const QUESTION = 'Which of your orders is that about?';
 
 describe('the ask-then-decide loop', () => {
   let harness: AppHarness;
+  let cookie: string;
 
   beforeEach(async () => {
     // Not the heuristic analyzer: a real fake that asks exactly once, then
@@ -82,6 +84,7 @@ describe('the ask-then-decide loop', () => {
       },
     });
     seedHistory(harness.db);
+    cookie = await sessionFor(harness, CUSTOMER);
   });
 
   afterEach(async () => {
@@ -92,6 +95,7 @@ describe('the ask-then-decide loop', () => {
     return harness.app.inject({
       method: 'POST',
       url: '/api/chat/messages',
+      headers: { cookie },
       payload: { customerId: CUSTOMER, message },
     });
   }

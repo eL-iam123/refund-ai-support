@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { appHarness, TEST_NOW, type AppHarness } from './helpers.js';
 import type { Behaviour } from './fakeAnalyzer.js';
 import { seedShop } from '../shop/seed.js';
+import { hashPassword, startSession, SESSION_COOKIE, type ShopUser } from '../shop/auth.js';
 
 /**
  * Signing in as a shopper, and being one.
@@ -117,4 +119,51 @@ function firstCookie(response: LightMyRequestResponse): string {
   const raw = response.headers['set-cookie'];
   const value = Array.isArray(raw) ? raw[0] : raw;
   return value === undefined ? '' : String(value).split(';')[0] ?? '';
+}
+
+/**
+ * A session cookie for a customer that was seeded rather than registered.
+ *
+ * The chat endpoint takes the customer from the session, not the body, so a test
+ * that posts as a scenario fixture needs an account attached to it. Rather than
+ * seeding a password and logging in - which would only prove the login route
+ * again - this writes the account row and mints the session directly, so the
+ * thing under test stays "can this customer post as themselves".
+ */
+export async function sessionFor(h: AppHarness, customerId: string): Promise<string> {
+  const customer = h.db.prepare('SELECT id, name, email FROM customers WHERE id = ?').get(customerId) as
+    | { id: string; name: string; email: string }
+    | undefined;
+  if (customer === undefined) {
+    throw new Error(`no seeded customer with id ${customerId}`);
+  }
+
+  return `${SESSION_COOKIE}=${startSession(h.db, accountFor(h, customer), TEST_NOW).token}`;
+}
+
+/**
+ * The account row for a seeded customer, created on first use.
+ *
+ * `shop_users.email` is UNIQUE, so a second call for the same customer has to
+ * find the row rather than insert another one - otherwise the second message a
+ * test sends is rejected by a constraint that has nothing to do with the thing
+ * under test.
+ */
+function accountFor(h: AppHarness, customer: { id: string; email: string }): ShopUser {
+  const existing = h.db.prepare('SELECT id, email, customer_id FROM shop_users WHERE customer_id = ?').get(customer.id) as
+    | { id: string; email: string; customer_id: string }
+    | undefined;
+  if (existing !== undefined) {
+    return { id: existing.id, email: existing.email, customerId: existing.customer_id, isDemo: false };
+  }
+
+  const userId = `USR-${randomUUID()}`;
+  const { hash, salt } = hashPassword(PASSWORD);
+  h.db
+    .prepare(
+      `INSERT INTO shop_users (id, email, password_hash, password_salt, customer_id, is_demo, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?)`,
+    )
+    .run(userId, customer.email, hash, salt, customer.id, TEST_NOW.toISOString());
+  return { id: userId, email: customer.email, customerId: customer.id, isDemo: false };
 }

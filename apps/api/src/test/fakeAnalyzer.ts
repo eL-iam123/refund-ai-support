@@ -77,7 +77,7 @@ function fixedAnalyzer(behaviour: { readonly extraction: Partial<ClaimExtraction
       recordOk(observer, 'fake-fixed-v1');
       return Promise.resolve(claimReply(extraction, 'fake-fixed-v1'));
     },
-    chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
+    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       observer({
         model: 'fake-fixed-v1',
         attempt: 1,
@@ -118,7 +118,7 @@ function askAnalyzer(behaviour: {
       }
       return Promise.resolve(claimReply(extraction, 'fake-ask-v1'));
     },
-    chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
+    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       observer({
         model: 'fake-ask-v1',
         attempt: 1,

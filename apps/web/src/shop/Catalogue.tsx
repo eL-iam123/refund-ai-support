@@ -35,8 +35,15 @@ function addLabel(soldOut: boolean, inCart: number): string {
   return inCart > 0 ? `Add another (${inCart} in cart)` : 'Add to cart';
 }
 
-function ProductCard({
-  product,
+/** The aisle a product sits in, in the order they are actually distinguished. */
+function categoryLabel(product: Product): string {
+  if (product.digital) {
+    return 'Digital goods';
+  }
+  return product.isSubscription ? 'Subscriptions' : 'Home & lifestyle';
+}
+
+function ProductCard({  product,
   onAdd,
   quantity,
 }: {
@@ -50,7 +57,7 @@ function ProductCard({
     <article className="card" style={{ '--hue': String(product.imageHue) } as React.CSSProperties}>
       <div className="product-visual" aria-hidden="true">{productArt(product.id)}</div>
       <div className="card-body">
-        <p className="product-category">{product.digital ? 'Digital goods' : product.isSubscription ? 'Subscriptions' : 'Home & lifestyle'}</p>
+        <p className="product-category">{categoryLabel(product)}</p>
         <h3>{product.name}</h3>
         <p className="blurb">{product.blurb}</p>
         <p className="price">{money(product.priceCents)}</p>

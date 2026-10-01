@@ -17,7 +17,7 @@ import {
 import { toRequestDto } from '../serialize.js';
 import { HttpError, badRequest } from '../errors.js';
 import { resolveShopSession, SESSION_COOKIE } from '../../shop/auth.js';
-import { activeHandoffForCustomer, recordAgentMessage, type AgentMessage } from '../../db/handoffs.js';
+import { recordAgentMessage, takeoverForEscalated, type ActiveHandoff, type AgentMessage } from '../../db/handoffs.js';
 import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
 import { toAnalyzerOrder } from '../../ai/openaiAnalyzer.js';
@@ -35,16 +35,24 @@ import type { ChatInput, ChatReply } from '../../ai/analyzer.js';
 
 type ChatMessageBody = CreateRefundRequest;
 
+/** How much of the thread the escalated assistant is shown each turn. */
+const CHAT_HISTORY_LIMIT = 20;
+
+/** The 201 body of a message that landed on a live human thread. */
+interface HandoffBody {
+  readonly received: boolean;
+  readonly agentConnected: boolean;
+  readonly message: AgentMessage;
+  /** The assistant's conversational reply, or null when it only called a tool. */
+  readonly aiResponse: string | null;
+}
+
 async function handleChatMessage(
   request: FastifyRequest<{ Body: ChatMessageBody }>,
   reply: FastifyReply,
   ctx: AppContext,
   hub: LiveHub,
-): Promise<
-  | { received: boolean; agentConnected: boolean; message: AgentMessage; aiResponse: string | null }
-  | { question: string; dialogueId: string }
-  | { request: RefundRequestDto }
-> {
+): Promise<HandoffBody | { question: string; dialogueId: string } | { request: RefundRequestDto }> {
   const body = CreateRefundRequestSchema.safeParse(request.body);
   if (!body.success) {
     throw badRequest(
@@ -67,70 +75,10 @@ async function handleChatMessage(
   const resolved: CreateRefundRequest = { ...body.data, customerId: session.customerId };
   const now = ctx.now();
 
-  const active = activeHandoffForCustomer(ctx.db, session.customerId);
-  if (active !== null) {
-    // A person is live on the thread. The pipeline is bypassed; the "AI" is
-    // now a conversational assistant with no monetary authority and one tool:
-    // nudging the human agent when the customer is pushing.
-    const history = transcriptForOrder(ctx.db, session.customerId, active.orderId, ctx.now(), 20);
-    const order = active.orderId === null ? null : findOrder(ctx.db, session.customerId, active.orderId, now);
-    const chatInput: ChatInput = {
-      message: body.data.message,
-      order: toAnalyzerOrder(order),
-      history,
-      tools: [{ name: 'remind_admin', description: 'Notify the human agent that the customer is waiting or pushing for a response.' }],
-    };
-
-    let aiResponse: ChatReply;
-    try {
-      aiResponse = await ctx.pipeline.analyzer.chat(chatInput, (attempt) =>
-        ctx.pipeline.recordAttempt('chat', ctx.pipeline.analyzer.label, attempt),
-      );
-    } catch (error) {
-      // If chat fails, fall back to routing straight to the human agent
-      ctx.log.error({ err: error }, 'chat.failed');
-      const message = recordAgentMessage(ctx.db, {
-        handoffId: active.id,
-        sender: 'customer',
-        body: body.data.message,
-        now: ctx.now(),
-      });
-      hub.notifyStaff({ type: 'customer.message', customerId: session.customerId, message });
-      hub.notifyStaff({ type: 'conversation.updated', customerId: session.customerId, orderId: active.orderId });
-      ctx.log.info({ customerId: session.customerId, handoffId: active.id }, 'chat.routed-to-agent');
-      reply.code(201);
-      return { received: true, agentConnected: true, message, aiResponse: null };
-    }
-
-    // Record the customer's message
-    const customerMessage = recordAgentMessage(ctx.db, {
-      handoffId: active.id,
-      sender: 'customer',
-      body: body.data.message,
-      now: ctx.now(),
-    });
-
-    // If AI used remind_admin tool, notify staff
-    if (aiResponse.kind === 'tool_call' && aiResponse.tool === 'remind_admin') {
-      hub.notifyStaff({ type: 'customer.pushing', customerId: session.customerId, orderId: active.orderId });
-    }
-
-    // Record AI's response so the thread stays continuous in the staff view
-    if (aiResponse.kind === 'text') {
-      recordAgentMessage(ctx.db, {
-        handoffId: active.id,
-        sender: 'agent',
-        body: aiResponse.text,
-        now: ctx.now(),
-      });
-    }
-
-    hub.notifyStaff({ type: 'customer.message', customerId: session.customerId, message: customerMessage });
-    hub.notifyStaff({ type: 'conversation.updated', customerId: session.customerId, orderId: active.orderId });
-    ctx.log.info({ customerId: session.customerId, handoffId: active.id }, 'chat.routed-to-agent');
-
+  const takeover = takeoverForEscalated(ctx.db, session.customerId, resolved.orderId, now);
+  if (takeover !== null) {
     reply.code(201);
-    return { received: true, agentConnected: true, message: customerMessage, aiResponse: aiResponse.kind === 'text' ? aiResponse.text : null };
+    return await chatDuringHandoff(ctx, hub, takeover, body.data.message, now);
   }
 
   const duplicate = findDuplicateReport(ctx.db, resolved.customerId, resolved.message, now, ctx.env.DUPLICATE_WINDOW_HOURS);
@@ -156,6 +104,73 @@ async function handleChatMessage(
   const stored = storeDecided(ctx, input, result);
   reply.code(201);
   return { request: toRequestDto(stored) };
+}
+
+/**
+ * The escalated path: a person is live on the thread, so the pipeline is
+ * bypassed entirely and the model becomes a conversational assistant with no
+ * monetary authority. Its only tool is `remind_admin`, which nudges the staff
+ * console when the customer is pushing for a person.
+ */
+async function chatDuringHandoff(
+  ctx: AppContext,
+  hub: LiveHub,
+  active: ActiveHandoff,
+  message: string,
+  now: Date,
+): Promise<HandoffBody> {
+  const history = transcriptForOrder(ctx.db, active.customerId, active.orderId, now, CHAT_HISTORY_LIMIT);
+  const order = active.orderId === null ? null : findOrder(ctx.db, active.customerId, active.orderId, now);
+  const chatInput: ChatInput = {
+    message,
+    order: toAnalyzerOrder(order),
+    history,
+    tools: [
+      {
+        name: 'remind_admin',
+        description: 'Notify the human agent that the customer is waiting or pushing for a response.',
+      },
+    ],
+  };
+
+  const customerMessage = recordAgentMessage(ctx.db, { handoffId: active.id, sender: 'customer', body: message, now });
+  const reply = await askAssistant(ctx, chatInput);
+
+  if (reply.kind === 'tool_call') {
+    hub.notifyStaff({ type: 'customer.pushing', customerId: active.customerId, orderId: active.orderId });
+  } else if (reply.kind === 'text') {
+    recordAgentMessage(ctx.db, { handoffId: active.id, sender: 'agent', body: reply.text, now });
+  }
+
+  hub.notifyStaff({ type: 'customer.message', customerId: active.customerId, message: customerMessage });
+  hub.notifyStaff({ type: 'conversation.updated', customerId: active.customerId, orderId: active.orderId });
+  ctx.log.info({ customerId: active.customerId, handoffId: active.id, ai: reply.kind }, 'chat.routed-to-agent');
+
+  return {
+    received: true,
+    agentConnected: true,
+    message: customerMessage,
+    aiResponse: reply.kind === 'text' ? reply.text : null,
+  };
+}
+
+/**
+ * One attempt at the conversational reply, degrading to nothing when the model
+ * is unreachable.
+ *
+ * The customer's message is already recorded by the time this runs, so a failure
+ * here costs the thread a reply rather than the thread its turn: the person on
+ * the line still sees the customer, which is the only thing that matters.
+ */
+async function askAssistant(ctx: AppContext, input: ChatInput): Promise<ChatReply | { kind: 'failed' }> {
+  try {
+    return await ctx.pipeline.analyzer.chat(input, (attempt) =>
+      ctx.pipeline.recordAttempt('chat', ctx.pipeline.analyzer.label, attempt),
+    );
+  } catch (error) {
+    ctx.log.error({ err: error }, 'chat.failed');
+    return { kind: 'failed' };
+  }
 }
 
 export function registerChatRoutes(app: FastifyInstance, ctx: AppContext, hub: LiveHub): void {

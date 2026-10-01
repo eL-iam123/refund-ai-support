@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LightMyRequestResponse } from 'fastify';
-import { scenario, testEnv, TEST_NOW, type AppHarness } from './helpers.js';
-import { shopHarness, signIn, type SignedIn } from './shop-helpers.js';
+import { authHeader, scenario, testEnv, TEST_NOW, type AppHarness } from './helpers.js';
+import { shopHarness, signIn } from './shop-helpers.js';
 import { readEnv } from '../config/env.js';
 import { mintToken, verifyToken, AuthError } from '../auth/tokens.js';
 import { TEST_SECRET } from './helpers.js';
@@ -233,7 +233,6 @@ describe('staff authorization', () => {
 
   describe('request cost controls', () => {
     it('rejects an oversized message before it reaches the model', async () => {
-      const fixture = scenario('S-01');
       const response = await harness.app.inject({
         method: 'POST',
         url: '/api/chat/messages',

@@ -143,6 +143,13 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .bubble-me, .bubble-them { max-width: min(76%, 620px); padding: 11px 13px; border-radius: 7px; font-size: .9rem; white-space: pre-wrap; }
 .bubble-me { align-self: flex-end; color: #4b2100; background: var(--brand-soft); border: 1px solid #ffd3b5; }
 .bubble-them { align-self: flex-start; background: var(--surface-soft); border: 1px solid var(--line); }
+/* Flipped for the live console only. The storefront classes the customer's own
+   message `bubble-me`, so the customer sits right and the assistant left - correct
+   there, where the reader is the customer. A staff reader is the other party, so
+   the same mapping puts the customer's words on the left and the assistant's on
+   the right, which is the side they are on from the console's point of view. */
+.live-console .bubble-me { align-self: flex-start; }
+.live-console .bubble-them { align-self: flex-end; }
 .bubble-them p:last-child { margin-bottom: 0; }
 .bubble-agent { background: #f5f3ff; border-color: #ddd6fe; }
 .bubble-typing { display: flex; align-items: center; gap: 9px; color: var(--ink-faint); }
@@ -168,6 +175,21 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .topbar-admin button.linkish:hover { border-color: #404040; }
 .admin-app .main { width: min(1440px, 100%); }
 .admin-page { display: grid; gap: 22px; }
+/* `.console-intro` carries its own 22px bottom margin because on the dashboard it
+   sits directly in `.main`. Inside `.admin-page` that margin stacks on the
+   parent's 22px gap and the two sections end up 44px apart, which is the widest
+   gap on the page and reads as a seam. The parent grid owns the rhythm here. */
+.admin-page > .console-intro { margin-bottom: 0; align-items: baseline; }
+/* `justify-content: space-between` was written for the dashboard, where the
+   intro has a status pill on the right. With one child here the text collapsed
+   to its intrinsic width and the lede wrapped into a narrow orphan beside a
+   1400px page. One child takes the full width, capped at a readable measure. */
+.admin-page > .console-intro > div { flex: 1 1 auto; max-width: 70ch; }
+/* Live only: heading and lede share one line, so the header block is a single
+   row instead of a heading stacked over a wrapped paragraph. */
+.admin-page > .console-intro { display: flex; flex-direction: row; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.admin-page > .console-intro h1 { flex: none; margin: 0; font-size: clamp(1.35rem, 2vw, 1.75rem); }
+.admin-page > .console-intro .lede { flex: 1 1 320px; margin: 0; min-width: 0; max-width: 78ch; }
 .admin-page-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
 .admin-page-heading h1 { margin-top: 3px; font-size: clamp(1.55rem, 2.4vw, 2.1rem); }
 .admin-page-heading .lede { margin-top: 8px; }
@@ -193,23 +215,77 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .system-metric strong { overflow-wrap: anywhere; font-size: 1rem; }
 .metric-warn strong { color: var(--wait); }
 .table { width: 100%; border-collapse: collapse; font-size: .84rem; }.table th { padding: 11px 12px; color: var(--ink-faint); background: var(--surface-soft); border-bottom: 1px solid var(--line); font-size: .7rem; letter-spacing: .05em; text-align: left; text-transform: uppercase; }.table td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: top; }.table tr:hover td { background: #fcfcfc; }.table th.num, .table td.num { text-align: right; }.msg-cell { max-width: 300px; }.rule-list, .signals, .timings, .audit, .quotes { display: grid; gap: 7px; font-size: .83rem; }.timings li, .audit li { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }.timing-ms { color: var(--brand-deep); font-family: var(--mono); }.drawer { margin-top: 18px; }.drawer-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }.quote { padding-left: 12px; color: var(--ink-soft); border-left: 2px solid var(--line-strong); }.gate { width: min(440px, calc(100% - 40px)); margin: 10vh auto; padding: 24px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 12px 34px rgb(0 0 0 / 8%); }.gate form { display: grid; gap: 9px; margin-top: 20px; }.gate-note, .gate-error, .gate-ok { margin-top: 14px; padding: 10px; border-radius: 6px; font-size: .84rem; }.precedence { display: grid; gap: 8px; }
-.live-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 18px; }
+/* One vertical scale for the whole page: 22px between page-level sections, 16px
+   inside the case viewer, 12px between related blocks. Previously the four
+   boundaries measured 44 / 18 / 16 / 14 going down the page, so the eye never
+   learned how far apart things were and each step felt different. */
+/* 270px was widened to 310px while the status pills still shared a line with
+   the name. With the pills stacked below it, 270px fits the name in full again. */
+.live-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 22px 18px; }
 /* Three children, two columns: without spanning, the strip takes the 270px
    sidebar, the list takes the wide column, and the case file wraps underneath at
    sidebar width. The strip is a header row; the list and the case file are the
    two columns below it. */
 .live-analytics { grid-column: 1 / -1; }
-.live-list, .live-console { display: grid; gap: 14px; align-content: start; }.live-list-rows { display: grid; gap: 6px; }.live-row { display: grid; gap: 5px; width: 100%; padding: 11px; color: var(--ink); text-align: left; background: #fff; border: 1px solid var(--line); border-radius: 6px; }.live-row:hover, .live-row.is-active { border-color: var(--brand); background: var(--brand-soft); }.live-row-name { display: flex; align-items: center; gap: 8px; font-weight: 700; }.case-brief, .thread-stack { padding: 16px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+.live-list, .live-console { display: grid; gap: 16px; align-content: start; }
+/* The list is a `.panel`, so it inherits side margins from `.panel > *`; it
+   needs its own top padding under the head, and a cap so a busy day does not
+   push the case file off the page. */
+.live-list > .live-list-rows { padding-top: 18px; }
+/* The list and the thread scroll independently, so both are capped. They share
+   one cap: at different heights the two columns end at different heights and
+   the page looks like it is sagging on one side. */
+.live-list-rows, .thread-stack { max-height: 58vh; overflow-y: auto; }
+.live-list-rows { display: grid; gap: 6px; }.live-row { display: grid; gap: 5px; width: 100%; padding: 11px; color: var(--ink); text-align: left; background: #fff; border: 1px solid var(--line); border-radius: 6px; }.live-row:hover, .live-row.is-active { border-color: var(--brand); background: var(--brand-soft); }
+/* Name gets a line to itself so nothing has to abbreviate; status pills get the
+   next line, and the meta line the one after. */
+.live-row-name { display: block; min-width: 0; overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.live-row-status { display: flex; flex-wrap: wrap; gap: 6px; }
+.live-row-status > .pill { flex: none; white-space: nowrap; }
+/* Two fixed lines per row: name + pills, then meta. At 270px the two pills take
+   roughly half the width, so the pieces are balanced rather than each taking an
+   equal third - the name was truncating to "Da..." while the message count
+   truncated to "1 m...". The timestamp is pinned right and never shrinks, since
+   it is what an agent scans the list for. */
+.live-row-meta { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--ink-faint); font-size: .72rem; white-space: nowrap; }
+.live-row-meta > span { overflow: hidden; text-overflow: ellipsis; }
+.live-row-order { flex: 1 1 auto; min-width: 0; font-family: var(--mono); }
+.live-row-count { flex: 0 1 auto; }
+.live-row-time { flex: none; padding-left: 4px; }.case-brief, .thread-stack { padding: 16px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
 .case-brief { padding: 0; background: none; border: 0; }
 .case-brief > .risks { margin-bottom: 12px; }
 .case-brief details { padding: 16px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
-.case-brief summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; cursor: pointer; font-weight: 700; }.case-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 24px; margin-top: 14px; }.case-brief h3 { display: flex; align-items: center; gap: 6px; margin: 18px 0 8px; color: var(--ink-faint); font-size: .72rem; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }.case-brief h3:first-child { margin-top: 0; }
+.case-brief summary { display: flex; flex-wrap: wrap; gap: 4px; flex-direction: column; align-items: flex-start; cursor: pointer; font-weight: 700; }.summary-title { font-size: .9rem; }.summary-note { color: var(--ink-faint); font-size: .72rem; font-weight: 500; letter-spacing: 0; text-transform: none; }.case-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 24px; margin-top: 14px; }.case-brief h3 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 18px 0 8px; color: var(--ink-faint); font-size: .72rem; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }.case-brief h3:first-child { margin-top: 0; }
+/* Count trails its heading on the same line but in sentence case, so it reads as
+   a note rather than as another section title. */
+.h3-note { letter-spacing: 0; text-transform: none; font-weight: 500; }
+/* One rule per entry: id above, reason below. */
+.rule-lines { display: grid; gap: 10px; font-size: .84rem; }
+.rule-lines li { display: grid; gap: 4px; justify-items: start; }
+.rule-why { color: var(--ink-soft); }
+/* Risk flags as label-over-detail, both left aligned. */
+.risk-label { display: flex; align-items: center; gap: 5px; margin: 0; font-weight: 750; }
+.risk-detail { margin: 4px 0 0; }
+/* Case header facts as a stacked list rather than one middot-joined line. */
+.case-facts { display: grid; gap: 2px; margin: 6px 0 0; font-size: .82rem; }
+.kv-pair { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.kv-pair dt { color: var(--ink-faint); }
+.kv-pair dd { margin: 0; overflow-wrap: anywhere; }
 /* Who spoke, and when. A staff reader is the other party in this conversation,
    so the storefront's "me" styling cannot be reused without labelling. */
-.who { display: flex; align-items: center; gap: 5px; margin-bottom: 4px; color: var(--ink-faint); font-size: .68rem; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+.who { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-faint); font-size: .68rem; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
 .when { color: var(--ink-faint); font-size: .68rem; font-weight: 500; }
-.thread-stack .when { display: block; margin-top: 6px; }
-.thread-stack .row .when { margin: 0 0 0 auto; }
+/* One entry per turn, set like a document: speaker and time on a single left
+   aligned header line, then the message at full width underneath. The timestamp
+   used to sit on the far right of a header row, which made the eye jump right
+   and back for every turn in the case. */
+.turn-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.turn-head .when { margin-left: 0; }
+.thread-stack p { margin: 0; }
+.thread-stack p + p { margin-top: 8px; }
+.thread-stack .turn-verdict { margin-bottom: 6px; }
+.thread-stack .turn-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: .82rem; font-weight: 700; }
+.thread-stack .chat-media { max-width: min(100%, 420px); margin-top: 8px; }
 .handoff-turn { border-style: dashed; background: transparent; color: var(--ink-soft); }
 .handoff-turn .when { margin: 0 0 4px; }
 /* Case file beside the thread, so the reply box stays reachable on a long case. */
@@ -218,7 +294,23 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .case-head h2 { margin-bottom: 2px; }
 .case-split { display: grid; grid-template-columns: minmax(0, 380px) minmax(0, 1fr); gap: 16px; align-items: start; }
 .case-file { display: grid; gap: 12px; min-width: 0; }
-.case-thread { display: flex; flex-direction: column; min-width: 0; padding: 4px 4px 0; }.case-quotes, .case-dialogue, .risks { display: grid; gap: 8px; font-size: .84rem; }.case-quotes li, .case-dialogue li { display: grid; gap: 3px; padding-left: 10px; border-left: 2px solid var(--line); }.thread-stack { gap: 10px; }.live-analytics { padding: 14px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }.analytics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }.analytics-item { display: grid; gap: 5px; }.analytics-value { font-size: 1.1rem; font-weight: 750; }
+.case-thread { display: flex; flex-direction: column; min-width: 0; }.case-quotes, .case-dialogue, .risks { display: grid; gap: 8px; font-size: .84rem; }.case-quotes li, .case-dialogue li { display: grid; gap: 3px; padding-left: 10px; border-left: 2px solid var(--line); }
+/* `.chat-log` caps itself at 66vh; the thread inherits the 58vh cap set with the
+   conversation list so both columns end level. Padding moves inside the box so
+   it counts toward the scroll height rather than adding to it. */
+/* The thread keeps the chat layout: the customer on the right, the assistant on
+   the left. What changed is the text inside - each turn reads as a document
+   entry, stacked top down in the order it happened, with the speaker named on
+   its own line above the message and the time beneath it. */
+.thread-stack { gap: 12px; padding: 14px; }
+/* The queue summary: one line of label/value pairs read left to right, instead of
+   four tiles in `auto-fit` columns far wider than their content. */
+.live-analytics { padding: 12px 16px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+.queue-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px; margin: 0; }
+.queue-item { display: flex; align-items: baseline; gap: 7px; }
+.queue-label { color: var(--ink-faint); font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.queue-value { display: inline-flex; align-items: center; gap: 6px; font-size: 1rem; font-weight: 750; font-variant-numeric: tabular-nums; }
+.live-analytics > .muted { margin: 6px 0 0; }
 .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 .filters select, .filters input { width: auto; min-width: 150px; }
 .request-toolbar { padding: 12px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; }

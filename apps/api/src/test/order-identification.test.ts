@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LightMyRequestResponse } from 'fastify';
 import type { RefundRequestDto } from '@refund/shared';
 import { appHarness, TEST_NOW, type AppHarness } from './helpers.js';
+import { sessionFor } from './shop-helpers.js';
 import { daysAgo } from '../db/seed.js';
 import type { Db } from '../db/connection.js';
 
@@ -57,10 +58,12 @@ function seedHistory(db: Db): void {
 
 describe('identifying which order a request is about', () => {
   let harness: AppHarness;
+  let cookie: string;
 
   beforeEach(async () => {
     harness = await appHarness();
     seedHistory(harness.db);
+    cookie = await sessionFor(harness, CUSTOMER);
   });
 
   afterEach(async () => {
@@ -71,6 +74,7 @@ describe('identifying which order a request is about', () => {
     const response: LightMyRequestResponse = await harness.app.inject({
       method: 'POST',
       url: '/api/chat/messages',
+      headers: { cookie },
       payload: { customerId: CUSTOMER, ...payload },
     });
     expect(response.statusCode).toBe(201);

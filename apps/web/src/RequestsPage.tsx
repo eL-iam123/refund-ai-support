@@ -4,7 +4,7 @@ import type { Decision, RefundRequestSummaryDto, RequestSourceDto } from '@refun
 import { api } from './api';
 import { DecisionBadge, Empty, ErrorNote, Loading, Panel } from './components';
 import { formatCents, formatTime, truncate } from './format';
-import { useAsyncData } from './useAsyncData';
+import { useAsyncData, type Async } from './useAsyncData';
 
 /**
  * The request queue.
@@ -65,17 +65,24 @@ export function RequestsPage(): ReactNode {
           onSource={setSource}
           onSearch={setSearch}
         />
-        {state.status === 'error' ? <ErrorNote error={state.error} /> : null}
-        {state.status === 'loading' ? <Loading label="Loading requests…" /> : null}
-        {state.status === 'ready' && state.value.requests.length === 0 ? (
-          <Empty>No requests match this filter.</Empty>
-        ) : null}
-        {state.status === 'ready' && state.value.requests.length > 0 ? (
-          <RequestTable requests={state.value.requests} />
-        ) : null}
+        <RequestResults state={state} />
       </Panel>
     </div>
   );
+}
+
+/** The four load states of the request table, in one place so the page stays declarative. */
+function RequestResults({ state }: { state: Async<{ requests: RefundRequestSummaryDto[] }> }): ReactNode {
+  if (state.status === 'error') {
+    return <ErrorNote error={state.error} />;
+  }
+  if (state.status === 'loading') {
+    return <Loading label="Loading requests…" />;
+  }
+  if (state.value.requests.length === 0) {
+    return <Empty>No requests match this filter.</Empty>;
+  }
+  return <RequestTable requests={state.value.requests} />;
 }
 
 function Filters({

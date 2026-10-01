@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LightMyRequestResponse } from 'fastify';
 import { SCENARIOS, type RefundRequestDto } from '@refund/shared';
 import { appHarness, TEST_NOW, type AppHarness } from './helpers.js';
+import { sessionFor } from './shop-helpers.js';
 import { daysAgo } from '../db/seed.js';
 import type { Db } from '../db/connection.js';
 
@@ -56,10 +57,12 @@ function seedSpree(db: Db): void {
 
 describe('partial refunds across a multi-item order', () => {
   let harness: AppHarness;
+  let cookie: string;
 
   beforeEach(async () => {
     harness = await appHarness();
     seedSpree(harness.db);
+    cookie = await sessionFor(harness, CUSTOMER);
   });
 
   afterEach(async () => {
@@ -70,6 +73,7 @@ describe('partial refunds across a multi-item order', () => {
     const response: LightMyRequestResponse = await harness.app.inject({
       method: 'POST',
       url: '/api/chat/messages',
+      headers: { cookie },
       payload: { customerId: CUSTOMER, orderId: ORDER, message },
     });
     expect(response.statusCode).toBe(201);

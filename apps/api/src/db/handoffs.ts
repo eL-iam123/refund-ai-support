@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Db } from './connection.js';
 import { queryAll } from './sql.js';
 import { openAppealsForCustomer, type Appeal } from './appeals.js';
+import { latestRequestForThread } from './requestRepository.js';
 
 /**
  * Live human takeover of a customer thread.
@@ -25,6 +26,17 @@ import { openAppealsForCustomer, type Appeal } from './appeals.js';
 
  /** Shown in the thread from the moment a person takes over until they hand back. */
 export const HANDSOFF_NOTICE = 'Connecting you to a customer agent - please hold.';
+
+/**
+ * The `agent_id` of a takeover nobody has claimed yet.
+ *
+ * A distinct sentinel rather than null, because "waiting for a person" and "a
+ * person is typing" are different things for the staff console to show and
+ * different things for the customer to be told. Everything downstream already
+ * keys on the presence of a handoff; only this id says the conversation is
+ * unattended.
+ */
+export const ESCALATION_AGENT = 'awaiting-agent';
 
 export interface ActiveHandoff {
   readonly id: string;
@@ -103,6 +115,56 @@ export function startHandoff(db: Db, input: StartHandoffInput): ActiveHandoff {
      VALUES (?, ?, ?, ?, ?, NULL)`,
   ).run(handoff.id, handoff.customerId, handoff.orderId, handoff.agentId, handoff.startedAt);
   return handoff;
+}
+
+/**
+ * The takeover an escalated thread should be talking to, real or automatic.
+ *
+ * This is where the persona switch lives. A human takeover is the obvious
+ * trigger, but escalation is the *decision*: once a thread has been escalated
+ * there is nothing left for the pipeline to compute, so running it again on the
+ * next message either re-decides a case already with a person or re-runs a model
+ * on a thread nobody is waiting on. Auto-provisioning a takeover for an escalated
+ * thread makes the escalated state the single trigger - a person taking over just
+ * fills in `agentId`.
+ *
+ * The escalation is *open* only until someone acts. A takeover on the thread
+ * that has since ended is the marker that a person looked at this case, which is
+ * what clears it: without that check the automatic takeover would reappear the
+ * moment a person handed the thread back, and hand-back would be a button that
+ * silently does nothing.
+ */
+export function takeoverForEscalated(
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  now: Date,
+): ActiveHandoff | null {
+  const live = activeHandoffForCustomer(db, customerId);
+  if (live !== null) {
+    return live;
+  }
+
+  const latest = latestRequestForThread(db, customerId, orderId);
+  if (latest === null || latest.decision !== 'escalated') {
+    return null;
+  }
+  if (escalationWasHandled(db, customerId, latest.orderId, latest.createdAt)) {
+    return null;
+  }
+  return startHandoff(db, { customerId, orderId: latest.orderId, agentId: ESCALATION_AGENT, now });
+}
+
+/** Whether a takeover on this thread opened and closed after the escalation. */
+function escalationWasHandled(db: Db, customerId: string, orderId: string | null, escalatedAt: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 AS handled FROM handoffs
+        WHERE customer_id = ? AND order_id IS ? AND ended_at IS NOT NULL AND ended_at >= ?
+        LIMIT 1`,
+    )
+    .get(customerId, orderId, escalatedAt);
+  return row !== undefined;
 }
 
 /** Ends the customer's live takeover, returning what it was, or null. */

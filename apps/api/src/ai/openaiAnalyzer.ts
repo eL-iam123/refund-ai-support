@@ -2,7 +2,7 @@ import OpenAI, { APIConnectionError, APIError, APIUserAbortError } from 'openai'
 import type { z } from 'zod';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildAgentUser } from './prompts.js';
+import { buildAgentUser, CHAT_SYSTEM_PROMPT } from './prompts.js';
 import { AgentOutputSchema, type AgentOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
@@ -293,28 +293,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
 
   async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-
-    const systemPrompt = `You are a helpful customer support assistant for a refund service. A human agent has taken over this conversation and is reviewing the case. Your role is to be helpful, conversational, and empathetic while the human agent reviews the case.
-
-IMPORTANT: You have NO authority to make monetary decisions, approve refunds, deny claims, or make any financial commitments. Your role is purely conversational - be helpful, empathetic, and keep the customer informed.
-
-You have ONE tool available:
-- remind_admin: Use this when the customer is pushing for a response, seems frustrated, has been waiting a long time, or explicitly asks for the human agent. This notifies the human agent that the customer is waiting.
-
-Guidelines:
-- Be warm, empathetic, and conversational - like a helpful colleague keeping the customer company
-- Acknowledge their frustration if they express it
-- Reassure them that a human agent is reviewing their case
-- Never make promises about refunds, approvals, denials, or timelines
-- If they ask about money/refunds, say you don't have that authority and the human agent is reviewing
-- If they seem frustrated or have been waiting, use the remind_admin tool
-- Keep responses concise but warm and human`;
-
-    const historyText = input.history
-      .map((line) => `${line.role}: ${line.text}`)
-      .join('\n');
-
-    const userContent = `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${input.tools.map((t) => t.name).join(', ')}`;
+    const messages = chatMessages(input);
 
     for (const model of this.candidates) {
       for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
@@ -322,53 +301,21 @@ Guidelines:
           throw new AiUnavailableError(`chat time budget exhausted`);
         }
 
+        const startedAt = Date.now();
         try {
-          const startedAt = Date.now();
           const completion = await this.client.chat.completions.create(
             {
               model,
               temperature: 0.7,
               max_tokens: this.env.AI_MAX_TOKENS,
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userContent },
-              ],
-              ...(input.tools.length > 0
-                ? {
-                    tools: [
-                      {
-                        type: 'function' as const,
-                        function: {
-                          name: 'remind_admin',
-                          description: 'Notify the human agent that the customer is waiting or pushing for a response.',
-                          parameters: { type: 'object', properties: {}, additionalProperties: false },
-                        },
-                      },
-                    ],
-                    tool_choice: 'auto' as const,
-                  }
-                : {}),
+              messages,
+              ...(input.tools.length > 0 ? { tools: [REMIND_FUNCTION], tool_choice: 'auto' as const } : {}),
             },
             { signal: budget },
           );
 
-          const message = completion.choices[0]?.message;
-          const toolCall = message?.tool_calls?.[0];
-          if (toolCall !== undefined && 'function' in toolCall && toolCall.function.name === 'remind_admin') {
-            observer({
-              model,
-              attempt,
-              ok: true,
-              latencyMs: Date.now() - startedAt,
-              promptTokens: null,
-              completionTokens: null,
-              error: null,
-            });
-            return { kind: 'tool_call', tool: 'remind_admin', model };
-          }
-
-          const text = message?.content ?? '';
-          if (text.trim().length === 0) {
+          const answer = chatAnswer(completion, model);
+          if (answer === null) {
             continue;
           }
 
@@ -381,7 +328,7 @@ Guidelines:
             completionTokens: null,
             error: null,
           });
-          return { kind: 'text', text, model };
+          return answer;
         } catch (error) {
           const failure = classifyProviderFailure(error);
           if (!failure.retryable || attempt >= this.env.AI_MAX_ATTEMPTS) {
@@ -393,6 +340,47 @@ Guidelines:
 
     throw new AiUnavailableError(`all ${this.candidates.length} model(s) failed for chat`);
   }
+}
+
+/** The chat-mode tool declaration, in OpenAI function-calling shape. */
+const REMIND_FUNCTION = {
+  type: 'function' as const,
+  function: {
+    name: 'remind_admin',
+    description: 'Notify the human agent that the customer is waiting or pushing for a response.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+};
+
+function chatMessages(input: ChatInput): { role: 'system' | 'user'; content: string }[] {
+  const historyText = input.history.map((line) => `${line.role}: ${line.text}`).join('\n');
+  const toolText = input.tools.map((t) => t.name).join(', ');
+  return [
+    { role: 'system', content: CHAT_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${toolText}`,
+    },
+  ];
+}
+
+/**
+ * Reads the turn's answer off the completion: a `remind_admin` tool call if the
+ * model reached for one, otherwise its prose. Null means the model said nothing
+ * usable, which is a miss worth another attempt rather than a reply to send.
+ */
+function chatAnswer(
+  completion: OpenAI.Chat.Completions.ChatCompletion,
+  model: string,
+): ChatReply | null {
+  const message = completion.choices[0]?.message;
+  const toolCall = message?.tool_calls?.[0];
+  if (toolCall !== undefined && 'function' in toolCall && toolCall.function.name === 'remind_admin') {
+    return { kind: 'tool_call', tool: 'remind_admin', model };
+  }
+
+  const text = message?.content ?? '';
+  return text.trim().length === 0 ? null : { kind: 'text', text, model };
 }
 
 function toAgentReply(data: AgentOutput, model: string): AgentReply {

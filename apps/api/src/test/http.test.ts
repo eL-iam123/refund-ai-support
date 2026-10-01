@@ -3,7 +3,8 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import type { RefundRequestDto, RefundRequestSummaryDto } from '@refund/shared';
 import { SCENARIOS } from '@refund/shared';
 import type { Db } from '../db/connection.js';
-import { appHarness, authHeader, scenario } from './helpers.js';
+import { appHarness, authHeader, scenario, type AppHarness } from './helpers.js';
+import { sessionFor } from './shop-helpers.js';
 
 /**
  * HTTP contract tests.
@@ -42,11 +43,13 @@ interface ErrorBody {
 
 let app: FastifyInstance;
 let db: Db;
+let harnessForSessions: AppHarness;
 
 beforeEach(async () => {
   const harness = await appHarness();
   app = harness.app;
   db = harness.db;
+  harnessForSessions = harness;
 });
 
 afterEach(async () => {
@@ -54,8 +57,29 @@ afterEach(async () => {
   db.close();
 });
 
-function postChat(body: unknown): Promise<LightMyRequestResponse> {
-  return app.inject({ method: 'POST', url: '/api/chat/messages', payload: body as object });
+/**
+ * Posts as the customer named in the body.
+ *
+ * The endpoint takes the customer from the session rather than the body, so
+ * every call here has to present one. The cookie is cached per customer because
+ * `shop_sessions` is keyed by token hash and these files send several messages
+ * per fixture.
+ */
+async function postChat(body: unknown): Promise<LightMyRequestResponse> {
+  const customerId = (body as { customerId?: unknown }).customerId;
+  const cookie = typeof customerId === 'string' ? await trySessionFor(harnessForSessions, customerId) : null;
+  return app.inject({
+    method: 'POST',
+    url: '/api/chat/messages',
+    ...(cookie === null ? {} : { headers: { cookie } }),
+    payload: body as object,
+  });
+}
+
+/** `sessionFor` when the customer is seeded, null otherwise. */
+async function trySessionFor(h: AppHarness, customerId: string): Promise<string | null> {
+  const exists = h.db.prepare('SELECT 1 FROM customers WHERE id = ?').get(customerId);
+  return exists === undefined ? null : sessionFor(h, customerId);
 }
 
 /**
@@ -214,7 +238,8 @@ describe('POST /api/chat/messages', () => {
   });
 
   it('rejects a missing message with 400 and per-field issues', async () => {
-    const response = await postChat({ customerId: 'S-01-CUST' });
+    const fixture = scenario('S-01');
+    const response = await postChat({ customerId: fixture.customer.key });
     const body = response.json<ErrorBody>();
 
     expect(response.statusCode).toBe(400);
@@ -222,13 +247,45 @@ describe('POST /api/chat/messages', () => {
     expect(body.issues?.join(' ')).toContain('message');
   });
 
-  it('returns 404 for an unknown customer instead of inventing a decision', async () => {
-    const response = await postChat({ customerId: 'does-not-exist', message: 'I want a refund' });
+  it('answers 401 without a session and writes no decision', async () => {
+    // The customer is taken from the signed-in session, not from the body, so a
+    // body naming anybody - existing customer or not - is not a credential.
+    // There is no longer a "unknown customer" branch to reach: no session means
+    // nobody is claiming anything, which is 401 before any row is touched.
+    const response = await harnessForSessions.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      payload: { customerId: 'does-not-exist', message: 'I want a refund' },
+    });
     const body = response.json<ErrorBody>();
 
-    expect(response.statusCode).toBe(404);
-    expect(body.error).toBe('unknown_customer');
+    expect(response.statusCode).toBe(401);
+    expect(body.error).toBe('unauthorized');
     expect(rows<{ n: number }>('SELECT COUNT(*) AS n FROM refund_requests')[0]?.n).toBe(0);
+  });
+
+  it('ignores a customerId that names somebody else, and bills the session', async () => {
+    const sam = scenario('S-01');
+    const other = scenario('S-02');
+
+    // A valid session for one customer, with a different customer in the body.
+    // Before sessions were enforced this wrote a decision against whoever the
+    // body named; now the session wins and the impostor's name is discarded.
+    const response = await harnessForSessions.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: await sessionFor(harnessForSessions, sam.customer.key) },
+      payload: { customerId: other.customer.key, orderId: sam.orderId, message: sam.message },
+    });
+
+    expect(response.statusCode).toBe(201);
+    const { request } = response.json<CreatedResponse>();
+    expect(request.customerId).toBe(sam.customer.key);
+    const written = rows<{ customer_id: string }>(
+      'SELECT customer_id FROM refund_requests WHERE id = ?',
+      request.id,
+    );
+    expect(written.every((row) => row.customer_id === sam.customer.key)).toBe(true);
   });
 
   it('survives a policy override attempt in the message', async () => {

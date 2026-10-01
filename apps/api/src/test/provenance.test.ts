@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LightMyRequestResponse } from 'fastify';
 import { appHarness, TEST_NOW, TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, type AppHarness } from './helpers.js';
+import { sessionFor } from './shop-helpers.js';
 import { seedRequestHistory } from '../db/seedHistory.js';
 import { FakeAnalyzer } from './fakeAnalyzer.js';
 import type { PipelineDeps } from '../orchestrator.js';
@@ -20,6 +21,7 @@ import type { PipelineDeps } from '../orchestrator.js';
 describe('provenance: which surface a request came from', () => {
   let harness: AppHarness;
   let sessionCookie: string;
+  let shopperCookie: string;
 
   beforeEach(async () => {
     harness = await appHarness();
@@ -35,6 +37,7 @@ describe('provenance: which surface a request came from', () => {
     };
     await seedRequestHistory(harness.db, TEST_NOW, pipeline);
     sessionCookie = '';
+    shopperCookie = await sessionFor(harness, 'CUST-CASTELLANOS');
   });
 
   afterEach(async () => {
@@ -89,6 +92,7 @@ describe('provenance: which surface a request came from', () => {
     const live = await harness.app.inject({
       method: 'POST',
       url: '/api/chat/messages',
+      headers: { cookie: shopperCookie },
       payload: { customerId: 'CUST-CASTELLANOS', message: 'The Studio Headphones came in the wrong colour, I do not want them.' },
     });
     expect(live.statusCode).toBe(201);
@@ -117,6 +121,7 @@ describe('provenance: which surface a request came from', () => {
     const live = await harness.app.inject({
       method: 'POST',
       url: '/api/chat/messages',
+      headers: { cookie: shopperCookie },
       payload: { customerId: 'CUST-CASTELLANOS', message: 'The headphones are the wrong colour, I changed my mind.' },
     });
     const createdId = live.json<{ request: { id: string } }>().request.id;

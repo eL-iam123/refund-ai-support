@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import type { LightMyRequestResponse } from 'fastify';
 import { appHarness, TEST_NOW, type AppHarness } from './helpers.js';
+import { sessionFor } from './shop-helpers.js';
 import { daysAgo } from '../db/seed.js';
 import type { Db } from '../db/connection.js';
 import type { RefundRequestDto } from '@refund/shared';
@@ -66,10 +67,12 @@ const MESSAGE = 'The headphones arrived broken and I want my money back.';
 
 describe('recognising a report the customer has already made', () => {
   let harness: AppHarness;
+  let cookie: string;
 
   beforeEach(async () => {
     harness = await appHarness();
     seedHistory(harness.db);
+    cookie = await sessionFor(harness, CUSTOMER);
   });
 
   afterEach(async () => {
@@ -80,6 +83,7 @@ describe('recognising a report the customer has already made', () => {
     return harness.app.inject({
       method: 'POST',
       url: '/api/chat/messages',
+      headers: { cookie },
       payload: { customerId: CUSTOMER, message, ...(orderId === undefined ? {} : { orderId }) },
     });
   }

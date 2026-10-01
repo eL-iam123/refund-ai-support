@@ -179,8 +179,12 @@ export type StaffThreadTurn =
       readonly sender: 'agent' | 'customer';
       readonly body: string;
       readonly createdAt: string;
-      /** Optional photo attached to this message, served under `/media/`. Null for text. */
-      readonly media: { readonly type: string; readonly url: string; readonly bytes: number } | null;
+      /** Optional photo attached to this message, served under `/media/`.
+       *
+       * Declared `| undefined` as well as `| null`: the field is absent, not
+       * null, on a text message, so a `!== null` guard reads `.url` off
+       * `undefined` and crashes the render. */
+      readonly media: { readonly type: string; readonly url: string; readonly bytes: number } | null | undefined;
     }
   | { readonly kind: 'handoff'; readonly id: string; readonly body: string; readonly createdAt: string };
 
@@ -205,7 +209,15 @@ export interface HandoffBrief {
         readonly items: readonly string[];
       }
     | null;
-  readonly policyTrail: readonly { readonly ruleId: string; readonly outcome: string; readonly evidence: string }[];
+  /**
+   * One rule the pipeline ran on this case.
+   *
+   * `outcome` was `string`, which let the live console interpolate it straight
+   * into a stylesheet class and quietly render every rule pill unstyled. It is
+   * `RuleOutcome` because that is what the server sends, so an unexpected value
+   * now fails at the type boundary instead of at review.
+   */
+  readonly policyTrail: readonly { readonly ruleId: string; readonly outcome: RuleOutcome; readonly evidence: string }[];
   readonly riskFlags: readonly { readonly label: string; readonly detail: string }[];
   /** Refusals the customer asked a person to look at again, oldest first. */
   readonly appeals: readonly { readonly requestId: string; readonly reason: string; readonly createdAt: string }[];
