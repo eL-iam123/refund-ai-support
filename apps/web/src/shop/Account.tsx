@@ -161,8 +161,7 @@ function DemoAccounts({ error, setError, setBusy, onDone }: Omit<FormProps, 'bus
     <section className="card">
       <h2>Try a demo shopper</h2>
       <p className="muted">
-        Each has a password-free sign-in and a couple of past orders, so you can go straight to
-        reporting a problem.
+        Each has a password-free sign-in, so you can start shopping without creating an account.
       </p>
       {loadError !== null && <p className="error">{loadError}</p>}
       {accounts?.map((account) => (

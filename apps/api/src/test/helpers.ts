@@ -11,6 +11,7 @@ import { SCENARIOS, type InjectionAction, type Scenario } from '@refund/shared';
 import { mintToken } from '../auth/tokens.js';
 import { FakeAnalyzer, type Behaviour } from './fakeAnalyzer.js';
 import { buildApp } from '../http/app.js';
+import type { HubObservation } from '../http/hub.js';
 import { silentLogger } from '../lib/logger.js';
 
 /** Shared test fixtures. Every test builds its own in-memory database. */
@@ -143,6 +144,8 @@ export interface AppHarness {
   readonly db: Db;
   /** How many times the analyzer was consulted (not counting the deterministic floor). */
   readonly analyzerCalls: () => number;
+  /** Every publish the hub made, in order. Lets a test assert an announcement without a socket. */
+  readonly hubEvents: () => readonly HubObservation[];
 }
 
 /**
@@ -164,6 +167,7 @@ export async function appHarness(
   seedDatabase(db, TEST_NOW);
   const analyzer = FakeAnalyzer(behaviour);
   let analyzerCalls = 0;
+  const hubEvents: HubObservation[] = [];
   const app = buildApp({
     env,
     db,
@@ -171,6 +175,9 @@ export async function appHarness(
     // The same fixed "now" the fixtures were seeded against: otherwise the
     // 45-day refund window would read every order as months old.
     now: (): Date => TEST_NOW,
+    observeHub: (observation): void => {
+      hubEvents.push(observation);
+    },
     pipeline: {
       analyzer: {
         ...analyzer,
@@ -184,7 +191,7 @@ export async function appHarness(
     },
   });
   await app.ready();
-  return { app, db, analyzerCalls: () => analyzerCalls };
+  return { app, db, analyzerCalls: () => analyzerCalls, hubEvents: () => hubEvents };
 }
 
 /**

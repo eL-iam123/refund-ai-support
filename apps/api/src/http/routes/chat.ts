@@ -169,7 +169,18 @@ async function chatDuringHandoff(
   if (reply.kind === 'tool_call') {
     hub.notifyStaff({ type: 'customer.pushing', customerId: active.customerId, orderId: active.orderId });
   } else if (reply.kind === 'text') {
-    recordAgentMessage(ctx.db, { handoffId: active.id, sender: 'agent', body: reply.text, now });
+    const agentMessage = recordAgentMessage(ctx.db, { handoffId: active.id, sender: 'agent', body: reply.text, now });
+    // Announced on the customer's own channel, not only the staff one. The
+    // customer's page renders the thread from the REST history and treats this
+    // channel as "something changed, come look", so an announcement that never
+    // happens leaves the assistant's reply written to the database but unseen
+    // until the next full reload. A human agent's reply arrives this way (see
+    // `messageCustomer`); the escalated assistant had no equivalent.
+    hub.notifyCustomer(active.customerId, {
+      type: 'agent.message',
+      customerId: active.customerId,
+      message: agentMessage,
+    });
   }
 
   hub.notifyStaff({ type: 'customer.message', customerId: active.customerId, message: customerMessage });

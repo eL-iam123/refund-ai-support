@@ -86,6 +86,31 @@ describe('a greeting is not a request', () => {
     expect(harness.analyzerCalls()).toBe(0);
   });
 
+  it('asks for damage details after the customer explains the problem', async () => {
+    harness = await shopHarness({ kind: 'fixed', extraction: { reason: 'damaged' } });
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    const hello = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId: session.orderId, message: 'hello' },
+    });
+    expect(hello.json<{ question?: string }>().question).toMatch(/what's going on|what happened/i);
+
+    const damage = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId: session.orderId, message: 'the mug is damaged' },
+    });
+    expect([200, 201]).toContain(damage.statusCode);
+    expect(damage.json<{ question?: string }>().question).toContain('what the damage looks like');
+    // The deterministic clarification runs before any analyzer can turn this
+    // sparse report into a claim or immediate handoff.
+    expect(harness.analyzerCalls()).toBe(0);
+  });
+
   it('does not file the conversation as a live takeover candidate', async () => {
     harness = await shopHarness();
     const session = await signIn(harness, 'sam@shop.demo');

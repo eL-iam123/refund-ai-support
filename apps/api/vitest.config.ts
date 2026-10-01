@@ -5,6 +5,11 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts'],
     setupFiles: ['src/test/setup.ts'],
+    // The API suite is 34 files and the development/test container commonly
+    // has 4 CPUs. Letting Vitest spawn one worker per file causes avoidable CPU
+    // contention and flakes the 5s integration-test timeout; cap concurrency at
+    // the available host-sized baseline rather than multiplying processes.
+    maxWorkers: 4,
     // No `test.env` here on purpose. Setting provider variables in this file
     // would outrank the real `.env` inside the test process, so the opt-in live
     // suite would silently call the wrong provider with a placeholder key.

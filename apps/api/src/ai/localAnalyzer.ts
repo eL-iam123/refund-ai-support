@@ -2,6 +2,7 @@ import type { ClaimExtraction } from '@refund/shared';
 import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
 import { scanForInjection } from '../security/injection.js';
 import { isNoComplaint, noComplaintQuestion } from '../response/noComplaint.js';
+import { clarifySparseDamage } from '../response/claimClarification.js';
 
 /**
  * The extractor that runs when there is no provider key.
@@ -181,6 +182,10 @@ function analyzeWithHeuristics(input: AnalyzerInput, observer: AttemptObserver):
       question: noComplaintQuestion(input.message, input.order !== null),
       model: MODEL,
     };
+  }
+  const damageQuestion = clarifySparseDamage(input.message);
+  if (damageQuestion !== null) {
+    return { kind: 'question', question: damageQuestion, model: MODEL };
   }
   const extraction = read(input);
   return {

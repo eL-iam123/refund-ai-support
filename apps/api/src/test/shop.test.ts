@@ -199,19 +199,14 @@ describe('storefront', () => {
       expect(response.statusCode).toBe(400);
     });
 
-    it('gives every demo shopper their own customer and orders', async () => {
+    it('gives every demo shopper their own customer', async () => {
       const first = await call('POST', '/api/shop/demo-login', { payload: { email: 'sam@shop.demo' } });
       const second = await call('POST', '/api/shop/demo-login', { payload: { email: 'dana@shop.demo' } });
-      const a = (first.headers['set-cookie'] as string).split(';')[0] ?? '';
-      const b = (second.headers['set-cookie'] as string).split(';')[0] ?? '';
 
-      const ordersA = (await call('GET', '/api/shop/orders', { cookie: a })).json<{ orders: ShopOrder[] }>();
-      const ordersB = (await call('GET', '/api/shop/orders', { cookie: b })).json<{ orders: ShopOrder[] }>();
+      const a = first.json<{ user: { customerId: string } }>().user.customerId;
+      const b = second.json<{ user: { customerId: string } }>().user.customerId;
 
-      expect(ordersA.orders.length).toBeGreaterThan(0);
-      const idsA = ordersA.orders.map((o) => o.id);
-      const idsB = ordersB.orders.map((o) => o.id);
-      expect(idsA.filter((id) => idsB.includes(id))).toEqual([]);
+      expect(a).not.toBe(b);
     });
   });
 
@@ -608,33 +603,17 @@ describe('storefront', () => {
     });
   });
 
-  describe('seeded order history', () => {
-    it('gives a demo shopper one delivered order and one in transit', () => {
-      const row = harness.db
-        .prepare(
-          `SELECT o.status, o.delivered_at, o.tracking_status
-             FROM orders o JOIN shop_users u ON u.customer_id = o.customer_id
-            WHERE u.email = 'sam@shop.demo'`,
-        )
-        .all() as { status: string; delivered_at: string | null; tracking_status: string }[];
-
-      expect(row).toHaveLength(2);
-      expect(row.filter((o) => o.status === 'delivered')).toHaveLength(1);
-      expect(row.filter((o) => o.status === 'placed')).toHaveLength(1);
-    });
-  });
-
   describe('configuration', () => {
     it('needs no extra environment to run the shop', () => {
       expect(() => testEnv()).not.toThrow();
     });
   });
 
-  describe('re-seeding on boot', () => {
+  describe('re-seeding', () => {
     it('refreshes catalogue copy without un-selling what a checkout sold', () => {
-      // The seed runs on every `pnpm dev` boot. If it reset stock, restarting the
-      // server would put sold inventory back on the shelf and the same unit could
-      // be sold twice - against an order the refund engine then reasons about.
+      // The seed is idempotent and re-runnable. If it reset stock, seeding again
+      // would put sold inventory back on the shelf and the same unit could be
+      // sold twice - against an order the refund engine then reasons about.
       const before = harness.db.prepare('SELECT stock FROM products WHERE id = ?').get('PRD-MUG-01') as {
         stock: number;
       };
@@ -648,15 +627,12 @@ describe('storefront', () => {
       expect(after.stock).toBe(before.stock - 4);
     });
 
-    it('does not recreate a demo account or its orders on a second run', () => {
+    it('does not recreate a demo account on a second run', () => {
       const count = (): number =>
         (
-          harness.db
-            .prepare(
-              `SELECT COUNT(*) AS n FROM orders o JOIN shop_users u ON u.customer_id = o.customer_id
-                WHERE u.email = 'sam@shop.demo'`,
-            )
-            .get() as { n: number }
+          harness.db.prepare(`SELECT COUNT(*) AS n FROM shop_users WHERE email = 'sam@shop.demo'`).get() as {
+            n: number;
+          }
         ).n;
       const first = count();
 

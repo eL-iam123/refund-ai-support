@@ -2,21 +2,19 @@ import { readEnv, isAiRequired, missingApiKeyFor } from './config/env.js';
 import { openDatabase } from './db/connection.js';
 import { createLogger } from './lib/logger.js';
 import { buildApp } from './http/app.js';
-import { seedDatabase } from './db/seed.js';
-import { seedRequestHistory } from './db/seedHistory.js';
-import { seedShop } from './shop/seed.js';
+import { seedCatalogue } from './shop/seed.js';
 import { purgeExpiredSessions } from './shop/auth.js';
-import { createAnalyzer } from './ai/index.js';
-import { createAttemptRecorder } from './db/attemptRecorder.js';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /**
  * Process entrypoint.
  *
- * Seeding is idempotent and relative to "now", so a fresh checkout that runs
- * `pnpm start` gets a working demo without a separate manual step, while an
- * existing database is left alone.
+ * Boot seeds the storefront catalogue and nothing else. The items are the shop's
+ * stock, not invented activity: seeding is idempotent and additive and leaves
+ * existing stock alone, so a fresh volume gets a shop and an existing one picks
+ * up items added since. Customers, orders and decision history are never seeded
+ * — those only ever come from real use.
  */
 const env = readEnv();
 
@@ -41,25 +39,12 @@ async function main(): Promise<void> {
     );
   }
 
-  if (countRows(db) === 0) {
-    const seeded = seedDatabase(db, new Date());
-    log.info({ seeded }, 'database.seeded');
-    // A few decisions, so the console opens onto history rather than an empty
-    // table. Produced, not written: each canonical scenario is run through the
-    // real pipeline with the deployment's analyzer, so the demo rows show the
-    // same trace, grounding and response a live customer would have produced.
-    const history = await seedRequestHistory(db, new Date(), {
-      analyzer: createAnalyzer(env),
-      recordAttempt: createAttemptRecorder(db),
-      injectionAction: env.INJECTION_ACTION,
-    });
-    log.info({ created: history.created, asked: history.asked }, 'database.seeded.history');
-  }
+  // The shop's stock, and the only thing that seeds on boot. Idempotent and
+  // additive, so a fresh volume opens onto a shop and an existing one gains any
+  // item added since - while stock that a checkout already sold stays sold.
+  const products = seedCatalogue(db);
+  log.info({ products }, 'catalogue.seeded');
 
-  // The storefront catalogue and demo accounts are additive, so they are topped
-  // up on every boot rather than only on a fresh database.
-  const shop = seedShop(db, new Date());
-  log.info(shop, 'shop.seeded');
   const expired = purgeExpiredSessions(db, new Date());
   if (expired > 0) {
     log.info({ expired }, 'shop.sessions.purged');
@@ -80,11 +65,6 @@ async function main(): Promise<void> {
 
   await app.listen({ port: env.API_PORT, host: env.API_HOST });
   log.info({ port: env.API_PORT, ai: `${env.AI_PROVIDER}` }, 'server.listening');
-}
-
-function countRows(db: ReturnType<typeof openDatabase>): number {
-  const row: unknown = db.prepare('SELECT COUNT(*) AS n FROM customers').get();
-  return typeof row === 'object' && row !== null && 'n' in row ? Number(row.n) : 0;
 }
 
 /**

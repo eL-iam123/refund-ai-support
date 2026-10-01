@@ -264,8 +264,19 @@ describe('the ledger cannot be made to pay twice', () => {
     const refund = authoriseFixture(fixture, fixture.totalCents, 'REQ-LEDGER-LEGACY-RACE');
     fixture.db.prepare('UPDATE orders SET refunded_cents = 2000 WHERE id = ?').run(fixture.orderId);
 
-    expect(() => settleRefund(fixture.db, refund.id, 'alice', TEST_NOW)).toThrow(/more than was paid/);
+    expect(() => settleRefund(fixture.db, refund.id, 'alice', TEST_NOW)).toThrow(/exceeds the order balance/);
     expect(findOrder(fixture.db, fixture.customerId, fixture.orderId, TEST_NOW)?.refundedCents).toBe(2000);
+  });
+
+  it('does not settle one reservation if legacy refunds make the remaining reservations insolvent', () => {
+    const fixture = refundableOrder();
+    const half = Math.floor(fixture.totalCents / 2);
+    const first = authoriseFixture(fixture, half, 'REQ-LEDGER-RESERVE-A');
+    authoriseFixture(fixture, fixture.totalCents - half, 'REQ-LEDGER-RESERVE-B');
+    fixture.db.prepare('UPDATE orders SET refunded_cents = 1 WHERE id = ?').run(fixture.orderId);
+
+    expect(() => settleRefund(fixture.db, first.id, 'alice', TEST_NOW)).toThrow(/refunded or reserved/);
+    expect(settledCentsForOrder(fixture.db, fixture.orderId)).toBe(0);
   });
 
   it('will not reopen a reservation that has already been paid', () => {

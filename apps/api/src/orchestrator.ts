@@ -27,6 +27,7 @@ import { resolve } from './policy/resolver.js';
 import type { PolicyContext } from './policy/types.js';
 import { composeDeterministicResponse } from './response/compose.js';
 import { isNoComplaint, noComplaintQuestion, NO_COMPLAINT_MODEL } from './response/noComplaint.js';
+import { clarifySparseDamage } from './response/claimClarification.js';
 import { assistantLines, refineQuestion } from './response/questionGuard.js';
 import { formatCents } from './lib/money.js';
 
@@ -444,19 +445,14 @@ async function analyseClaim(
 
   const history = transcriptForOrder(db, input.customerId, orderIdFor(order), input.now, HISTORY_LIMIT);
 
-  // The deterministic floor before the model: the customer has not said anything
-  // is wrong (a greeting, thanks or small talk). Funnelling that into a claim
-  // would hand R-12 a reason of "other" with nothing grounded and page a person
-  // over a "hello" - so it is answered with a question here, for every provider,
-  // and even a model that insists on claiming is never consulted for it.
-  if (isNoComplaint(input.message)) {
-    log.record('ai_analysis', 'no complaint in the message; answered from the deterministic floor');
-    return respondToQuestion(
-      { kind: 'question', question: noComplaintQuestion(input.message, order !== null), model: NO_COMPLAINT_MODEL },
-      order,
-      history,
-      log,
-    );
+  const damageClarification = clarifyDamageReport(input.message, order, history, log);
+  if (damageClarification !== null) {
+    return damageClarification;
+  }
+
+  const noComplaint = clarifyNoComplaint(input.message, order, history, log);
+  if (noComplaint !== null) {
+    return noComplaint;
   }
 
   let reply: Awaited<ReturnType<AIAnalyzer['analyze']>>;
@@ -500,6 +496,45 @@ async function analyseClaim(
     grounding,
     proposal: reply.proposal,
   };
+}
+
+/** Keep a damage report without observed condition out of policy analysis. */
+function clarifyDamageReport(
+  message: string,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome | null {
+  const question = clarifySparseDamage(message);
+  if (question === null) {
+    return null;
+  }
+  log.record('ai_analysis', 'sparse damage report; asked for the observed condition before claim analysis');
+  return respondToQuestion(
+    { kind: 'question', question, model: 'deterministic-damage-clarification-v1' },
+    order,
+    history,
+    log,
+  );
+}
+
+/** Keep greetings and social-only turns out of claim analysis. */
+function clarifyNoComplaint(
+  message: string,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome | null {
+  if (!isNoComplaint(message)) {
+    return null;
+  }
+  log.record('ai_analysis', 'no complaint in the message; answered from the deterministic floor');
+  return respondToQuestion(
+    { kind: 'question', question: noComplaintQuestion(message, order !== null), model: NO_COMPLAINT_MODEL },
+    order,
+    history,
+    log,
+  );
 }
 
 /**

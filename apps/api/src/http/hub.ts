@@ -67,6 +67,22 @@ export interface LiveHub {
   readonly notifyStaff: (event: StaffSocketEvent) => void;
 }
 
+/**
+ * One publish, as seen by an observer.
+ *
+ * The hub is the one place that knows what was announced to whom, so it is the
+ * one place a test can watch a notification *without* a socket: a route that
+ * changes a thread and forgets to announce it is indistinguishable from one that
+ * works, from the database alone. Observing here keeps that a property the tests
+ * can assert rather than one they have to trust.
+ */
+export interface HubObservation {
+  readonly channel: 'customer' | 'staff';
+  /** Set for the customer channel, which is addressed per shopper. */
+  readonly customerId?: string;
+  readonly event: ShopSocketEvent | StaffSocketEvent;
+}
+
 /** The one place the shape of the push is shaped, so senders stay consistent. */
 function send(socket: WebSocket, payload: unknown): void {
   if (socket.readyState === socket.OPEN) {
@@ -103,12 +119,17 @@ function closeSocket(socket: WebSocket, code: number, reason: string): void {
  * plugin is registered on: a `websocket: true` route must be declared where the
  * websocket plugin is, or Fastify has no handler to attach to the upgrade.
  */
-export function registerWebSockets(app: FastifyInstance, ctx: AppContext): LiveHub {
+export function registerWebSockets(
+  app: FastifyInstance,
+  ctx: AppContext,
+  observe?: (observation: HubObservation) => void,
+): LiveHub {
   const shopRooms = new Map<string, Set<WebSocket>>();
   const staffSockets = new Set<WebSocket>();
 
   const hub: LiveHub = {
     notifyCustomer(customerId, event) {
+      observe?.({ channel: 'customer', customerId, event });
       const room = shopRooms.get(customerId);
       if (room === undefined) {
         return;
@@ -118,6 +139,7 @@ export function registerWebSockets(app: FastifyInstance, ctx: AppContext): LiveH
       }
     },
     notifyStaff(event) {
+      observe?.({ channel: 'staff', event });
       for (const socket of staffSockets) {
         send(socket, event);
       }

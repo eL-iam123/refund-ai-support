@@ -1,6 +1,6 @@
 import type { Db } from '../db/connection.js';
 import { createUser } from './auth.js';
-import { checkout, insertProduct, type Product } from './catalogue.js';
+import { insertProduct, type Product } from './catalogue.js';
 
 /**
  * Storefront seed data.
@@ -102,6 +102,118 @@ const CATALOGUE: readonly Product[] = [
     testsPolicy: 'R-06 sealed packaging must be intact',
     imageHue: 320,
   },
+  {
+    id: 'PRD-PIN-01',
+    name: 'Waypoint Enamel Pin Set',
+    blurb: 'The cheapest thing here, for watching tiny refund amounts',
+    description:
+      'Three enamel pins on a backing card. At nine dollars the refund is small enough that the amount maths is the whole story, with nothing else for the policy to find. That makes it the cleanest baseline for checking a refund is computed rather than guessed.',
+    priceCents: 900,
+    finalSale: false,
+    digital: false,
+    isSubscription: false,
+    stock: 500,
+    testsPolicy: 'R-04 faulty goods',
+    imageHue: 12,
+  },
+  {
+    id: 'PRD-NOTEBOOK-01',
+    name: 'Field Notes Notebook (3-pack)',
+    blurb: 'Everyday paper goods that no rule treats specially',
+    description:
+      'Three pocket notebooks. An ordinary low-value purchase with no final-sale flag, no download, no subscription and nothing to seal, so the only things that can decide it are the general window and the customer’s own words.',
+    priceCents: 1400,
+    finalSale: false,
+    digital: false,
+    isSubscription: false,
+    stock: 400,
+    testsPolicy: null,
+    imageHue: 96,
+  },
+  {
+    id: 'PRD-TOTE-01',
+    name: 'Harbour Canvas Market Tote',
+    blurb: 'A plain item a step up from the mug, for checking the amount scales',
+    description:
+      'A heavy cotton tote. Like the mug it is an ordinary physical item, but a little dearer, so it is a second data point for whether the refund amount tracks the item rather than a single hard-coded figure.',
+    priceCents: 3600,
+    finalSale: false,
+    digital: false,
+    isSubscription: false,
+    stock: 200,
+    testsPolicy: 'R-04 faulty goods',
+    imageHue: 200,
+  },
+  {
+    id: 'PRD-KETTLE-01',
+    name: 'Copper Pour-Over Kettle',
+    blurb: 'Mid-range, comfortably under the review threshold',
+    description:
+      'A stovetop pour-over kettle in copper. Well below the $500 human-review threshold, so a valid refund on it should still come back as a decision the engine is allowed to make rather than being handed to a person.',
+    priceCents: 8900,
+    finalSale: false,
+    digital: false,
+    isSubscription: false,
+    stock: 60,
+    testsPolicy: 'R-04 faulty goods',
+    imageHue: 24,
+  },
+  {
+    id: 'PRD-CAMERA-01',
+    name: 'Lumen Instant Camera',
+    blurb: 'Electronics that arrive in a sealed carton',
+    description:
+      'An instant camera in a sealed retail box. As with the headphones, a fault claim is only straightforward while the packaging is intact, so it is a second way to watch the condition rules bite.',
+    priceCents: 15900,
+    finalSale: false,
+    digital: false,
+    isSubscription: false,
+    stock: 25,
+    testsPolicy: 'R-06 sealed packaging must be intact',
+    imageHue: 340,
+  },
+  {
+    id: 'PRD-CHAIR-01',
+    name: 'Ash Lounge Chair (final sale)',
+    blurb: 'Expensive and final sale — the pair that makes the threshold re-check fire',
+    description:
+      'A solid ash lounge chair, discounted and marked final sale. It is expensive on purpose. Bought alongside a cheap item, the order total sits over the $500 review threshold while the eligible remainder does not — the one combination that makes rule R-03b fire, which is the proof the engine re-checks the threshold after striking an item out.',
+    priceCents: 62000,
+    finalSale: true,
+    digital: false,
+    isSubscription: false,
+    stock: 4,
+    testsPolicy: 'R-02 final sale is not refundable',
+    imageHue: 30,
+  },
+  {
+    id: 'PRD-ESPRESSO-01',
+    name: 'Vantage Espresso Machine',
+    blurb: 'Over the review threshold on its own',
+    description:
+      'A dual-boiler espresso machine. A single one of these costs more than the $500 human-review threshold, so a valid claim must escalate for a person to approve rather than being paid by the engine alone.',
+    priceCents: 79900,
+    finalSale: false,
+    digital: false,
+    isSubscription: false,
+    stock: 8,
+    testsPolicy: 'R-03 human review above threshold',
+    imageHue: 20,
+  },
+  {
+    id: 'PRD-MONITOR-01',
+    name: 'Orion 5K Studio Monitor',
+    blurb: 'The most expensive thing in the shop',
+    description:
+      'A 27-inch 5K display. The top of the range, and the clearest test that the review threshold is a floor and not a ceiling: however large the eligible amount, the engine still refuses to be the one that approves it.',
+    priceCents: 129900,
+    finalSale: false,
+    digital: false,
+    isSubscription: false,
+    stock: 6,
+    testsPolicy: 'R-03 human review above threshold',
+    imageHue: 260,
+  },
 ];
 
 /**
@@ -119,17 +231,36 @@ const DEMO_ACCOUNTS: readonly { email: string; name: string; password: string }[
 ];
 
 /**
- * Fills the catalogue and the demo accounts, creating them only if absent.
+ * Fills the storefront catalogue, creating products only if absent, and returns
+ * how many items it wrote.
  *
- * Idempotent like the scenario seed, because `pnpm dev` runs this on every boot
- * and a catalogue that resets on restart would be maddening. Existing products
- * have their copy and prices refreshed, but their stock is left alone - a boot
- * must not un-sell anything a checkout already sold.
+ * This is the *only* seed the product ships with: the shop items are what a
+ * fresh deployment needs to be browsable and buyable, and nothing else. There
+ * are no demo customers, orders or history behind it, so anything that appears
+ * in the system afterwards is something a real person did.
+ *
+ * Idempotent, and existing products have their copy and prices refreshed while
+ * their stock is left alone - a seed must not un-sell what a checkout already
+ * sold.
  */
-export function seedShop(db: Db, now: Date): { products: number; accounts: number } {
+export function seedCatalogue(db: Db): number {
   for (const product of CATALOGUE) {
     insertProduct(db, product);
   }
+  return CATALOGUE.length;
+}
+
+/**
+ * The catalogue plus the demo accounts.
+ *
+ * Kept for tests, which need a populated storefront with someone to sign in as.
+ * The accounts start with no orders on purpose: an order a tester did not place
+ * is a fake, and a refund conversation about it proves nothing. It is also
+ * deliberately *not* what the `seed` command runs - shipping mock shoppers into
+ * a fresh deployment is the thing the catalogue/accounts split exists to prevent.
+ */
+export function seedShop(db: Db, now: Date): { products: number; accounts: number } {
+  const products = seedCatalogue(db);
 
   let accounts = 0;
   for (const account of DEMO_ACCOUNTS) {
@@ -139,44 +270,13 @@ export function seedShop(db: Db, now: Date): { products: number; accounts: numbe
     if (existing !== undefined) {
       continue;
     }
-    const user = createUser(
+    createUser(
       db,
       { email: account.email, password: account.password, name: account.name, isDemo: true },
       now,
     );
-    // Past orders, so "report a problem" has something to point at before the
-    // tester has bought anything themselves.
-    placeDemoOrders(db, user.customerId, now);
     accounts += 1;
   }
 
-  return { products: CATALOGUE.length, accounts };
-}
-
-/** Each demo shopper's starting order history: one delivered, one in transit. */
-const DEMO_ORDERS: readonly { lines: readonly { productId: string; quantity: number }[]; delivered: boolean }[] =
-  [
-    { lines: [{ productId: 'PRD-LAMP-01', quantity: 1 }], delivered: true },
-    { lines: [{ productId: 'PRD-MUG-01', quantity: 2 }], delivered: false },
-  ];
-
-function placeDemoOrders(db: Db, customerId: string, now: Date): void {
-  DEMO_ORDERS.forEach((demo, index) => {
-    // Ordered far enough apart that the order dates differ, which is what makes
-    // the "which order did you mean?" question meaningful in a demo.
-    const placedAt = new Date(now.getTime() - (index + 1) * 9 * 24 * 60 * 60 * 1000);
-    const order = checkout(db, customerId, demo.lines, placedAt);
-
-    if (demo.delivered) {
-      // Stand in for the fulfilment step having happened. A checkout cannot
-      // honestly mark its own order delivered, but a demo needs an order in that
-      // state to point a refund request at.
-      db.prepare(
-        `UPDATE orders
-            SET status = 'delivered', delivered_at = ?, tracking_status = 'delivered',
-                condition_at_delivery = 'sealed'
-          WHERE id = ?`,
-      ).run(new Date(placedAt.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString(), order.id);
-    }
-  });
+  return { products, accounts };
 }

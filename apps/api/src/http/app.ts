@@ -18,7 +18,7 @@ import { registerReturnsRoutes } from './routes/returns.js';
 import { registerAdminAuthRoutes } from './routes/adminAuth.js';
 import { registerStaffConversationRoutes } from './routes/staffConversations.js';
 import { registerStaffAnalyticsRoutes } from './routes/staffAnalytics.js';
-import { registerWebSockets } from './hub.js';
+import { registerWebSockets, type HubObservation } from './hub.js';
 import { toErrorResponse, toHttpError } from './errors.js';
 import { registerAuth } from '../auth/guards.js';
 
@@ -37,6 +37,11 @@ export interface BuildAppOptions {
    * names.
    */
   readonly pipeline?: PipelineDeps;
+  /**
+   * Watches every publish the hub makes. Tests pass this to assert that a route
+   * announced a change without standing up a real socket; production never does.
+   */
+  readonly observeHub?: (observation: HubObservation) => void;
 }
 
 /**
@@ -69,7 +74,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
   registerAuth(app);
 
-  const hub = registerWebSockets(app, ctx);
+  const hub = registerWebSockets(app, ctx, options.observeHub);
 
   // The plugin's global mode only instruments routes present when its onRoute
   // hook is installed. Routes are registered below, so we use its explicit

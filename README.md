@@ -75,9 +75,18 @@ policy engine owns the decision, and a person only reviews or overrides it.
 docker compose up --build   # http://localhost:4000 - API, console and shop
 ```
 
-That is the whole setup. The stack seeds 18 scenario fixtures, 20 customers, 25
-orders and a short decision history on first boot, and serves the customer chat,
-the agent console and the storefront from one origin.
+That is the whole setup. The storefront items seed themselves on boot — the
+catalogue is the one thing that is, because it is the shop's stock rather than
+invented activity, and seeding it is idempotent and additive. There are **no**
+demo customers, orders or history: register an account and buy something to
+exercise the flow yourself, so what you see is what actually happened.
+
+To re-run the catalogue seed by hand (safe, and it picks up any item added
+since), it is the same code the boot path calls:
+
+```bash
+docker compose exec api node apps/api/dist/db/seed-cli.js
+```
 
 **To use a real model, paste your key into `.env` and restart.** That is the
 entire procedure:
@@ -147,8 +156,7 @@ Requires Node 22+ and pnpm.
 ```bash
 pnpm install
 cp .env.example .env        # then add a provider key
-pnpm seed                   # 18 scenario fixtures, dated relative to now
-pnpm dev                    # API :4000 and the combined shop/staff client :5173
+pnpm dev                    # API :4000 and the combined shop/staff client :5173 (catalogue seeds on boot)
 ```
 
 Open http://localhost:5173. The storefront/customer view is `/`; the staff
@@ -176,13 +184,14 @@ something and then disputing it is one continuous story rather than two
 fixtures. `/shop` is served by the API in production, and proxies to the API in
 dev.
 
-- **Accounts** — register, or log in as a demo customer. Passwords are scrypt
-  with a per-user salt; sessions are 256-bit random tokens stored only as
-  SHA-256 hashes in an `HttpOnly`, `SameSite=Lax` cookie.
-- **Catalogue** — six products chosen to exercise the policy, including a
-  final-sale coat, a coffee subscription, a digital guide, and sealed
-  headphones. Digital goods are never refundable and subscriptions are handled
-  by a different rule, so the shop is a test bench for the rules, not filler.
+- **Accounts** — register and sign in. Passwords are scrypt with a per-user salt;
+  sessions are 256-bit random tokens stored only as SHA-256 hashes in an
+  `HttpOnly`, `SameSite=Lax` cookie.
+- **Catalogue** — fourteen products chosen to exercise the policy and the price
+  bands, from a $9 pin set to a $1,299 monitor. A final-sale coat, a coffee
+  subscription, a digital guide and sealed electronics each trigger a different
+  rule, and the items either side of the $500 human-review threshold are there
+  so the amount rules can be seen to fire. A test bench for the rules, not filler.
 - **Cart and checkout** — a real server-side transaction. Prices and totals are
   computed from the database and never accepted from the browser; stock is
   decremented in the same transaction that writes the order.
@@ -353,13 +362,17 @@ the pipeline.
   every side re-reads its list or thread — so a message can never be delivered to
   the wrong browser.
 
-### Demo history is not your queue
+### Replay is not your queue
 
-The console seeds a few recorded decisions so it opens onto history rather than an
-empty table. Because those rows matter differently from real claims, every list
-row and detail carries `source` — `scenario` for replay, `storefront` for a live
-customer — and the queue can filter on it. The tag is derived from the row, not
-written at request time, so a seeded run cannot masquerade as a customer.
+Every list row and detail carries `source` — `scenario` when the request came from
+a replayed fixture, `storefront` when a live customer made it — and the queue can
+filter on it. The tag is derived from the row's `scenarioId`, never written at
+request time, so a replayed run cannot masquerade as a customer.
+
+The seed writes storefront items only, so a fresh deployment has an empty queue
+that fills with nothing but real work. The distinction still earns its place: it
+is what lets replay-based testing point at the same console without contaminating
+what an operator sees.
 
 ## Configuration
 
@@ -532,7 +545,7 @@ human instead. Neither setting can approve anything.
 | `POST` | `/api/chat/messages` | signed-in customer support pipeline; session-scoped customer, returns decision, trace, extraction, grounding |
 | `GET` | `/api/policy` | the live rule table, built from the enforcing objects |
 | `GET` | `/api/scenarios` | the 18 conformance fixtures, staff only |
-| `GET` | `/api/customers`, `/api/customers/:id/orders` | seeded fixtures, staff only |
+| `GET` | `/api/customers`, `/api/customers/:id/orders` | customer records and their orders, staff only |
 | `GET` | `/api/requests`, `/api/requests/:id` | audit history, staff only |
 | `POST` | `/api/requests/:id/override` | human override, admin only, with a required reason |
 | `GET` | `/api/refunds?status=pending_verification` | the payment verification queue, staff read |

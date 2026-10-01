@@ -328,11 +328,12 @@ export function settleRefund(db: Db, id: string, agentId: string, now: Date): Re
     // Preserve money settled before the ledger existed. The order column and
     // ledger are two views of settled refunds; take the larger, never their sum.
     const already = Math.max(order.refunded_cents, settledCentsForOrder(db, refund.orderId));
+    const pending = pendingCentsForOrder(db, refund.orderId);
 
-    if (already + refund.amountCents > order.total) {
+    if (already + pending > order.total) {
       throw new RefundLedgerError(
-        `settling ${refund.amountCents} cents would take this order to ${already + refund.amountCents} of ` +
-          `${order.total} cents refunded, which is more than was paid`,
+        `settling this reservation would leave ${already + pending} cents refunded or reserved of ` +
+          `${order.total} cents paid, which exceeds the order balance`,
       );
     }
 

@@ -331,4 +331,51 @@ describe('the live takeover console', () => {
     expect(brief.agentId).toBe('test-staff');
     expect(brief.handoffReason).toContain('stepped aside');
   });
+
+  it('announces the escalated assistant reply on the customer channel, so it does not wait for a reload', async () => {
+    // While a takeover is live the assistant answers in words and the reply is
+    // persisted - but the customer's page renders the thread from the REST
+    // history and treats its socket as "something changed, come look". Announcing
+    // on the staff channel alone left the reply stored but unseen until a full
+    // reload. A human agent's reply announces to the customer (see
+    // `messageCustomer`); this asserts the assistant now does too, without a socket.
+    harness = await appHarness();
+    seedShop(harness.db, TEST_NOW);
+    const app = harness.app;
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    // Non-delivery escalates, raising the takeover the next message routes to.
+    const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
+    expect(escalated.decision).toBe('escalated');
+
+    // Not the customer pushing for a person, so the assistant answers in words
+    // rather than reaching for the `remind_admin` tool.
+    const routed = await app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId: session.orderId, message: 'I would like to return this item.' },
+    });
+    expect(routed.statusCode).toBe(201);
+    expect(routed.json()).toMatchObject({ received: true, agentConnected: true });
+
+    const assistantReply = harness
+      .hubEvents()
+      .find((observation) => observation.channel === 'customer' && observation.event.type === 'agent.message');
+    expect(assistantReply).toMatchObject({
+      channel: 'customer',
+      customerId: session.customerId,
+      event: { type: 'agent.message', message: { sender: 'agent' } },
+    });
+    if (assistantReply === undefined) {
+      return;
+    }
+    const announced = (assistantReply.event as { readonly message: { readonly body: string } }).message.body;
+
+    // The announced reply is the one the customer's next read of the thread shows.
+    const during = await customerThread(harness, session, session.orderId);
+    const fromAssistant = during.filter((turn) => turn.kind === 'agent' && turn.sender === 'agent');
+    expect(fromAssistant).toHaveLength(1);
+    expect(fromAssistant[0]?.body).toBe(announced);
+  });
 });

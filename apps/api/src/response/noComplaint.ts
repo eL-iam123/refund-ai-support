@@ -53,22 +53,22 @@ interface OpenerCatalog {
  */
 const OPENERS: OpenerCatalog = {
   en: {
-    resolved: "Just so I have got it right - what happened with your order and what would you like me to do?",
+    resolved: "Hi! What's going on with your order? Tell me a little about what happened and I'll take a look.",
     unresolved:
       "It sounds like something went wrong, but I haven't found the order yet - can you tell me the product name or the date you ordered, and what happened?",
   },
   es: {
-    resolved: "Para asegurarme de que lo he entendido bien - ¿qué ha pasado con tu pedido y en qué te gustaría que te ayude?",
+    resolved: "¡Hola! ¿Qué ha pasado con tu pedido? Cuéntame un poco y lo reviso.",
     unresolved:
       "Parece que algo no ha ido bien, pero aún no encuentro el pedido. ¿Podrías decirme el nombre del producto o la fecha en que lo pediste, y qué ha pasado?",
   },
   fr: {
-    resolved: "Pour être sûr d'avoir bien compris - que s'est-il passé avec votre commande et comment puis-je vous aider ?",
+    resolved: "Bonjour ! Que s'est-il passé avec votre commande ? Racontez-moi un peu et je vais regarder.",
     unresolved:
       "On dirait que quelque chose s'est mal passé, mais je n'ai pas encore trouvé la commande. Pourriez-vous me dire le nom du produit ou la date de la commande, et ce qui s'est passé ?",
   },
   de: {
-    resolved: "Nur um sicherzugehen, dass ich es richtig verstanden habe - was ist mit Ihrer Bestellung passiert und wie kann ich helfen?",
+    resolved: "Hallo! Was ist mit Ihrer Bestellung passiert? Erzählen Sie mir kurz davon, dann schaue ich es mir an.",
     unresolved:
       "Es klingt, als wäre etwas schiefgelaufen, aber ich habe die Bestellung noch nicht gefunden. Können Sie mir den Produktnamen oder das Bestelldatum nennen und was passiert ist?",
   },

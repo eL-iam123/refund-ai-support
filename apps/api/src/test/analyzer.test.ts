@@ -34,6 +34,22 @@ describe('the local extractor leaves a greeting to the messenger', () => {
     }
   });
 
+  it('asks for more detail before claiming a bare complaint', async () => {
+    const reply = await LocalAnalyzer().analyze(
+      {
+        message: 'the mug is damaged',
+        order: { id: 'ORD-1', totalCents: 100, status: 'delivered', paymentState: 'settled', ageDays: 3, items: [] },
+        history: [],
+      },
+      () => {},
+    );
+
+    expect(reply.kind).toBe('question');
+    if (reply.kind === 'question') {
+      expect(reply.question).toContain('what the damage looks like');
+    }
+  });
+
   it('names the missing order when none is resolved yet, in the customer’s language', async () => {
     const reply = await LocalAnalyzer().analyze({ message: 'hola', order: null, history: [] }, () => {});
     expect(reply.kind).toBe('question');

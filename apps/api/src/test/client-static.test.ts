@@ -50,7 +50,7 @@ describe.skipIf(!BUILT)('the client is served from the API origin', () => {
       staticDir: CLIENT_DIST,
     });
     await app.ready();
-    harness = { app, db, analyzerCalls: () => 0 };
+    harness = { app, db, analyzerCalls: () => 0, hubEvents: () => [] };
   });
 
   afterAll(async () => {
