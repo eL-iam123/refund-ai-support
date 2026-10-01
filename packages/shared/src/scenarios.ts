@@ -30,6 +30,7 @@ export interface ScenarioItem {
   readonly finalSale: boolean;
   readonly digital: boolean;
   readonly downloaded: boolean;
+  readonly isSubscription: boolean;
 }
 
 export type OrderStatus = 'delivered' | 'shipped' | 'processing' | 'cancelled';
@@ -89,6 +90,7 @@ const item = (
   finalSale: false,
   digital: false,
   downloaded: false,
+  isSubscription: false,
   ...overrides,
 });
 
@@ -491,9 +493,9 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     orderId: 'ORD-1016',
     orders: [
-      order('ORD-1016', 2, 2, [item('ITM-1016-A', 'Cloud Storage Annual Plan', 24000)], {
-        isSubscription: true,
-      }),
+      order('ORD-1016', 2, 2, [
+        item('ITM-1016-A', 'Cloud Storage Annual Plan', 24000, { isSubscription: true }),
+      ]),
     ],
     message: 'Cancel my subscription and refund this year renewal charge.',
     expectedDecision: 'denied',

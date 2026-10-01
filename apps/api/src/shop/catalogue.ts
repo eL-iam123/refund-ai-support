@@ -264,8 +264,9 @@ function insertOrderItem(
 
   db.prepare(
     `INSERT INTO order_items (
-       id, order_id, product_id, name, unit_price_cents, quantity, final_sale, digital, downloaded
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       id, order_id, product_id, name, unit_price_cents, quantity,
+       final_sale, digital, downloaded, is_subscription
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
   ).run(
     itemId,
     orderId,
@@ -275,6 +276,7 @@ function insertOrderItem(
     quantity,
     product.finalSale ? 1 : 0,
     product.digital ? 1 : 0,
+    product.isSubscription ? 1 : 0,
   );
 
   const decremented = db

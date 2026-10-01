@@ -3,7 +3,7 @@ import { queryAll } from '../db/sql.js';
 import { findOrder } from '../db/orderRepository.js';
 import { listUpdatesForOrder } from '../db/customerUpdates.js';
 import { listDialogueForOrder } from '../db/dialogue.js';
-import { HANDSOFF_NOTICE, activeHandoffForCustomer, listAgentMessagesForOrder } from '../db/handoffs.js';
+import { ESCALATION_AGENT, activeHandoffForCustomer, listAgentMessagesForOrder } from '../db/handoffs.js';
 import { NotFoundError } from '../http/errors.js';
 import type { DialogueLine } from '../ai/analyzer.js';
 
@@ -66,6 +66,7 @@ export type ChatTurn =
       readonly responseText: string;
       readonly decision: string;
       readonly refundAmountCents: number;
+      readonly itemIds: readonly string[];
       readonly createdAt: string;
     }
   | {
@@ -102,6 +103,7 @@ interface TurnRow {
   readonly response_text: string;
   readonly decision: string;
   readonly refund_amount_cents: number;
+  readonly eligible_item_ids_json: string | null;
   readonly created_at: string;
 }
 
@@ -189,7 +191,7 @@ function pushRequests(
 ): void {
   const rows = queryAll<TurnRow>(
     db.prepare(
-      `SELECT id, message, response_text, decision, refund_amount_cents, created_at
+      `SELECT id, message, response_text, decision, refund_amount_cents, eligible_item_ids_json, created_at
          FROM refund_requests
         WHERE customer_id = ? AND order_id IS ?
         ORDER BY created_at DESC, rowid DESC
@@ -288,11 +290,14 @@ function pushHandoffNotice(entries: Entry[], db: Db, customerId: string): void {
   // actually live, and vanishes on hand-back without a row to clean up.
   const active = activeHandoffForCustomer(db, customerId);
   if (active !== null) {
+    const body = active.agentId === ESCALATION_AGENT
+      ? 'Your request is waiting for a person to review it. The assistant will not reply on their behalf.'
+      : 'A customer agent has joined this conversation.';
     entries.push({
       turn: {
         kind: 'handoff',
         id: active.id,
-        body: HANDSOFF_NOTICE,
+        body,
         createdAt: active.startedAt,
       },
       rank: 0.5,
@@ -449,6 +454,7 @@ function hydrateTurn(row: TurnRow): ChatTurn {
     responseText: row.response_text,
     decision: row.decision,
     refundAmountCents: row.refund_amount_cents,
+    itemIds: row.eligible_item_ids_json === null ? [] : JSON.parse(row.eligible_item_ids_json) as readonly string[],
     createdAt: row.created_at,
   };
 }

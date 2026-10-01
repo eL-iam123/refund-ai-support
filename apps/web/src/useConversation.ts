@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { RefundRequestDto } from '@refund/shared';
 import { api, describe } from './api';
 import { shopApi, type ChatTurn as StoredTurn } from './shop/api';
@@ -41,6 +41,7 @@ export interface ReplyBody {
   readonly decision: RefundRequestDto['decision']['decision'];
   readonly refundAmountCents: number;
   readonly responseText: string;
+  readonly itemIds?: readonly string[];
 }
 
 /** One customer message and whatever came back for it. */
@@ -128,6 +129,7 @@ export type Turn =
 
 export interface Conversation {
   readonly turns: readonly Turn[];
+  readonly closed: boolean;
   readonly draft: string;
   readonly busy: boolean;
   readonly error: string;
@@ -148,6 +150,7 @@ type TurnBuckets = Readonly<Record<string, readonly Turn[]>>;
 interface LoadedThread {
   readonly orderId: string;
   readonly turns: readonly Turn[];
+  readonly closed: boolean;
 }
 
 /**
@@ -172,7 +175,7 @@ interface LoadedThread {
 function useStoredThread(
   customerId: string | null,
   orderId: string | null,
-): { readonly turns: readonly Turn[]; readonly loading: boolean; readonly error: string; readonly reload: () => void } {
+): { readonly turns: readonly Turn[]; readonly closed: boolean; readonly loading: boolean; readonly error: string; readonly reload: () => void } {
   const [loaded, setLoaded] = useState<LoadedThread | null>(null);
   const [failed, setFailed] = useState<string>('');
   // Bumped by `reload`. The socket announces "something changed, come look";
@@ -189,7 +192,7 @@ function useStoredThread(
       .chatHistory(orderId)
       .then((result) => {
         if (current && result.orderId === orderId) {
-          setLoaded({ orderId, turns: result.turns.map(toTurn) });
+          setLoaded({ orderId, turns: result.turns.map(toTurn), closed: result.closed });
           setFailed('');
         }
       })
@@ -208,6 +211,7 @@ function useStoredThread(
   const applies = loaded !== null && loaded.orderId === orderId;
   return {
     turns: applies ? loaded.turns : [],
+    closed: applies && loaded.closed,
     loading: orderId !== null && customerId !== null && !applies && failed === '',
     error: failed,
     reload: () => setVersion((v) => v + 1),
@@ -279,11 +283,16 @@ function useLiveTurns(orderId: string | null): {
  * signed-in customer, no order chosen, nothing typed - and they have different
  * fixes. Silently disabling the button for all three teaches a customer that the
  * page is broken. Each one is stated instead, with the thing to do about it.
+ *
+ * `itemIds` is the picker, not a second message. It rides along with the text and
+ * narrows what the claim is about, so "the mug arrived broken" does not have to
+ * be found in the words when the customer has already pointed at the line.
  */
 export function useConversation(
   customerId: string | null,
   orderId: string | null,
   initialDraft = '',
+  itemIds: readonly string[] = [],
 ): Conversation {
   const stored = useStoredThread(customerId, orderId);
   const live = useLiveTurns(orderId);
@@ -294,12 +303,30 @@ export function useConversation(
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
 
-  const blocked = reasonBlocked(customerId, orderId);
+  const blocked = stored.closed
+    ? 'This conversation is closed after the final decision. You can no longer send messages on this order.'
+    : reasonBlocked(customerId, orderId);
   const turns = merge(stored.turns, live.turns);
+
+  // A stable id list per send. `itemIds` is an array rebuilt on every render of
+  // the picker, so it cannot be a dependency of `send` directly without
+  // re-creating this callback - and, worse, without the callback that closes over
+  // one render's ticks being the one that fires.
+  const ticked = itemIds.join(',');
+  const selectedIds = useMemo(() => (ticked === '' ? [] : ticked.split(',')), [ticked]);
 
   const send = useCallback(async (): Promise<void> => {
     const message = draft.trim();
-    if (message.length === 0 || customerId === null || orderId === null || busy) {
+    if (message.length === 0 || customerId === null || orderId === null || busy || stored.closed) {
+      return;
+    }
+
+    const previouslyReportedItemIds = [...new Set(
+      turns.flatMap((turn) => (turn.kind === 'replied' || turn.kind === 'stored' ? turn.result.itemIds ?? [] : [])),
+    )];
+
+    if (selectedIds.some((id) => previouslyReportedItemIds.includes(id))) {
+      setError('You have already reported that item in this chat. Please choose a different item from this order, or tell me about a different problem. I’m here to help with anything else.');
       return;
     }
 
@@ -312,7 +339,7 @@ export function useConversation(
     live.begin(orderId, message, localId);
 
     try {
-      const reply = await api.sendMessage({ customerId, orderId, message });
+      const reply = await api.sendMessage({ customerId, orderId, message, itemIds: selectedIds });
       settleReply(orderId, localId, message, reply, live);
     } catch (cause: unknown) {
       setError(describe(cause));
@@ -320,10 +347,11 @@ export function useConversation(
     } finally {
       setBusy(false);
     }
-  }, [busy, customerId, draft, live, orderId]);
+  }, [busy, customerId, draft, live, orderId, selectedIds, stored.closed, turns]);
 
   return {
     turns,
+    closed: stored.closed,
     draft,
     busy,
     error: error.length > 0 ? error : stored.error,
@@ -383,6 +411,7 @@ function settleReply(
       decision: request.decision.decision,
       refundAmountCents: request.decision.refundAmountCents,
       responseText: request.responseText,
+      itemIds: request.decision.eligibleItemIds,
     },
     duplicate: duplicate ?? null,
   });
@@ -425,6 +454,7 @@ function toTurn(stored: StoredTurn): Turn {
       decision: stored.decision,
       refundAmountCents: stored.refundAmountCents,
       responseText: stored.responseText,
+      itemIds: stored.itemIds ?? [],
     },
   };
 }

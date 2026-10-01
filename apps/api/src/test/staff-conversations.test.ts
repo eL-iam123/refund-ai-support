@@ -104,7 +104,7 @@ describe('the live takeover console', () => {
     // The customer sees the notice, their routed message, and the agent's reply.
     const during = await customerThread(harness, session, session.orderId);
     expect(during.filter((turn) => turn.kind === 'handoff').map((turn) => turn.body)).toEqual([
-      'Connecting you to a customer agent - please hold.',
+      'A customer agent has joined this conversation.',
     ]);
     const routedShown = during.filter((turn) => turn.kind === 'agent' && turn.sender === 'customer');
     expect(routedShown.filter((turn) => turn.body === 'Hello? Are you there?')).toHaveLength(1);
@@ -298,6 +298,37 @@ describe('the live takeover console', () => {
     expect(brief.state).not.toBe('ai');
   });
 
+  it('does not fail a second order escalation when another order already has an unattended takeover', async () => {
+    harness = await appHarness();
+    seedShop(harness.db, TEST_NOW);
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    const first = await session.send(session.orderId, 'The charger never arrived and I want my money back');
+    expect(first.decision).toBe('escalated');
+
+    const checkout = await harness.app.inject({
+      method: 'POST',
+      url: '/api/shop/checkout',
+      headers: { cookie: cookiesOf(session) },
+      payload: { lines: [{ productId: 'PRD-MUG-01', quantity: 1 }] },
+    });
+    expect(checkout.statusCode).toBe(201);
+    const secondOrderId = checkout.json<{ order: { id: string } }>().order.id;
+    const second = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        customerId: session.customerId,
+        orderId: secondOrderId,
+        message: 'The mug never arrived and I want my money back.',
+      },
+    });
+
+    expect(second.statusCode).toBe(201);
+    expect(second.json<{ request: { decision: { decision: string } } }>().request.decision.decision).toBe('escalated');
+  });
+
   it('briefs a person two agents cannot race for: the second takeover loses', async () => {
     harness = await appHarness();
     seedShop(harness.db, TEST_NOW);
@@ -332,24 +363,22 @@ describe('the live takeover console', () => {
     expect(brief.handoffReason).toContain('stepped aside');
   });
 
-  it('announces the escalated assistant reply on the customer channel, so it does not wait for a reload', async () => {
-    // While a takeover is live the assistant answers in words and the reply is
-    // persisted - but the customer's page renders the thread from the REST
-    // history and treats its socket as "something changed, come look". Announcing
-    // on the staff channel alone left the reply stored but unseen until a full
-    // reload. A human agent's reply announces to the customer (see
-    // `messageCustomer`); this asserts the assistant now does too, without a socket.
+  it('leaves an unattended takeover to a person: the assistant does not answer in their place', async () => {
+    // An escalation raises a takeover owned by the awaiting-agent slot, not by a
+    // named agent. The customer can keep talking, and what they write has to reach
+    // staff - but the model must not answer them. A reply written while nobody has
+    // claimed the thread is the business speaking over a person who is on their
+    // way, and once an agent claims it their message would contradict what the
+    // customer was just told.
     harness = await appHarness();
     seedShop(harness.db, TEST_NOW);
     const app = harness.app;
     const session = await signIn(harness, 'sam@shop.demo');
 
-    // Non-delivery escalates, raising the takeover the next message routes to.
+    // Non-delivery escalates, raising the unattended takeover.
     const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
     expect(escalated.decision).toBe('escalated');
 
-    // Not the customer pushing for a person, so the assistant answers in words
-    // rather than reaching for the `remind_admin` tool.
     const routed = await app.inject({
       method: 'POST',
       url: '/api/chat/messages',
@@ -357,25 +386,32 @@ describe('the live takeover console', () => {
       payload: { customerId: session.customerId, orderId: session.orderId, message: 'I would like to return this item.' },
     });
     expect(routed.statusCode).toBe(201);
-    expect(routed.json()).toMatchObject({ received: true, agentConnected: true });
-
-    const assistantReply = harness
-      .hubEvents()
-      .find((observation) => observation.channel === 'customer' && observation.event.type === 'agent.message');
-    expect(assistantReply).toMatchObject({
-      channel: 'customer',
-      customerId: session.customerId,
-      event: { type: 'agent.message', message: { sender: 'agent' } },
+    // No human has claimed it, so `agentConnected` is false rather than the
+    // optimistic true - the storefront uses it to decide whether to keep the
+    // customer's message box open or to show that a person is still to come.
+    expect(routed.json()).toMatchObject({ received: true, agentConnected: false, aiResponse: null });
+    expect(routed.json<{ message: { sender: string; body: string } }>().message).toMatchObject({
+      sender: 'customer',
+      body: 'I would like to return this item.',
     });
-    if (assistantReply === undefined) {
-      return;
-    }
-    const announced = (assistantReply.event as { readonly message: { readonly body: string } }).message.body;
 
-    // The announced reply is the one the customer's next read of the thread shows.
+    // The message is durably recorded and announced to staff, so nobody has to
+    // poll the console to discover a customer is waiting.
+    const announced = harness.hubEvents().filter((observation) => observation.channel === 'staff');
+    expect(
+      announced.some(
+        (observation) =>
+          observation.event.type === 'customer.message' &&
+          (observation.event as { readonly message: { readonly body: string } }).message.body ===
+            'I would like to return this item.',
+      ),
+    ).toBe(true);
+
+    // And nothing was written on the customer's behalf.
     const during = await customerThread(harness, session, session.orderId);
-    const fromAssistant = during.filter((turn) => turn.kind === 'agent' && turn.sender === 'agent');
-    expect(fromAssistant).toHaveLength(1);
-    expect(fromAssistant[0]?.body).toBe(announced);
+    expect(during.filter((turn) => turn.kind === 'agent' && turn.sender === 'agent')).toHaveLength(0);
+    expect(during.filter((turn) => turn.kind === 'handoff').map((turn) => turn.body)).toEqual([
+      'Your request is waiting for a person to review it. The assistant will not reply on their behalf.',
+    ]);
   });
 });

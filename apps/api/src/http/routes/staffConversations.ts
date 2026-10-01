@@ -7,6 +7,7 @@ import type { Principal } from '../../auth/tokens.js';
 import { NotFoundError, HttpError, badRequest } from '../errors.js';
 import { findCustomer } from '../../db/sql.js';
 import {
+  ESCALATION_AGENT,
   activeHandoffForCustomer,
   endHandoff,
   claimUnattendedHandoff,
@@ -21,6 +22,7 @@ import {
 } from '../../db/handoffs.js';
 import { threadForStaff } from '../../retrieval/conversation.js';
 import { buildHandoffBrief } from '../../report/handoffBrief.js';
+import { ChatNotFinalizedError, closeFinalizedChat } from '../../db/chatClosures.js';
 
 /**
  * Staff endpoints for the live takeover console.
@@ -54,6 +56,10 @@ const ConversationQuerySchema = z.object({
   orderId: z.string().min(1).nullable().optional(),
 });
 
+const CloseChatSchema = z.object({
+  orderId: z.string().min(1).nullable(),
+});
+
 /** How far back a conversation must have moved to count as "live". */
 const LIVE_WINDOW_HOURS = 24;
 
@@ -75,6 +81,7 @@ export function registerStaffConversationRoutes(app: FastifyInstance, ctx: AppCo
   app.post('/api/staff/conversations/:customerId/take-over', staff('agent'), (request) => takeOver(ctx, hub, request));
   app.post('/api/staff/conversations/:customerId/message', staff('agent'), (request) => messageCustomer(ctx, hub, request));
   app.post('/api/staff/conversations/:customerId/hand-back', staff('agent'), (request) => handBack(ctx, hub, request));
+  app.post('/api/staff/conversations/:customerId/close', staff('agent'), (request) => closeChat(ctx, hub, request));
 }
 
 /** The conversations an agent might pick up, ordered by who moved last. */
@@ -192,6 +199,9 @@ function messageCustomer(
   if (active === null) {
     throw new HttpError(409, 'no_active_handoff', 'only a customer agent attached to this thread can message the customer');
   }
+  if (active.agentId === ESCALATION_AGENT || active.agentId !== requirePrincipal(request.principal).subject) {
+    throw new HttpError(409, 'handoff_not_claimed', 'claim this conversation before replying');
+  }
 
   const message: AgentMessage = recordAgentMessage(ctx.db, {
     handoffId: active.id,
@@ -220,6 +230,10 @@ function handBack(
   request: FastifyRequest,
 ): { ended: ActiveHandoff } {
   const params = request.params as { customerId: string };
+  const active = activeHandoffForCustomer(ctx.db, params.customerId);
+  if (active !== null && active.agentId !== requirePrincipal(request.principal).subject) {
+    throw new HttpError(409, 'handoff_not_owned', 'only the assigned agent can hand this conversation back');
+  }
 
   let ended: ActiveHandoff | null;
   try {
@@ -253,4 +267,52 @@ function handBack(
   });
 
   return { ended };
+}
+
+function closeChat(
+  ctx: AppContext,
+  hub: LiveHub,
+  request: FastifyRequest,
+): { closure: ReturnType<typeof closeFinalizedChat> } {
+  const params = request.params as { customerId: string };
+  const body = CloseChatSchema.safeParse(request.body);
+  if (!body.success) {
+    throw badRequest('invalid chat closure', body.error.issues.map((issue) => issue.message));
+  }
+  if (findCustomer(ctx.db, params.customerId, ctx.now()) === null) {
+    throw new NotFoundError('customer', params.customerId);
+  }
+
+  const active = activeHandoffForCustomer(ctx.db, params.customerId);
+  let closure: ReturnType<typeof closeFinalizedChat>;
+  try {
+    closure = closeFinalizedChat(ctx.db, {
+      customerId: params.customerId,
+      orderId: body.data.orderId,
+      closedBy: requirePrincipal(request.principal).subject,
+      now: ctx.now(),
+    });
+  } catch (error: unknown) {
+    if (error instanceof ChatNotFinalizedError) {
+      throw new HttpError(409, 'chat_not_finalized', error.message);
+    }
+    throw error;
+  }
+
+  hub.notifyCustomer(params.customerId, {
+    type: 'chat.closed',
+    customerId: params.customerId,
+    orderId: body.data.orderId,
+  });
+  if (active !== null && active.orderId === body.data.orderId) {
+    hub.notifyCustomer(params.customerId, {
+      type: 'agent.left',
+      customerId: params.customerId,
+      orderId: body.data.orderId,
+    });
+    hub.notifyStaff({ type: 'handoff.ended', customerId: params.customerId, orderId: body.data.orderId });
+  }
+  hub.notifyStaff({ type: 'conversation.updated', customerId: params.customerId, orderId: body.data.orderId });
+  ctx.log.info({ customerId: params.customerId, orderId: body.data.orderId, requestId: closure.requestId }, 'staff.chat.closed');
+  return { closure };
 }

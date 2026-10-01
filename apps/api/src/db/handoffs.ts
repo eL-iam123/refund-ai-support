@@ -24,9 +24,6 @@ import { latestRequestForThread } from './requestRepository.js';
  *    pipeline has produced the less there is to untangle afterwards.
  */
 
- /** Shown in the thread from the moment a person takes over until they hand back. */
-export const HANDSOFF_NOTICE = 'Connecting you to a customer agent - please hold.';
-
 /**
  * The `agent_id` of a takeover nobody has claimed yet.
  *
@@ -141,8 +138,15 @@ export function takeoverForEscalated(
   now: Date,
 ): ActiveHandoff | null {
   const live = activeHandoffForCustomer(db, customerId);
-  if (live !== null && isThreadOf(live, orderId)) {
-    return live;
+  if (live !== null) {
+    if (isThreadOf(live, orderId)) {
+      return live;
+    }
+    // Only one live takeover is allowed per customer. An unattended escalation
+    // for another order must not make this order's persisted escalation fail
+    // with HandoffAlreadyActiveError; both requests remain visible to staff, and
+    // the existing takeover stays anchored to its original thread.
+    return null;
   }
 
   const latest = latestRequestForThread(db, customerId, orderId);
@@ -152,7 +156,16 @@ export function takeoverForEscalated(
   if (escalationWasHandled(db, customerId, latest.orderId, latest.createdAt)) {
     return null;
   }
-  return startHandoff(db, { customerId, orderId: latest.orderId, agentId: ESCALATION_AGENT, now });
+  try {
+    return startHandoff(db, { customerId, orderId: latest.orderId, agentId: ESCALATION_AGENT, now });
+  } catch (error) {
+    // Another process may have opened a takeover after the read above. Treat
+    // that customer-wide uniqueness race just like the ordinary conflict.
+    if (activeHandoffForCustomer(db, customerId) !== null) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**

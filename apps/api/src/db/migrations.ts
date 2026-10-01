@@ -563,6 +563,63 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 13,
+    name: 'order_items.is_subscription',
+    up: (db) => {
+      // Whether *this line* is a recurring/renewal charge, as opposed to
+      // whether the basket contains one.
+      //
+      // R-10 was written against the order-level flag, so a single subscription
+      // line in a mixed basket refused the whole order - the coat, the mug and
+      // the repair guide included. That is the wrong unit: a subscription is a
+      // property of the product, exactly like final-sale, and belongs on the
+      // line the way `final_sale` and `digital` already do. The order-level flag
+      // stays as "this basket contains a subscription" for display; the rule
+      // reads the line.
+      //
+      // Existing orders predate the line flag, so their subscription lines are
+      // backfilled from the order-level flag *only when the order has a single
+      // line*: that is the one case where the line is unambiguously the
+      // subscription. A mixed historical basket keeps the flag false on every
+      // line, which is the honest answer - the data does not say which line it
+      // was, and guessing would refund or refuse the wrong product.
+      if (!hasTable(db, 'order_items') || hasColumn(db, 'order_items', 'is_subscription')) {
+        return;
+      }
+      db.exec('ALTER TABLE order_items ADD COLUMN is_subscription INTEGER NOT NULL DEFAULT 0');
+      db.exec(`
+        UPDATE order_items
+           SET is_subscription = 1
+         WHERE order_id IN (SELECT id FROM orders WHERE is_subscription = 1)
+           AND order_id IN (
+             SELECT order_id FROM order_items GROUP BY order_id HAVING COUNT(*) = 1
+           )
+      `);
+    },
+  },
+  {
+    version: 14,
+    name: 'finalized chat closures',
+    up: (db) => {
+      // A finalized conversation is a terminal customer-facing state, distinct
+      // from a handoff ending. Handing back re-enables the assistant; closing
+      // records that the final decision was communicated and blocks new turns.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS chat_closures (
+          id          TEXT PRIMARY KEY,
+          customer_id TEXT NOT NULL REFERENCES customers(id),
+          order_id    TEXT,
+          request_id  TEXT NOT NULL REFERENCES refund_requests(id),
+          closed_at   TEXT NOT NULL,
+          closed_by   TEXT NOT NULL,
+          final_state TEXT NOT NULL CHECK (final_state IN ('approved', 'denied'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_closures_thread
+          ON chat_closures(customer_id, COALESCE(order_id, ''));
+      `);
+    },
+  },
 ];
 
 /**

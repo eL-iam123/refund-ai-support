@@ -2,7 +2,7 @@ import OpenAI, { APIConnectionError, APIError, APIUserAbortError } from 'openai'
 import type { z } from 'zod';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildAgentUser, CHAT_SYSTEM_PROMPT } from './prompts.js';
+import { buildAgentUser, CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM } from './prompts.js';
 import { AgentOutputSchema, type AgentOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
@@ -177,7 +177,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
           ? base
           : `${base}\n\nYour previous reply was rejected: ${complaints}. Reply with valid JSON only.`;
 
-      const completion = await this.complete(base, user, budget, observer);
+      const completion = await this.complete(EXTRACTION_SYSTEM, user, budget, observer);
       const parsed = AgentOutputSchema.safeParse(parseJson(completion.text));
 
       if (parsed.success) {

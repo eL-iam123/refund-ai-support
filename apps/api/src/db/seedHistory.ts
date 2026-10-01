@@ -87,6 +87,7 @@ export async function seedRequestHistory(db: Db, now: Date, pipeline: PipelineDe
       customerId: scenario.customer.key,
       orderId: scenario.orderId,
       message: scenario.message,
+      itemIds: [],
       now,
     });
     if (result.stage === 'asked') {

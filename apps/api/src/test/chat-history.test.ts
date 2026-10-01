@@ -25,6 +25,7 @@ interface Turn {
   readonly responseText: string;
   readonly decision: string;
   readonly refundAmountCents: number;
+  readonly itemIds: readonly string[];
 }
 
 let harness: AppHarness | null = null;
@@ -178,6 +179,18 @@ describe('per-order chat history', () => {
     for (const turn of second) {
       expect(turn.message).not.toContain('lamp');
     }
+  });
+
+  it('retains the item scope from earlier requests so the UI can grey out already-reported items', async () => {
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    await session.send(session.orderId, 'The lamp arrived with a cracked shade');
+
+    const history = await threadFor(harness, session, session.orderId);
+    expect(history).toHaveLength(1);
+    expect(Array.isArray(history[0]?.itemIds)).toBe(true);
+    expect(history[0]?.itemIds?.length).toBeGreaterThan(0);
   });
 
   it('keeps an escalated order from swallowing the next one', async () => {

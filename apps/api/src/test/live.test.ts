@@ -87,6 +87,7 @@ const ORDER: OrderRecord = {
       quantity: 1,
       finalSale: false,
       digital: false,
+      isSubscription: false,
       downloaded: false,
     },
   ],
@@ -235,6 +236,7 @@ live('live provider', () => {
         customerId: fixture.customer.key,
         orderId: fixture.orderId,
         message: fixture.message,
+        itemIds: [],
         now: TEST_NOW,
       },
     );

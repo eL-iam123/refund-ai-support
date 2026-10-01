@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Bot, Headset, Send, ShieldCheck } from 'lucide-react';
 import { ErrorNote } from './components';
@@ -44,7 +44,33 @@ export function ChatPage(): ReactNode {
   const orderList = useMemo(() => orders.data?.orders ?? [], [orders.data]);
   const selected = useSelectedOrder(orderList, handoff?.orderId ?? null);
 
-  const chat = useConversation(customerId, selected.orderId, complaintFor(handoff?.issue ?? null));
+  const order = useMemo(
+    () => orderList.find((candidate) => candidate.id === selected.orderId) ?? null,
+    [orderList, selected.orderId],
+  );
+  const [reportedItemIds, setReportedItemIds] = useState<readonly string[]>([]);
+  const ticks = useItemTicks(order, reportedItemIds);
+
+  const chat = useConversation(
+    customerId,
+    selected.orderId,
+    complaintFor(handoff?.issue ?? null),
+    ticks.itemIds,
+  );
+
+  useEffect(() => {
+    const next = [...new Set(
+      chat.turns.flatMap((turn) =>
+        turn.kind === 'replied' || turn.kind === 'stored' ? turn.result.itemIds ?? [] : [],
+      ),
+    )];
+    setReportedItemIds((current) => {
+      if (current.length === next.length && current.every((id, index) => id === next[index])) {
+        return current;
+      }
+      return next;
+    });
+  }, [chat.turns]);
   useShopSocket(customerId, chat.refresh);
 
   return (
@@ -56,12 +82,109 @@ export function ChatPage(): ReactNode {
           loading={orders.data === null && orders.error === null}
           selected={selected.orderId}
           onSelect={selected.select}
+          order={order}
+          ticks={ticks}
+          reportedItemIds={reportedItemIds}
         />
         <AssistantStatus />
         <PolicyNote />
       </aside>
 
       <ChatThread chat={chat} />
+    </div>
+  );
+}
+
+/**
+ * Which order lines this message is about, and the only way to change that.
+ *
+ * The picker exists because the alternative is asking a customer to describe a
+ * product in words, and words are matched by a heuristic: "the blue mug", "the
+ * other one", "the thing I already sent back" all describe a line perfectly well
+ * and none of them name it. Every line already carries an id, so a tick is an
+ * unambiguous claim and the matcher is only consulted when nothing was ticked.
+ *
+ * Derived, not reset, on the same reasoning as the order selection above: an id
+ * left behind on another order is simply not on this one, so a selection cannot
+ * leak from one basket into another and nothing has to be written back to keep up
+ * with a change of order.
+ */
+interface ItemTicks {
+  readonly itemIds: readonly string[];
+  readonly toggle: (itemId: string) => void;
+}
+
+function useItemTicks(order: ShopOrder | null, reportedItemIds: readonly string[] = []): ItemTicks {
+  const [chosen, setChosen] = useState<readonly string[]>([]);
+  const onThisOrder = new Set((order?.items ?? []).map((item) => item.itemId));
+  const itemIds = chosen.filter((id) => onThisOrder.has(id) && !reportedItemIds.includes(id));
+
+  const toggle = useCallback(
+    (itemId: string) => {
+      if (reportedItemIds.includes(itemId)) {
+        return;
+      }
+      setChosen((previous) =>
+        previous.includes(itemId) ? previous.filter((id) => id !== itemId) : [...previous, itemId],
+      );
+    },
+    [reportedItemIds],
+  );
+
+  return { itemIds, toggle };
+}
+
+/**
+ * Tick the items the claim is about.
+ *
+ * Hidden for a single-item order, where there is nothing to choose and a picker
+ * with one box on it reads as a form field rather than as an answer. The caption
+ * states both outcomes, because "the whole order" is a real claim the customer
+ * makes by ticking nothing, and silence about it is how a basket-wide claim
+ * happens by accident.
+ */
+function ItemPicker({ order, ticks, reportedItemIds }: { order: ShopOrder; ticks: ItemTicks; reportedItemIds: readonly string[] }): ReactNode {
+  if (order.items.length < 2) {
+    return null;
+  }
+
+  const alreadyReported = new Set(reportedItemIds);
+  const disabledCount = order.items.filter((item) => alreadyReported.has(item.itemId)).length;
+
+  return (
+    <div className="item-picker">
+      <span className="label">Which item is this about?</span>
+      <ul className="lines">
+        {order.items.map((item) => {
+          const reported = alreadyReported.has(item.itemId);
+          return (
+            <li key={item.itemId}>
+              <label className={reported ? 'muted' : undefined}>
+                <input
+                  type="checkbox"
+                  checked={ticks.itemIds.includes(item.itemId)}
+                  disabled={reported}
+                  onChange={() => ticks.toggle(item.itemId)}
+                  title={reported ? 'This item was already reported in this chat. Choose another item or tell me about a different problem.' : undefined}
+                />
+                <span>
+                  {item.name}
+                  {item.quantity > 1 ? ` x${item.quantity}` : ''}
+                  {reported ? ' (already reported)' : ''}
+                </span>
+                <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="muted small">
+        {disabledCount > 0
+          ? 'This item was already reported in this chat. Please choose a different item from the order, or tell me about a different problem. I’m here to help with anything else.'
+          : ticks.itemIds.length === 0
+            ? 'Tick what went wrong and only that is treated as the claim. With nothing ticked, the whole order is.'
+            : `${ticks.itemIds.length} ticked. Only those are treated as the claim.`}
+      </p>
     </div>
   );
 }
@@ -160,6 +283,7 @@ function ChatThread({ chat }: { chat: Conversation }): ReactNode {
         draft={chat.draft}
         busy={chat.busy}
         blocked={chat.blocked}
+        closed={chat.closed}
         onDraft={chat.setDraft}
         onSend={chat.send}
         inHandoff={inHandoff}
@@ -235,7 +359,7 @@ function useShopSocket(customerId: string | null, onEvent: () => void): void {
 }
 
 /**
- * The order being asked about, and the only way to change it.
+ * The order being asked about, its lines, and the only way to change either.
  *
  * The list is the shopper's own, loaded over their session. When it arrives empty
  * the page says so and links to the shop, because "the assistant is not working"
@@ -247,11 +371,17 @@ function OrderScope({
   loading,
   selected,
   onSelect,
+  order,
+  ticks,
+  reportedItemIds,
 }: {
   orders: readonly ShopOrder[];
   loading: boolean;
   selected: string | null;
   onSelect: (id: string) => void;
+  order: ShopOrder | null;
+  ticks: ItemTicks;
+  reportedItemIds: readonly string[];
 }): ReactNode {
   if (loading) {
     return <p className="muted small">Loading your orders…</p>;
@@ -268,7 +398,6 @@ function OrderScope({
     );
   }
 
-  const order = orders.find((candidate) => candidate.id === selected);
   return (
     <div className="order-scope">
       <label className="stack-sm">
@@ -284,7 +413,8 @@ function OrderScope({
           ))}
         </select>
       </label>
-      {order !== undefined ? <OrderFacts order={order} /> : null}
+      {order !== null ? <OrderFacts order={order} /> : null}
+      {order !== null ? <ItemPicker order={order} ticks={ticks} reportedItemIds={reportedItemIds} /> : null}
     </div>
   );
 }
@@ -406,6 +536,7 @@ function Composer({
   draft,
   busy,
   blocked,
+  closed,
   onDraft,
   onSend,
   inHandoff,
@@ -414,6 +545,7 @@ function Composer({
   draft: string;
   busy: boolean;
   blocked: string | null;
+  closed: boolean;
   onDraft: (next: string) => void;
   onSend: () => Promise<void>;
   inHandoff: boolean;
@@ -432,12 +564,13 @@ function Composer({
         maxLength={4000}
         aria-label="Describe the problem"
         placeholder="Describe what went wrong…"
+        disabled={closed}
         onChange={(event) => onDraft(event.target.value)}
       />
       {inHandoff && (
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || closed}
           aria-label="Attach a photo"
           onClick={onAttachPhoto}
           className="composer-photo"

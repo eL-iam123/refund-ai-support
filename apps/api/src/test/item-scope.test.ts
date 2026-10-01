@@ -3,7 +3,7 @@ import { openMemoryDatabase, type Db } from '../db/connection.js';
 import { seedDatabase } from '../db/seed.js';
 import { findOrder, listOrdersForCustomer } from '../db/orderRepository.js';
 import { findCustomer } from '../db/sql.js';
-import { identifyOrder } from '../retrieval/identifyOrder.js';
+import { disputeCeiling, identifyOrder } from '../retrieval/identifyOrder.js';
 import { matchOrders, scopeItems } from '../retrieval/keywords.js';
 import { seedShop } from '../shop/seed.js';
 import { createUser } from '../shop/auth.js';
@@ -144,5 +144,115 @@ describe('item scope excludes products named only to be ruled out', () => {
     // Only the item ceiling consults negation. Order choice must still see the
     // mug, or a message praising one item would stop identifying the order.
     expect(result.matches[0]?.order.id).toBe(orderId);
+  });
+});
+
+/**
+ * The storefront's item picker.
+ *
+ * A tick names a line by id, which is the one claim about an item that cannot be
+ * misread. These hold the two properties that make it safe to trust: a tick
+ * overrides what the message appears to say, and an id the order does not contain
+ * narrows nothing rather than being resolved somewhere else.
+ */
+describe('a ticked item is the claim, whatever the message says', () => {
+  let db: Db;
+  let customerId: string;
+  let orderId: string;
+  let lampItemId: string;
+  let mugItemId: string;
+
+  beforeEach(() => {
+    db = openMemoryDatabase();
+    seedDatabase(db, TEST_NOW);
+    seedShop(db, TEST_NOW);
+
+    const user = createUser(
+      db,
+      { email: 'ticks@shop.test', password: 'a-good-password', name: 'Tick Tester' },
+      TEST_NOW,
+    );
+    customerId = user.customerId;
+    const order = checkout(
+      db,
+      customerId,
+      [
+        { productId: 'PRD-LAMP-01', quantity: 1 },
+        { productId: 'PRD-MUG-01', quantity: 1 },
+      ],
+      TEST_NOW,
+    );
+    orderId = order.id;
+    const lines = order.items;
+    lampItemId = lines.find((item) => item.name === LAMP)?.itemId ?? '';
+    mugItemId = lines.find((item) => item.name === MUG)?.itemId ?? '';
+  });
+
+  function identify(message: string, itemIds: readonly string[]): ReturnType<typeof identifyOrder> {
+    const customer = findCustomer(db, customerId, TEST_NOW);
+    if (customer === null) {
+      throw new Error('fixture customer missing');
+    }
+    return identifyOrder(db, customer, orderId, message, TEST_NOW, itemIds);
+  }
+
+  it('scopes the claim to the ticked line when the message names nothing', () => {
+    const found = identify('something in this delivery went wrong', [mugItemId]);
+
+    expect(found.items.map((item) => item.name)).toEqual([MUG]);
+  });
+
+  it('wins over the keyword matcher when the message names another item', () => {
+    const found = identify('the lamp arrived cracked', [mugItemId]);
+
+    expect(found.items.map((item) => item.name)).toEqual([MUG]);
+  });
+
+  it('takes every ticked line, not just the first', () => {
+    const found = identify('both of these are wrong', [lampItemId, mugItemId]);
+
+    expect([...found.items.map((item) => item.name)].sort()).toEqual([LAMP, MUG].sort());
+  });
+
+  it('ignores an id that is not on the order rather than resolving it elsewhere', () => {
+    const found = identify('something in this delivery went wrong', ['ITM-NOT-ON-THIS-ORDER']);
+
+    // No ticked line on this order, so the ordinary matcher decides - and a
+    // message that names nothing stays a whole-order claim rather than becoming
+    // an empty one.
+    expect(found.order?.id).toBe(orderId);
+    expect(found.items).toEqual([]);
+  });
+
+  it('leaves the order standing even when the message describes another one', () => {
+    // A second basket holding the product the message names. Without a tick this
+    // message is a conflict that escalates; with one, the customer has already
+    // said which basket they mean.
+    checkout(db, customerId, [{ productId: 'PRD-KETTLE-01', quantity: 1 }], TEST_NOW);
+    const found = identify('the kettle is broken', [mugItemId]);
+
+    expect(found.order?.id).toBe(orderId);
+    expect(found.items.map((item) => item.name)).toEqual([MUG]);
+  });
+
+  it('identifies the order from the selection when no order was named', () => {
+    const customer = findCustomer(db, customerId, TEST_NOW);
+    if (customer === null) {
+      throw new Error('fixture customer missing');
+    }
+    const found = identifyOrder(db, customer, null, 'please refund', TEST_NOW, [mugItemId]);
+
+    expect(found.order?.id).toBe(orderId);
+    expect(found.items.map((item) => item.name)).toEqual([MUG]);
+  });
+
+  it('carries the selection into the ceiling the resolver uses', () => {
+    const found = identify('something went wrong', [mugItemId]);
+
+    // The money assertion: the ceiling is the ticked line, so the lamp the
+    // customer never claimed cannot be inside an approval.
+    expect(disputeCeiling(found, found.order?.items ?? [])).toBe(
+      found.order?.items.find((item) => item.name === MUG)?.unitPriceCents,
+    );
   });
 });

@@ -111,6 +111,7 @@ describe('through the real pipeline', () => {
       customerId: 'CUST-AOKAFOR',
       orderId: 'ORD-1001',
       message,
+      itemIds: [],
       now: TEST_NOW,
     }));
     return {
@@ -275,6 +276,7 @@ describe('through the ledger, end to end', () => {
       customerId: 'CUST-AOKAFOR',
       orderId: 'ORD-1001',
       message: APPROVED,
+      itemIds: [],
       now: TEST_NOW,
     }));
 

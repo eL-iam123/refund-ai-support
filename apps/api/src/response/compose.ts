@@ -55,6 +55,24 @@ function outstandingSentence(
   }
 }
 
+/**
+ * True when a rule refused the *whole order*, rather than excluding lines from it.
+ *
+ * The `excluded` sentence names the items the policy removed from the eligible
+ * set - and that is the reason for the answer only when the refusal is about
+ * those items. An order-scoped denial has its own reason (a subscription, a
+ * chargeback, an unreadable request), and listing whatever item rules happened
+ * to also exclude - a final-sale coat, say - reads as the reason it was refused.
+ * A customer told their coat is why they were refused, when the real reason was
+ * a subscription line elsewhere on the order, has been given the wrong answer.
+ *
+ * Order-scoped denials outrank item-scoped ones, so the presence of any
+ * order-scoped deny in the trace means the refusal was not the items' doing.
+ */
+function refusedWholeOrder(decision: RefundDecision): boolean {
+  return decision.trace.some((rule) => rule.scope === 'order' && rule.outcome === 'deny');
+}
+
 export function composeDeterministicResponse(
   decision: RefundDecision,
   order: OrderRecord | null,
@@ -67,7 +85,7 @@ export function composeDeterministicResponse(
   const prefix = acknowledgement.length === 0 ? '' : `${acknowledgement} `;
   const reference = order === null ? '' : ` for order ${order.id}`;
   const excluded =
-    decision.blockedItems.length === 0
+    decision.blockedItems.length === 0 || (decision.decision === 'denied' && refusedWholeOrder(decision))
       ? ''
       : ` ${decision.blockedItems.map((item) => item.name).join(' and ')} ${
           decision.blockedItems.length === 1 ? 'is' : 'are'

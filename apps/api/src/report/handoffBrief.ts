@@ -4,6 +4,7 @@ import { latestRequestForThread } from '../db/requestRepository.js';
 import type { PersistedRequest } from '../db/records.js';
 import { threadForStaff, type ChatTurn } from '../retrieval/conversation.js';
 import type { ClaimExtractionDto, GroundingDto, RuleEvaluationDto } from '@refund/shared';
+import { chatClosureForThread, finalizedRequestId } from '../db/chatClosures.js';
 
 /**
  * The case file a person reads before answering a customer.
@@ -30,6 +31,8 @@ export interface HandoffBrief {
   /** Who is on the line, when a takeover is live. */
   readonly agentId: string | null;
   readonly since: string | null;
+  readonly chatClosed: { readonly closedAt: string; readonly closedBy: string; readonly requestId: string } | null;
+  readonly canCloseChat: boolean;
   /** Why the assistant stepped aside, when it did. */
   readonly handoffReason: string | null;
   /** The customer's words, in order, verbatim. */
@@ -66,6 +69,8 @@ export function buildHandoffBrief(db: Db, customerId: string, orderId: string | 
   const thread = threadForStaff(db, customerId, orderId, 200);
   const latest = latestRequestForThread(db, customerId, orderId);
   const latestView = latest === null ? null : decodeLatest(latest);
+  const closure = chatClosureForThread(db, customerId, orderId);
+  const canCloseChat = closure === null && finalizedRequestId(db, customerId, orderId) !== null;
 
   const conversation = collectCase(thread);
 
@@ -76,6 +81,8 @@ export function buildHandoffBrief(db: Db, customerId: string, orderId: string | 
     orderId,
     agentId: agentIdFor(active),
     since: sinceFor(active),
+    chatClosed: closure === null ? null : { closedAt: closure.closedAt, closedBy: closure.closedBy, requestId: closure.requestId },
+    canCloseChat,
     handoffReason: handoffReasonFor(active, latest),
     whatTheySaid: conversation.whatTheySaid,
     dialogue: conversation.dialogue,

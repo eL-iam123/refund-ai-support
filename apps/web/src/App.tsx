@@ -174,6 +174,7 @@ function OrdersRoute(): ReactNode {
   const session = useSession();
   const navigate = useNavigate();
   const orders = useAsyncData(() => shopApi.orders(), ['orders']);
+  const counts = useAsyncData(() => shopApi.chatSummary(), ['chat-summary']);
   if (orders.data === null) {
     return <Spinner />;
   }
@@ -181,6 +182,7 @@ function OrdersRoute(): ReactNode {
     <Orders
       orders={orders.data.orders}
       signedIn={session.user !== null}
+      counts={counts.data?.counts ?? []}
       onRefill={refillCart}
       onBrowse={() => void navigate('/')}
     />

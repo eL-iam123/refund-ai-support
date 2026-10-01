@@ -332,7 +332,7 @@ describe('resolver clamps', () => {
     trackingStatus: 'delivered',
     signedByCustomer: true,
     conditionAtDelivery: null,
-    items: [{ id: 'I1', name: 'Scarf', unitPriceCents: 13000, quantity: 1, finalSale: false, digital: false, downloaded: false }],
+    items: [{ id: 'I1', name: 'Scarf', unitPriceCents: 13000, quantity: 1, finalSale: false, digital: false, downloaded: false, isSubscription: false }],
   };
 
   const gateResult = {
@@ -494,6 +494,7 @@ describe('fact gates', () => {
           finalSale: true,
           digital: false,
           downloaded: false,
+          isSubscription: false,
         },
       ],
     } as const satisfies OrderRecord;

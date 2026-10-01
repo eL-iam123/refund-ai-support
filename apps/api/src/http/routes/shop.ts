@@ -20,6 +20,7 @@ import { conversationCounts, conversationForOrder } from '../../retrieval/conver
 import { followUpFor } from '../../response/followUp.js';
 import { AppealAlreadyPendingError, fileAppeal, openAppealForRequest } from '../../db/appeals.js';
 import { FULLY_REFUNDED } from '../../policy/constants.js';
+import { isChatClosed } from '../../db/chatClosures.js';
 
 /**
  * Storefront endpoints, mounted under `/api/shop`.
@@ -394,6 +395,7 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext): void 
     }
     return {
       orderId: query.data.orderId,
+      closed: isChatClosed(ctx.db, user.customerId, query.data.orderId),
       turns: conversationForOrder(ctx.db, user.customerId, query.data.orderId, ctx.now(), query.data.limit),
     };
   });

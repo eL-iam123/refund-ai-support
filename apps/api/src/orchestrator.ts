@@ -84,6 +84,15 @@ export interface ProcessInput {
   readonly customerId: string;
   readonly orderId: string | null;
   readonly message: string;
+  /**
+   * Order lines the customer ticked in the storefront's picker, by id.
+   *
+   * Narrows the claim and never widens it: every id is checked against the
+   * resolved order during retrieval, and one that belongs to no line of it is
+   * dropped rather than resolved elsewhere. Empty - the ordinary case - leaves
+   * item identification entirely to the deterministic keyword matcher.
+   */
+  readonly itemIds: readonly string[];
   readonly now: Date;
 }
 
@@ -337,7 +346,7 @@ interface Retrieval {
 
 /** Stage 2: resolve the order and the duplicate-charge sibling. */
 function retrieveOrder(db: Db, input: ProcessInput, intake: Intake, log: StageLog): Retrieval {
-  const found = identifyOrder(db, intake.customer, input.orderId, input.message, input.now);
+  const found = identifyOrder(db, intake.customer, input.orderId, input.message, input.now, input.itemIds);
   const order = found.order;
   const duplicateSibling = order === null ? null : findDuplicateSibling(db, order, input.now);
 

@@ -53,7 +53,7 @@ An order whose payment state is `refunded` and whose refunded amount already cov
 
 | Rule | Stage | Scope | Class | May return |
 | --- | --- | --- | --- | --- |
-| `R-10` | fact_gates | order | eligibility | deny, pass, approve |
+| `R-10` | fact_gates | item | eligibility | deny, pass, approve |
 
 _Recurring and renewal charges are handled by billing, not refunds._
 

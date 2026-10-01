@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 import { money, type ShopOrder } from './api';
@@ -21,14 +21,41 @@ import type { CartLine } from './cartStore';
 export function Orders({
   orders,
   signedIn,
+  counts,
   onRefill,
   onBrowse,
 }: {
   orders: readonly ShopOrder[];
   signedIn: boolean;
+  counts: readonly { orderId: string; count: number }[];
   onRefill: (lines: readonly CartLine[]) => void;
   onBrowse: () => void;
 }): ReactNode {
+  const countMap = useMemo(() => new Map(counts.map((row) => [row.orderId, row.count])), [counts]);
+  const [notice, setNotice] = useState<{ orderId: string; count: number } | null>(null);
+  const previousCounts = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    let nextNotice: { orderId: string; count: number } | null = null;
+
+    for (const row of counts) {
+      const previous = previousCounts.current.get(row.orderId) ?? 0;
+      if (row.count > previous && previous > 0) {
+        nextNotice = { orderId: row.orderId, count: row.count };
+      }
+    }
+
+    previousCounts.current = new Map(counts.map((row) => [row.orderId, row.count]));
+
+    if (nextNotice === null) {
+      return;
+    }
+
+    setNotice(nextNotice);
+    const timeout = window.setTimeout(() => setNotice(null), 7000);
+    return () => window.clearTimeout(timeout);
+  }, [counts]);
+
   if (!signedIn) {
     return (
       <section className="card">
@@ -54,8 +81,13 @@ export function Orders({
   return (
     <div className="stack">
       <h1>Your orders</h1>
+      {notice ? (
+        <div className="response-toast" role="status" aria-live="polite">
+          New reply for {notice.orderId}. Open the chat to see the latest update.
+        </div>
+      ) : null}
       {orders.map((order) => (
-        <OrderCard key={order.id} order={order} onRefill={onRefill} />
+        <OrderCard key={order.id} order={order} messageCount={countMap.get(order.id) ?? 0} onRefill={onRefill} />
       ))}
     </div>
   );
@@ -73,9 +105,11 @@ function OrderMeta({ order }: { order: ShopOrder }): ReactNode {
 
 function OrderCard({
   order,
+  messageCount,
   onRefill,
 }: {
   order: ShopOrder;
+  messageCount: number;
   onRefill: (lines: readonly CartLine[]) => void;
 }): ReactNode {
   const navigate = useNavigate();
@@ -104,7 +138,10 @@ function OrderCard({
   return (
     <article className="card">
       <header className="row">
-        <span className={`pill pill-${order.status}`}>{order.status.replace(/_/g, ' ')}</span>
+        <div className="order-card-head">
+          <span className={`pill pill-${order.status}`}>{order.status.replace(/_/g, ' ')}</span>
+          {messageCount > 0 ? <span className="order-message-badge">{messageCount === 1 ? '1 new reply' : `${messageCount} messages`}</span> : null}
+        </div>
         <strong className="num">{money(order.totalCents)}</strong>
       </header>
       <p className="mono small">{order.id}</p>
@@ -129,6 +166,7 @@ function OrderCard({
           <AlertCircle size={16} /> Report an issue
         </button>
       </div>
+      {messageCount > 0 ? <p className="muted small">Latest update in this order thread.</p> : null}
       {gone > 0 ? <p className="muted small">{gone} item(s) no longer in the catalogue.</p> : null}
 
       {reporting ? (
@@ -177,7 +215,8 @@ function IssuePicker({
         }
       }}
     >
-      <h2 className="label">What is wrong with {order.id}?</h2>
+      <h2 className="label">Tell us what went wrong</h2>
+      <p className="muted small">We’ll open your {order.id} thread so you can add more detail if needed.</p>
       <div className="issue-list">
         {REASONS.map((issue) => (
           <label key={issue.id} className="issue-option">

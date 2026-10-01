@@ -84,8 +84,8 @@ function insertOrder(db: Db, order: ScenarioOrder, customerId: string, now: Date
 
   const insertItem = db.prepare(
     `INSERT INTO order_items
-       (id, order_id, name, unit_price_cents, quantity, final_sale, digital, downloaded)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, order_id, name, unit_price_cents, quantity, final_sale, digital, downloaded, is_subscription)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const item of order.items) {
     insertItem.run(
@@ -97,6 +97,7 @@ function insertOrder(db: Db, order: ScenarioOrder, customerId: string, now: Date
       item.finalSale ? 1 : 0,
       item.digital ? 1 : 0,
       item.downloaded ? 1 : 0,
+      item.isSubscription ? 1 : 0,
     );
   }
 }

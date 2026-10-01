@@ -27,6 +27,7 @@ interface ItemRow {
   readonly final_sale: number;
   readonly digital: number;
   readonly downloaded: number;
+  readonly is_subscription: number;
 }
 
 const ORDER_COLUMNS = `
@@ -51,6 +52,7 @@ function itemsFor(db: Db, orderId: string): OrderItemRecord[] {
     finalSale: row.final_sale === 1,
     digital: row.digital === 1,
     downloaded: row.downloaded === 1,
+    isSubscription: row.is_subscription === 1,
   }));
 }
 

@@ -138,6 +138,7 @@ export interface AuditPage {
 }
 
 export interface AgentRoutedReply {
+  readonly agentConnected: boolean;
   /** The takeover's copy of the customer's message. */
   readonly message: {
     readonly id: string;
@@ -196,6 +197,8 @@ export interface HandoffBrief {
   readonly orderId: string | null;
   readonly agentId: string | null;
   readonly since: string | null;
+  readonly chatClosed: { readonly closedAt: string; readonly closedBy: string; readonly requestId: string } | null;
+  readonly canCloseChat: boolean;
   readonly handoffReason: string | null;
   readonly whatTheySaid: readonly { readonly at: string; readonly text: string }[];
   readonly dialogue: readonly { readonly question: string; readonly answer: string }[];
@@ -234,19 +237,28 @@ export const api = {
 
   signOut: (): Promise<{ ok: boolean }> => post('/api/admin/logout', {}),
 
-  /**
-   * Sends a message. Three possible replies, and they are not interchangeable:
-   * a decision (`request`, with `duplicate` when the server recognised a repeat
-   * and returned the earlier request instead of creating one - a 200 rather than
-   * a 201 in that case), the assistant's clarifying question (`question`), or
+/**
+   * Sends a message. Four possible replies, and they are not interchangeable: a
+   * decision (`request`, with `duplicate` when the server recognised a repeat and
+   * returned the earlier request instead of creating one - a 200 rather than a
+   * 201 in that case), the assistant's clarifying question (`question`), or
    * `received` - the thread was handed to a person, the pipeline is off, and the
    * message was routed to them instead of being decided.
+   *
+   * `itemIds` is what the customer ticked in the item picker. It narrows the
+   * claim to those lines; the server checks every id against the order it
+   * resolved, so a stale or hand-written id is dropped rather than honoured.
    */
-  sendMessage: (input: { customerId: string; orderId: string | null; message: string }) =>
+  sendMessage: (input: {
+    customerId: string;
+    orderId: string | null;
+    message: string;
+    itemIds?: readonly string[];
+  }) =>
     post<
       | { request: RefundRequestDto; duplicate?: DuplicateNotice }
       | { question: string; dialogueId: string }
-      | ({ received: true; agentConnected: true } & AgentRoutedReply)
+      | ({ received: true } & AgentRoutedReply)
     >('/api/chat/messages', input),
 
   listRequests: (params: RequestFilter = {}) =>
@@ -316,6 +328,9 @@ export const api = {
 
   staffHandBack: (customerId: string): Promise<{ ended: { id: string; customerId: string; orderId: string | null; agentId: string; startedAt: string } }> =>
     post(`/api/staff/conversations/${encodeURIComponent(customerId)}/hand-back`, {}),
+
+  staffCloseChat: (customerId: string, orderId: string | null): Promise<{ closure: { id: string; customerId: string; orderId: string | null; requestId: string; closedAt: string; closedBy: string; finalState: 'approved' | 'denied' } }> =>
+    post(`/api/staff/conversations/${encodeURIComponent(customerId)}/close`, { orderId }),
 
   staffAnalytics: (): Promise<{ analytics: { openHandoffs: number; escalatedAwaiting: number; awaitingReviewCents: number; decisionsToday: { approved: number; denied: number; escalated: number }; averageTakeoverMinutes: number | null; since: string } }> =>
     request('/api/staff/analytics'),

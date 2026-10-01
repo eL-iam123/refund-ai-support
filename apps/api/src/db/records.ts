@@ -26,6 +26,8 @@ export interface OrderItemRecord {
   readonly finalSale: boolean;
   readonly digital: boolean;
   readonly downloaded: boolean;
+  /** This line is a recurring or renewal charge. Read by R-10 per item. */
+  readonly isSubscription: boolean;
 }
 
 export interface OrderRecord {

@@ -159,7 +159,7 @@ export const shopApi = {
    * client cannot widen the scope of this call, which is the only way a history
    * endpoint is safe to expose to a browser.
    */
-  chatHistory: (orderId: string): Promise<{ orderId: string; turns: readonly ChatTurn[] }> =>
+  chatHistory: (orderId: string): Promise<{ orderId: string; closed: boolean; turns: readonly ChatTurn[] }> =>
     request(`/api/shop/chat/history?orderId=${encodeURIComponent(orderId)}`),
 
   /** Message counts per order, for the "3 messages" badge on the order picker. */
@@ -240,6 +240,7 @@ export type ChatTurn =
        */
       readonly decision: 'approved' | 'denied' | 'escalated';
       readonly refundAmountCents: number;
+      readonly itemIds: readonly string[];
       readonly createdAt: string;
     }
   | {

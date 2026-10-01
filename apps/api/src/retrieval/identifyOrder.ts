@@ -51,6 +51,13 @@ const ORDER_REFERENCE = /\bORD-[A-Z0-9]+\b/i;
  * but only ever as far as ownership, which the lookup enforces. A single order
  * on file needs no inference. Only when the customer has a real choice to make
  * do we read their message, and then only a unique match is accepted.
+ *
+ * `selectedItemIds` is the storefront's item picker. It says which *lines* are in
+ * dispute, and when it is present it replaces the keyword matcher, which is the
+ * point: a tick is unambiguous where a word is not. It names the order too, but
+ * only as a last resort - and only where one order holds the whole selection,
+ * since two baskets sharing a ticked line means the customer has not said which
+ * one this is about.
  */
 export function identifyOrder(
   db: Db,
@@ -58,19 +65,55 @@ export function identifyOrder(
   requestedId: string | null,
   message: string,
   now: Date,
+  selectedItemIds: readonly string[] = [],
 ): Identification {
-  const found = resolveOrder(db, customer, requestedId, message, now);
+  const found = resolveOrder(db, customer, requestedId, message, now, selectedItemIds);
   // Which *items* are in dispute comes from the message, always - even when the
   // order was named outright. Knowing the order answers "where does this land",
   // not "what is being claimed": a customer who names ORD-1001 and then says
   // "the television is broken" has claimed one item of four, and reading the
   // whole basket as the claim is how a $200 repair becomes a $400 refund.
-  return withScope(found, message);
+  return withScope(found, message, selectedItemIds);
 }
 
-/** Attaches the item scope implied by the message to any identification. */
-function withScope(found: Omit<Identification, 'items'>, message: string): Identification {
-  return { ...found, items: found.order === null ? [] : disputeItems(found.order, message) };
+/** Attaches the item scope implied by the message - or by the picker - to any identification. */
+function withScope(
+  found: Omit<Identification, 'items'>,
+  message: string,
+  selectedItemIds: readonly string[],
+): Identification {
+  if (found.order === null) {
+    return { ...found, items: [] };
+  }
+  const picked = selectedItems(found.order, selectedItemIds);
+  if (picked.length > 0) {
+    return {
+      ...found,
+      items: picked,
+      evidence: `${found.evidence}; customer selected ${picked.length} of ${found.order.items.length} item(s) by id`,
+    };
+  }
+  return { ...found, items: disputeItems(found.order, message) };
+}
+
+/**
+ * The ticked lines that are genuinely on this order.
+ *
+ * Ids that belong to nothing on the order are dropped rather than looked up
+ * elsewhere. A selection is a claim about *these* items, so an id from another
+ * basket is not a selection that could not be resolved - it is a selection that
+ * cannot be honoured, and honouring it by widening would refund something the
+ * customer did not tick.
+ */
+function selectedItems(
+  order: OrderRecord,
+  selectedItemIds: readonly string[],
+): readonly OrderItemRecord[] {
+  if (selectedItemIds.length === 0) {
+    return [];
+  }
+  const wanted = new Set(selectedItemIds);
+  return order.items.filter((item) => wanted.has(item.id));
 }
 
 /**
@@ -84,6 +127,10 @@ function withScope(found: Omit<Identification, 'items'>, message: string): Ident
  * squarely at one that is in a different order - a customer looking at one
  * basket and describing another. Refunding the selected basket then hands back
  * money for items nobody disputed.
+ *
+ * A ticked selection short-circuits the whole check. The customer pointed at the
+ * lines themselves, so a message that happens to name something in another order
+ * is not evidence they meant that order - it is evidence they also have one.
  */
 function checkAgreement(
   db: Db,
@@ -91,7 +138,11 @@ function checkAgreement(
   order: OrderRecord,
   message: string,
   now: Date,
+  selectedItemIds: readonly string[] = [],
 ): Omit<Identification, 'items'> {
+  if (selectedItems(order, selectedItemIds).length > 0) {
+    return supplied(order);
+  }
   if (scopeItems(matchOrders([order], message)).length > 0) {
     return supplied(order);
   }
@@ -124,6 +175,7 @@ function resolveOrder(
   requestedId: string | null,
   message: string,
   now: Date,
+  selectedItemIds: readonly string[] = [],
 ): Omit<Identification, 'items'> {
   if (requestedId !== null) {
     // Ownership is enforced inside the lookup. An order that exists but belongs
@@ -134,7 +186,7 @@ function resolveOrder(
     if (order === null) {
       return unresolved(1, `no order ${requestedId} on file for this customer`);
     }
-    return withScope(checkAgreement(db, customer, order, message, now), message);
+    return checkAgreement(db, customer, order, message, now, selectedItemIds);
   }
 
   const orders = listOrdersForCustomer(db, customer.id, now);
@@ -152,7 +204,40 @@ function resolveOrder(
     };
   }
 
+  // A picker can stand in for an order reference as well as for item words, but
+  // only when one order holds the whole selection.
+  const ticked = orderOwningAll(orders, selectedItemIds);
+  if (ticked !== null) {
+    return {
+      order: ticked,
+      basis: 'supplied',
+      candidates: 1,
+      evidence: `order ${ticked.id} identified from the ${selectedItemIds.length} item(s) the customer selected`,
+    };
+  }
+
   return identifyFromHistory(orders, message);
+}
+
+/**
+ * The one order that holds every ticked line, or null when there is not one.
+ *
+ * Ambiguity is left ambiguous. Two orders that both contain a ticked id mean the
+ * customer has said nothing about which order this is about, and resolving that
+ * by picking the newest would refund from whichever basket happened to be
+ * convenient - so a tie still goes down the ordinary route, to a person.
+ */
+function orderOwningAll(
+  orders: readonly OrderRecord[],
+  selectedItemIds: readonly string[],
+): OrderRecord | null {
+  if (selectedItemIds.length === 0) {
+    return null;
+  }
+  const holders = orders.filter(
+    (order) => selectedItems(order, selectedItemIds).length === selectedItemIds.length,
+  );
+  return holders.length === 1 ? (holders[0] ?? null) : null;
 }
 
 /**

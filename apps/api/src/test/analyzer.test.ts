@@ -284,6 +284,7 @@ describe('toAnalyzerOrder', () => {
         finalSale: false,
         digital: false,
         downloaded: false,
+        isSubscription: false,
       },
     ],
   };

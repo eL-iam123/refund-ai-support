@@ -30,6 +30,17 @@ export const CreateRefundRequestSchema = z.object({
   message: z.string().min(1, 'message is required'),
   /** Optional: the chat surface knows which order the customer is looking at. */
   orderId: z.string().min(1).nullable().default(null),
+  /**
+   * Order lines the customer ticked, by `order_items.id`.
+   *
+   * This is how the storefront says "the mug, not the rest" without the
+   * customer having to describe it in words. Ids rather than names, because a
+   * name is a guess: two lines on one order can share it, and a mistyped or
+   * reworded name silently matches nothing and turns a specific claim back into
+   * a whole-order one. Every id is checked against the resolved order before it
+   * is used, so this narrows what is claimed and can never widen it.
+   */
+  itemIds: z.array(z.string().min(1)).max(25).optional().default([]),
 });
 export type CreateRefundRequest = z.infer<typeof CreateRefundRequestSchema>;
 

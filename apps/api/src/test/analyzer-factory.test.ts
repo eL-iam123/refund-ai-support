@@ -203,6 +203,7 @@ describe('the pipeline with no model configured', () => {
         customerId: s.customer.key,
         orderId: order.key,
         message: DAMAGED_TV,
+        itemIds: [],
         now: TEST_NOW,
       },
     ).then((result) => {

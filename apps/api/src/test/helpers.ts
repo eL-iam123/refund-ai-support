@@ -96,6 +96,8 @@ export interface PipelineHarness extends PipelineDeps {
     customerId: string;
     orderId?: string | null;
     message: string;
+    /** Order lines the customer ticked. See `ProcessInput.itemIds`. */
+    itemIds?: readonly string[];
   }) => Promise<ProcessResult>;
 }
 
@@ -134,6 +136,7 @@ export function scenarioHarness(
         customerId: input.customerId,
         orderId: input.orderId ?? null,
         message: input.message,
+        itemIds: input.itemIds ?? [],
         now: TEST_NOW,
       }),
   };
