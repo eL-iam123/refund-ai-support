@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAnalyzer } from '../ai/anthropicAnalyzer.js';
 import { presetFor } from '../config/env.js';
-import type { AnalyzerInput, AttemptObserver } from '../ai/analyzer.js';
+import type { IntakeInput, IntakeReply, AttemptObserver } from '../ai/analyzer.js';
 import { testEnv } from './helpers.js';
 
 /**
@@ -19,7 +19,7 @@ import { testEnv } from './helpers.js';
  * it is wrong is indistinguishable from a provider outage.
  */
 
-const INPUT: AnalyzerInput = {
+const INPUT: IntakeInput = {
   message: 'The mug arrived cracked. I would like a refund.',
   history: [],
   order: {
@@ -115,12 +115,11 @@ describe('anthropic wire format', () => {
 
     const result = await buildAnalyzer().analyze(INPUT, noopObserver);
 
-    if (result.kind !== 'claim') {
-      throw new Error(`expected a claim but the model asked: ${result.question}`);
+    if (result.kind !== 'complete') {
+      throw new Error(`expected a complete extraction but the model asked: ${result.question}`);
     }
     expect(result.extraction.reason).toBe('damaged');
     expect(result.extraction.items).toEqual(['MUG']);
-    expect(result.proposal.suggestedDecision).toBe('approved');
     expect(result.model).toBe('claude-haiku-4-5-20251001');
   });
 

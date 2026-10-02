@@ -1,5 +1,5 @@
 import type { ClaimExtraction } from '@refund/shared';
-import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
+import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type IntakeInput, type IntakeReply, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
 import { scanForInjection } from '../security/injection.js';
 import { isNoComplaint, noComplaintQuestion } from '../response/noComplaint.js';
 import { clarifySparseDamage } from '../response/claimClarification.js';
@@ -333,6 +333,39 @@ function suggestDecision(
 }
 
 export { AiUnavailableError };
+export { createLocalIntakeAnalyzer };
+
+/**
+ * The local intake analyzer (heuristic-based, no network calls).
+ *
+ * Used when `AI_PROVIDER=local` or as a fallback. Performs single-pass
+ * extraction with no clarification loops — it's a pattern matcher, not a
+ * language model. Suitable for testing and demos; never a safe substitute for
+ * a model in production.
+ */
+export function createLocalIntakeAnalyzer(): AIAnalyzer {
+  return {
+    label: 'local (heuristic)',
+    model: MODEL,
+    available: true,
+    unavailableReason: null,
+    analyze(input) {
+      return Promise.resolve(analyzeIntakeWithHeuristics(input));
+    },
+    chat(input, observer) {
+      return Promise.resolve(chatWithHeuristics(input, observer));
+    },
+  };
+}
+
+function analyzeIntakeWithHeuristics(input: IntakeInput): IntakeReply {
+  const extraction = read(input);
+  return {
+    kind: 'complete',
+    extraction,
+    model: MODEL,
+  };
+}
 
 /**
  * Chat mode for escalated conversations (local heuristic version).

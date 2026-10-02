@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildAgentUser, CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM } from './prompts.js';
+import { buildAgentUser, CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM, INTAKE_SYSTEM } from './prompts.js';
 import { AgentOutputSchema, type AgentOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
@@ -10,6 +10,8 @@ import {
   type AgentReply,
   type AIAnalyzer,
   type AnalyzerInput,
+  type IntakeInput,
+  type IntakeReply,
   type AttemptObserver,
   type ChatInput,
   type ChatReply,
@@ -105,6 +107,63 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     this.model = this.candidates[0] ?? 'unknown';
   }
 
+  /** Intake phase: multi-turn extraction with clarification loops. */
+  async analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildIntakeUser(input.message, input.order, input.history);
+
+    for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
+      const userContent =
+        repair === 0
+          ? user
+          : `${user}\n\nYour previous reply was rejected: ${complaints}. Reply with a valid tool call.`;
+
+      const completion = await this.completeIntake(INTAKE_SYSTEM, userContent, budget, observer);
+      const parsed = parseJson(completion.text);
+
+      if (!parsed) {
+        complaints = 'empty or non-JSON response';
+        continue;
+      }
+
+      if (parsed.action === 'ask') {
+        if (typeof parsed.question === 'string' && parsed.question.trim().length > 0) {
+          observer({
+            model: completion.model,
+            attempt: repair + 1,
+            ok: true,
+            latencyMs: 0,
+            promptTokens: completion.promptTokens,
+            completionTokens: completion.completionTokens,
+            error: null,
+          });
+          return { kind: 'question', question: parsed.question.trim(), model: completion.model };
+        }
+        complaints = 'question missing or empty';
+      } else if (parsed.action === 'decide') {
+        const extraction = parsed.extraction;
+        if (extraction && typeof extraction === 'object') {
+          observer({
+            model: completion.model,
+            attempt: repair + 1,
+            ok: true,
+            latencyMs: 0,
+            promptTokens: completion.promptTokens,
+            completionTokens: completion.completionTokens,
+            error: null,
+          });
+          return { kind: 'complete', extraction, model: completion.model };
+        }
+        complaints = 'extraction missing or invalid';
+      } else {
+        complaints = 'action must be "ask" or "decide"';
+      }
+    }
+
+    throw new AiUnavailableError(`intake failed after ${MAX_REPAIRS + 1} attempts`);
+  }
+
+  /** Legacy analyze method for backward compatibility with chat mode. */
   async analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
     const base = buildAgentUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
@@ -166,6 +225,40 @@ export class AnthropicAnalyzer implements AIAnalyzer {
         }
 
         const outcome = await this.attempt(model, attempt, firstUserMessage, user, budget, observer);
+        if (outcome.ok) {
+          return outcome.completion;
+        }
+        failures.push(`${model}#${attempt} ${outcome.error}`);
+
+        if (attempt < this.env.AI_MAX_ATTEMPTS && outcome.retryable) {
+          await backoff(attempt, budget);
+        } else if (!outcome.retryable) {
+          break;
+        }
+      }
+    }
+
+    throw new AiUnavailableError(
+      cap(`all ${this.candidates.length} anthropic model(s) failed after ${failures.length} attempt(s): ${failures.join(' | ')}`),
+    );
+  }
+
+  /** Intake-specific completion: uses the intake system prompt and intake user message. */
+  private async completeIntake(
+    system: string,
+    user: string,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<Completion> {
+    const failures: string[] = [];
+
+    for (const model of this.candidates) {
+      for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
+        if (budget.aborted) {
+          throw new AiUnavailableError(`intake time budget exhausted after ${failures.length} attempt(s)`);
+        }
+
+        const outcome = await this.attempt(model, attempt, system, user, budget, observer);
         if (outcome.ok) {
           return outcome.completion;
         }

@@ -9,7 +9,7 @@ that produced it, so this file is the document an auditor is actually reading.
 
 This policy governs automated refund decisions for delivered orders. It is enforced in code by the ordered rule list in `apps/api/src/policy/rules/`, and every decision the API returns carries the `policyRef` of the clause that produced it.
 
-**Definitions.** *Eligible item*: an order item that has passed every item-scope eligibility clause. *Eligible amount*: the sum of eligible item prices, in integer cents, never the amount the customer asked for and never the amount a model proposed. *Grounded claim*: an extracted reason supported by at least one quote verified as a verbatim substring of the customer's own message.
+**Definitions.** *Eligible item*: an order item that has passed every item-scope eligibility clause. *Eligible amount*: the sum of eligible item prices, in integer cents, never the amount the customer asked for and never the amount a model proposed. *Grounded claim*: an extracted reason supported by at least one quote verified as a verbatim substring of the customer's own message. *Decision*: one of `approved`, `denied`, `escalated`, `partial_refund`, `exchange`, `store_credit`. The first three are produced by the rules; the alternatives only by the discretion layer (§10).
 
 **What this policy is not.** It is not a description of what the language model does. The model reads the message and proposes; it never decides. See §9.
 
@@ -240,6 +240,16 @@ Outcomes fold by strict precedence: **deny** (3) beats **escalate** (2) beats **
 The resolver is the sole writer of the final decision. No rule writes a decision, and no model output is ever read as one. A model proposal may raise the bar on a decision but can never lower it: it cannot turn an escalation into an approval, and it cannot move an amount. The amount is always the eligible amount computed from order facts, and a proposal that disagrees is recorded as an override in the audit trail. See `docs/adr/0001-resolver-is-sole-authority.md`.
 
 Rule classes are constrained so that authority cannot leak. An **eligibility** rule may deny, pass, approve; an **approval-authority** rule may escalate, pass; a **risk** rule may escalate, pass; an **integrity** rule may deny, escalate, pass. These sets are asserted at evaluation time, so a rule that claims an outcome its class forbids fails the request rather than returning it.
+
+# §10 — Discretion
+
+The clauses above are the policy. They are applied mechanically, and when they cannot reach a conclusion the safe default is escalation. That is correct for a rulebook and wrong for a customer: a good customer a few days past the window, a loyal member with a faulty toaster, a customer whose message is messy but clearly means "it arrived broken" - a person resolves these on the spot.
+
+The discretion layer is that judgement, encoded as deterministic rules rather than left to the model. It runs after the base policy and only ever softens an **escalation**; it never overrides a denial, which only a person can overturn. Every adjustment is recorded as an override in the audit trail, so a reviewer sees both the policy outcome and the discretion that softened it.
+
+The layer is off by default and every bound is an operator-controlled environment variable: the maximum amount it may authorise, the courtesy window, which alternatives it may offer, and the lowest evidence confidence it will accept. See `docs/adr/0003-discretion-layer.md`.
+
+**Decision outcomes.** `approved`, `denied` and `escalated` are the three outcomes the base policy produces. The discretion layer may also produce `partial_refund` (a reduced amount, which is reserved), `exchange` and `store_credit` (which resolve the request without moving refund money). No rule and no model ever produces these; only discretion does.
 
 ## Appendix — rule index
 

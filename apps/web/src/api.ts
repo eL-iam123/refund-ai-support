@@ -1,5 +1,6 @@
 import type { StaffSession } from './auth';
 import type {
+  Decision,
   RefundDto,
   AdminStatsDto,
   AuditChainDto,
@@ -174,7 +175,7 @@ export type StaffThreadTurn =
       readonly requestId: string;
       readonly message: string;
       readonly responseText: string;
-      readonly decision: 'approved' | 'denied' | 'escalated';
+      readonly decision: Decision;
       readonly refundAmountCents: number;
       readonly createdAt: string;
     }

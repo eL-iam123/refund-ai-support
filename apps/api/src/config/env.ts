@@ -157,6 +157,49 @@ const EnvSchema = z.object({
   INJECTION_ACTION: z.enum(INJECTION_ACTIONS).default('deny'),
 
   /**
+   * The discretion layer: an automatic, rule-governed equivalent of the human
+   * override, applied only to escalations and never to a denial. Off by default,
+   * so a deployment that does not opt in decides exactly as it did before.
+   *
+   * The bounds below are the operator's pre-authorisation. They are read in one
+   * place and threaded to the resolver like any other dependency, so the layer
+   * can be tuned - or switched off - without a code change.
+   */
+  DISCRETION_ENABLED: z
+    .enum(['true', 'false', '1', '0'])
+    .default('false')
+    .transform((value) => value === 'true' || value === '1'),
+  /** The most a discretion rule may authorise in one decision. */
+  DISCRETION_MAX_CENTS: z.coerce.number().int().positive().default(50_000),
+  /** The higher cap a loyal (plus/enterprise) customer is authorised up to. */
+  DISCRETION_LOYALTY_MAX_CENTS: z.coerce.number().int().positive().default(150_000),
+  /** Courtesy window: how far past the 30-day standard window a grounded fault may still auto-approve. */
+  DISCRETION_MAX_AGE_DAYS: z.coerce.number().int().positive().default(45),
+  DISCRETION_ALLOW_PARTIAL: z
+    .enum(['true', 'false', '1', '0'])
+    .default('false')
+    .transform((value) => value === 'true' || value === '1'),
+  DISCRETION_ALLOW_EXCHANGE: z
+    .enum(['true', 'false', '1', '0'])
+    .default('false')
+    .transform((value) => value === 'true' || value === '1'),
+  DISCRETION_ALLOW_STORE_CREDIT: z
+    .enum(['true', 'false', '1', '0'])
+    .default('false')
+    .transform((value) => value === 'true' || value === '1'),
+  /** The lowest extraction confidence a discretion rule will accept for a low-risk claim. */
+  DISCRETION_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.5),
+  /**
+   * Near-miss quotes: accept an evidence quote that is *almost* verbatim (a
+   * paraphrase the model smoothed over) for low-risk claims. Off by default,
+   * because grounding is the guarantee that the model cannot fabricate a claim.
+   */
+  DISCRETION_NEAR_MISS_QUOTE: z
+    .enum(['true', 'false', '1', '0'])
+    .default('false')
+    .transform((value) => value === 'true' || value === '1'),
+
+  /**
    * Caps the customer's message. A refund request is a paragraph, not an upload;
    * without a ceiling a single request can cost an unbounded number of prompt
    * tokens, and the request is stored verbatim before anything looks at it.
@@ -685,4 +728,51 @@ export function fallbackModels(env: Env): string[] {
   return env.AI_FALLBACK_MODELS.split(',')
     .map((model) => model.trim())
     .filter((model) => model.length > 0);
+}
+
+/**
+ * The discretion layer's pre-authorised bounds.
+ *
+ * The operator's pre-authorisation for the automatic, rule-governed equivalent of
+ * the human override. Every field has a default so an unset deployment gets the
+ * safe, off-by-default behaviour. See `policy/discretion.ts` for how these are
+ * applied and `docs/adr/0003-discretion-layer.md` for why the layer exists.
+ */
+export interface DiscretionConfig {
+  /** Master switch. Off by default: nothing changes until an operator opts in. */
+  readonly enabled: boolean;
+  /** The most a discretion rule may authorise in one decision. */
+  readonly maxAmountCents: number;
+  /** The higher cap a loyal (plus/enterprise) customer is authorised up to. */
+  readonly loyaltyMaxAmountCents: number;
+  /** Courtesy window: how far past the standard window a grounded fault may still auto-approve. */
+  readonly maxAgeDays: number;
+  readonly allowPartial: boolean;
+  readonly allowExchange: boolean;
+  readonly allowStoreCredit: boolean;
+  /** The lowest extraction confidence a discretion rule will accept for a low-risk claim. */
+  readonly minConfidence: number;
+  /** Accept an almost-verbatim evidence quote for low-risk claims. Off by default. */
+  readonly nearMissQuote: boolean;
+}
+
+/**
+ * The discretion layer's pre-authorised bounds, read in one place.
+ *
+ * The resolver receives this rather than reading the environment itself, so the
+ * layer stays a pure function of its inputs and the whole policy path can be
+ * tested with no process env.
+ */
+export function discretionConfig(env: Env): DiscretionConfig {
+  return {
+    enabled: env.DISCRETION_ENABLED,
+    maxAmountCents: env.DISCRETION_MAX_CENTS,
+    loyaltyMaxAmountCents: env.DISCRETION_LOYALTY_MAX_CENTS,
+    maxAgeDays: env.DISCRETION_MAX_AGE_DAYS,
+    allowPartial: env.DISCRETION_ALLOW_PARTIAL,
+    allowExchange: env.DISCRETION_ALLOW_EXCHANGE,
+    allowStoreCredit: env.DISCRETION_ALLOW_STORE_CREDIT,
+    minConfidence: env.DISCRETION_MIN_CONFIDENCE,
+    nearMissQuote: env.DISCRETION_NEAR_MISS_QUOTE,
+  };
 }

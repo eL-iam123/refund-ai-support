@@ -2,6 +2,7 @@ import type { NewRequestRow } from './requestRepository.js';
 import { insertAuditEvent, insertRequest } from './requestRepository.js';
 import { authoriseRefund } from './refundLedger.js';
 import { formatCents } from '../lib/money.js';
+import { MONEY_DECISIONS } from '@refund/shared';
 import type { Db } from './connection.js';
 
 /**
@@ -34,7 +35,7 @@ export function persistDecision(
       `${row.decision} ${formatCents(row.refundAmountCents)} via ${row.aiMode}`,
     );
 
-    if (row.decision !== 'approved' || row.refundAmountCents <= 0 || context.orderId === null) {
+    if (!MONEY_DECISIONS.has(row.decision) || row.refundAmountCents <= 0 || context.orderId === null) {
       return { reservedCents: 0, reservationId: null };
     }
 

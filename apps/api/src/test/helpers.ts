@@ -6,7 +6,7 @@ import { seedDatabase } from '../db/seed.js';
 import { readEnv, type Env } from '../config/env.js';
 import type { AIAnalyzer, ProviderAttempt } from '../ai/analyzer.js';
 import type { PipelineDeps, ProcessResult } from '../orchestrator.js';
-import { processRefundRequest } from '../orchestrator.js';
+import { processRefundRequest, DEFAULT_DISCRETION } from '../orchestrator.js';
 import { SCENARIOS, type InjectionAction, type Scenario } from '@refund/shared';
 import { mintToken } from '../auth/tokens.js';
 import { FakeAnalyzer, type Behaviour } from './fakeAnalyzer.js';
@@ -119,6 +119,7 @@ export function scenarioHarness(
   const deps: PipelineDeps = {
     analyzer,
     injectionAction,
+    discretion: DEFAULT_DISCRETION,
     recordAttempt: (requestId, provider, attempt) => {
       calls.push({ requestId, provider, attempt });
     },
@@ -191,6 +192,7 @@ export async function appHarness(
       },
       recordAttempt: createAttemptRecorder(db),
       injectionAction: env.INJECTION_ACTION,
+      discretion: DEFAULT_DISCRETION,
     },
   });
   await app.ready();

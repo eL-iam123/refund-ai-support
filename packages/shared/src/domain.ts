@@ -9,8 +9,28 @@
 
 // --- Decisions --------------------------------------------------------------
 
-export const DECISIONS = ['approved', 'denied', 'escalated'] as const;
+/**
+ * What can happen to a refund request.
+ *
+ * `approved`, `denied` and `escalated` are the three outcomes the base policy
+ * produces. The three alternatives exist so a resolution that is *not* a full
+ * refund still closes the request the way a human assistant would: `partial_refund`
+ * authorises a reduced amount (and reserves it), while `exchange` and
+ * `store_credit` resolve the request without moving refund money. They are only
+ * ever produced by the discretion layer, never by a rule, and never by the model.
+ */
+export const DECISIONS = [
+  'approved',
+  'denied',
+  'escalated',
+  'partial_refund',
+  'exchange',
+  'store_credit',
+] as const;
 export type Decision = (typeof DECISIONS)[number];
+
+/** Decisions that authorise money to leave the till. */
+export const MONEY_DECISIONS: ReadonlySet<Decision> = new Set<Decision>(['approved', 'partial_refund']);
 
 // --- Handoffs ---------------------------------------------------------------
 
@@ -158,6 +178,10 @@ export const OVERRIDE_CODES = [
   'amount_not_payable_until_reviewed',
   'risk_rule_deny_rejected',
   'ungrounded_reason_escalated',
+  'discretion_approve',
+  'discretion_partial_refund',
+  'discretion_exchange',
+  'discretion_store_credit',
 ] as const;
 export type OverrideCode = (typeof OVERRIDE_CODES)[number];
 

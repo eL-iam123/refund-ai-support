@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import {
   ListRequestsQuerySchema,
+  MONEY_DECISIONS,
   OverrideDecisionSchema,
   type OverrideDecision,
 } from '@refund/shared';
@@ -151,7 +152,70 @@ function refuseIfNotAllowed(
 
 /**
  * Records the agent's decision and the fact that they made it.
- *
+*
+  * The amount is never taken from the request body. It is re-derived from the
+  * order-derived eligible amount, so a human can change the decision but cannot
+  * invent a figure: there is no field to set, and `assertDecisionCoherent`
+  * refuses a denial that would carry money or an approval that would carry none.
+  */
+function reserveIfNeeded(
+  ctx: AppContext,
+  override: OverrideDecision,
+  previous: PersistedRequest,
+  at: string,
+): void {
+  const nextIsMoney = MONEY_DECISIONS.has(override.decision);
+  const previousIsMoney = MONEY_DECISIONS.has(previous.decision);
+  if (!nextIsMoney || previousIsMoney || previous.orderId === null) {
+    return;
+  }
+  const amountCents = override.decision === 'partial_refund'
+    ? (override.amountCents ?? previous.eligibleAmountCents)
+    : previous.eligibleAmountCents;
+  const authorised = authoriseRefund(ctx.db, {
+    requestId: previous.id,
+    orderId: previous.orderId,
+    customerId: previous.customerId,
+    amountCents,
+    now: ctx.now(),
+  });
+  insertAuditEvent(
+    ctx.db,
+    previous.id,
+    at,
+    'refund_authorised',
+    `${formatCents(authorised.amountCents)} pending human verification`,
+  );
+}
+
+function releaseIfNeeded(
+  ctx: AppContext,
+  previous: PersistedRequest,
+  override: OverrideDecision,
+  at: string,
+): void {
+  const nextIsMoney = MONEY_DECISIONS.has(override.decision);
+  const previousIsMoney = MONEY_DECISIONS.has(previous.decision);
+  if (!previousIsMoney || nextIsMoney) {
+    return;
+  }
+  for (const released of releaseRefundsForRequest(
+    ctx.db,
+    previous.id,
+    `override ${previous.decision} -> ${override.decision}: ${override.note}`,
+    ctx.now(),
+  )) {
+    insertAuditEvent(
+      ctx.db,
+      previous.id,
+      at,
+      'refund_released',
+      `${released.amountCents} cents released: ${override.note}`,
+    );
+  }
+}
+
+/**
  * The amount is never taken from the request body. It is re-derived from the
  * order-derived eligible amount, so a human can change the decision but cannot
  * invent a figure: there is no field to set, and `assertDecisionCoherent`
@@ -177,49 +241,10 @@ function applyOverride(
       agentId,
       override.note,
       previous.eligibleAmountCents,
+      override.amountCents,
     );
-    // An override that takes the money away must also hand the money back. The
-    // approval reserved a balance against the order (R-06b), and a reservation
-    // that outlives the decision that created it would quietly shrink what the
-    // customer can claim for the rest of the order's life.
-    if (override.decision === 'approved' && previousDecision !== 'approved' && previous.orderId !== null) {
-      // A person approving a claim the policy refused creates the same
-      // reservation the pipeline would have. Without this the decision says
-      // money is owed and nothing ever pays it: the row is never in the queue,
-      // so no reviewer is ever asked. The amount is the order-derived one, the
-      // same figure the decision itself carries - there is no field to set.
-      const authorised = authoriseRefund(ctx.db, {
-        requestId,
-        orderId: previous.orderId,
-        customerId: previous.customerId,
-        amountCents: previous.eligibleAmountCents,
-        now: ctx.now(),
-      });
-      insertAuditEvent(
-        ctx.db,
-        requestId,
-        at,
-        'refund_authorised',
-        `${formatCents(authorised.amountCents)} pending human verification`,
-      );
-    }
-
-    if (previousDecision === 'approved' && override.decision !== 'approved') {
-      for (const released of releaseRefundsForRequest(
-        ctx.db,
-        requestId,
-        `override ${previousDecision} -> ${override.decision}: ${override.note}`,
-        ctx.now(),
-      )) {
-        insertAuditEvent(
-          ctx.db,
-          requestId,
-          at,
-          'refund_released',
-          `${released.amountCents} cents released: ${override.note}`,
-        );
-      }
-    }
+    reserveIfNeeded(ctx, override, previous, at);
+    releaseIfNeeded(ctx, previous, override, at);
     // A person deciding the request is the way an appeal ends. The person is in
     // the thread now (that is the only way they got here), so the open appeal is
     // no longer a queue entry waiting for attention.

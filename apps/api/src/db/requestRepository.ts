@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Db } from './connection.js';
 import { appendAuditEvent } from './auditChain.js';
 import { queryAll, queryOne } from './sql.js';
-import { DECISIONS, type Decision } from '@refund/shared';
+import { DECISIONS, MONEY_DECISIONS, type Decision } from '@refund/shared';
 import { IncoherentDecisionError } from '../http/errors.js';
 import { formatCents } from '../lib/money.js';
 import type { AuditEventRecord, LlmCallRecord, PersistedRequest } from './records.js';
@@ -345,11 +345,17 @@ export function applyHumanOverride(
   agentId: string,
   note: string,
   eligibleAmountCents: number,
+  amountCents?: number,
 ): void {
-  // Only an approval may carry money, so anything else is written as $0 - an
+  // Only a money decision may carry money, so anything else is written as $0 - an
   // override that merely changed the decision must not leave the old amount
-  // live on the row.
-  const amount = decision === 'approved' ? eligibleAmountCents : 0;
+  // live on the row. An approval re-derives the full eligible amount; a partial
+  // refund carries the amount the admin named, defaulting to the eligible figure.
+  const amount = decision === 'approved'
+    ? eligibleAmountCents
+    : decision === 'partial_refund'
+      ? (amountCents ?? eligibleAmountCents)
+      : 0;
   assertDecisionCoherent(decision, amount);
   db.prepare(
     `UPDATE refund_requests
@@ -359,7 +365,7 @@ export function applyHumanOverride(
 }
 
 /**
- * Money safety, stated once: money is authorised only by an approval.
+ * Money safety, stated once: money is authorised only by a money decision.
  *
  * Enforced before every write that can set either field, so a bad pair is refused
  * rather than recorded. It runs *before* the statement on purpose - asserted
@@ -372,14 +378,17 @@ export function assertDecisionCoherent(decision: Decision, amountCents: number):
       `a refund amount must be a non-negative whole number of cents (got ${amountCents})`,
     );
   }
-  if (decision === 'approved' && amountCents <= 0) {
-    throw new IncoherentDecisionError(
-      amountCents === 0
-        ? 'nothing on this order is eligible for refund, so it cannot be approved. Check the blocked items in the decision trace.'
-        : 'an approved request must carry a positive amount',
-    );
+  if (MONEY_DECISIONS.has(decision)) {
+    if (amountCents <= 0) {
+      throw new IncoherentDecisionError(
+        amountCents === 0
+          ? 'nothing on this order is eligible for refund, so it cannot be approved. Check the blocked items in the decision trace.'
+          : `a ${decision} request must carry a positive amount`,
+      );
+    }
+    return;
   }
-  if (decision !== 'approved' && amountCents !== 0) {
+  if (amountCents !== 0) {
     // The mirror of the rule above, and the one a payout job would trip over: a
     // `denied` or `escalated` request holding a live amount reads as money that
     // may leave the till, on a decision nobody authorised.

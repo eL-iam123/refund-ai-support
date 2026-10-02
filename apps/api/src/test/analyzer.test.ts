@@ -8,6 +8,7 @@ import { redactSecrets } from '../lib/redact.js';
 import { testEnv } from './helpers.js';
 import { missingApiKeyFor, presetFor, readEnv, requiresApiKey } from '../config/env.js';
 import type { OrderRecord } from '../db/records.js';
+import type { IntakeInput, IntakeReply } from '../ai/analyzer.js';
 
 /**
  * Tests for the model boundary itself.
@@ -63,14 +64,14 @@ describe('the local extractor leaves a greeting to the messenger', () => {
       { message: "It's just not right. Can you sort it out?", order: null, history: [] },
       () => {},
     );
-    expect(vague.kind).toBe('claim');
+    expect(vague.kind).toBe('complete');
 
     const damaged = await LocalAnalyzer().analyze(
       { message: 'hello, my lamp arrived cracked', order: { id: 'ORD-1', totalCents: 100, status: 'delivered', paymentState: 'settled', ageDays: 3, items: [] }, history: [] },
       () => {},
     );
     expect(damaged.kind).toBe('claim');
-    if (damaged.kind === 'claim') {
+    if (damaged.kind === 'complete') {
       expect(damaged.extraction.reason).toBe('damaged');
     }
   });

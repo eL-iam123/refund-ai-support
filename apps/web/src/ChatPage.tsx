@@ -837,9 +837,14 @@ function Reply({ result, duplicate, onAppeal, requestId }: { result: ReplyBody; 
       )}
       <p>{result.responseText}</p>
       <footer className="row small">
-        {result.decision !== 'denied' ? <strong>{formatCents(result.refundAmountCents)}</strong> : null}
+        {result.decision === 'approved' || result.decision === 'partial_refund' ? (
+          <strong>{formatCents(result.refundAmountCents)}</strong>
+        ) : null}
         {result.decision === 'escalated' ? (
           <span className="muted">Someone confirms this by hand before anything is paid.</span>
+        ) : null}
+        {result.decision === 'exchange' || result.decision === 'store_credit' ? (
+          <span className="muted">No money is moved by this.</span>
         ) : null}
         {result.decision === 'denied' && onAppeal !== undefined && requestId !== undefined && (
           <button

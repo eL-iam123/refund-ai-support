@@ -679,7 +679,7 @@ function ClaimLines({ claim }: { claim: HandoffBrief['claim'] }): ReactNode {
  * whole console is built to prevent, so both are stated in words instead.
  */
 function PayableAmount({ decision, cents }: { decision: string; cents: number }): ReactNode {
-  if (decision === 'approved') {
+  if (decision === 'approved' || decision === 'partial_refund') {
     return <>{formatCents(cents)}</>;
   }
   if (decision === 'escalated') {
@@ -889,11 +889,11 @@ function RequestTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'request
         </p>
         <p>{turn.responseText}</p>
         {/*
-          Only an approval authorises money. The old `!== 'denied'` test printed
+          Only a money decision authorises money. The old `!== 'denied'` test printed
           "$0.00" under every escalation, which is the exact figure a reader
           should never take away from an escalated case.
         */}
-        {turn.decision === 'approved' ? (
+        {turn.decision === 'approved' || turn.decision === 'partial_refund' ? (
           <footer className="turn-foot">{formatCents(turn.refundAmountCents)} authorised</footer>
         ) : null}
       </div>

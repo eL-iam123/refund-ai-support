@@ -60,15 +60,28 @@ import { formatCents } from './lib/money.js';
  */
 
 const REASON_RULES = rulesForStage('reason_rules');
+/** How much of the prior conversation is shipped to the model with each turn. */
 const HISTORY_LIMIT = 12;
 
+/**
+ * Persists one model attempt. Successful or not, first try or fifth.
+ */
 export type AttemptRecorder = (requestId: string, provider: string, attempt: ProviderAttempt) => void;
 
+/**
+ * The pipeline's only non-durable dependency.
+ *
+ * Passing the analyzer in rather than importing a singleton is what lets the
+ * test suite run all eighteen scenarios with no network, no API key, no rate
+ * limit and no nondeterminism, against the same code the server runs.
+ */
 export interface PipelineDeps {
   readonly analyzer: AIAnalyzer;
   readonly recordAttempt: AttemptRecorder;
+  /** REFUND_POLICY.md §7.1. Deny is the safe default; see R-14. */
   readonly injectionAction: InjectionAction;
-  readonly discretion: DiscretionConfig;
+  /** The operator's pre-authorised discretion bounds. Optional; defaults to off. See policy/discretion.ts. */
+  readonly discretion?: DiscretionConfig;
 }
 
 export interface ProcessInput {
@@ -76,10 +89,28 @@ export interface ProcessInput {
   readonly customerId: string;
   readonly orderId: string | null;
   readonly message: string;
+  /**
+   * Order lines the customer ticked in the storefront's picker, by id.
+   *
+   * Narrows the claim and never widens it: every id is checked against the
+   * resolved order during retrieval, and one that belongs to no line of it is
+   * dropped rather than resolved elsewhere. Empty - the ordinary case - leaves
+   * item identification entirely to the deterministic keyword matcher.
+   */
   readonly itemIds: readonly string[];
   readonly now: Date;
 }
 
+/**
+ * What running the pipeline produced.
+ *
+ * Two outputs, and the caller cannot confuse them because they are different
+ * types. An `asked` result is the assistant choosing to clarify: nothing was
+ * decided, so nothing may be persisted as a decision - the caller stores the
+ * question instead. A `decided` result is the resolver's decision, which the
+ * caller persists as a request row. The discriminator makes "a question is not
+ * a decision" a compile-time property of every caller, not a comment.
+ */
 export type ProcessResult =
   | {
       readonly stage: 'asked';
@@ -116,11 +147,13 @@ export class UnknownCustomerError extends Error {
   }
 }
 
+/** Accumulates per-stage timings for the admin drawer. */
 class StageLog {
   private readonly entries: StageTiming[] = [];
   private readonly startedAt = Date.now();
   private lastTick = this.startedAt;
 
+  /** Duration is measured from the previous stage, so no caller passes clocks. */
   record(stage: Stage, detail: string): void {
     const now = Date.now();
     this.entries.push({ stage, durationMs: now - this.lastTick, detail });
@@ -149,10 +182,18 @@ export async function processRefundRequest(
   const intake = runIntake(db, input, deps.injectionAction, log);
   const retrieval = retrieveOrder(db, input, intake, log);
 
+  // Unresolved-order clarifications belong to the order the customer just
+  // identified. Attach them before the model reads history so their answer is
+  // grounded in the right thread and cannot leak into every order on the account.
   if (retrieval.order !== null) {
     adoptDialogueToOrder(db, input.customerId, retrieval.order.id);
   }
 
+  // The clarify turn, before the fact gates. Its guards are its whole safety:
+  // unresolved order, a real analyzer to continue the conversation, no
+  // injection attempt, and at least one order to clarify against. Without all
+  // four the request proceeds into the pipeline and escalates exactly as
+  // before, so the question cannot widen what the policy would decide.
   const mode = `${deps.analyzer.label} (${deps.analyzer.model})`;
   const clarification = clarifyOrder(retrieval.found, deps.analyzer, intake.injection, log);
   if (clarification !== null) {
@@ -161,6 +202,12 @@ export async function processRefundRequest(
 
   const gates = runFactGates(
     retrieval.context,
+    // Only the lines the customer actually ticked can terminate the request at
+    // the gate. A keyword match in the message is the looser, older signal:
+    // letting it deny would refuse a whole mixed basket for merely naming a
+    // subscription or final-sale line, which is an adjustment (S-17), not a
+    // verdict. Those same matches still cap an approval through the dispute
+    // ceiling, so nothing is widened by ignoring them here.
     input.itemIds,
   );
   log.record(
@@ -214,7 +261,7 @@ async function afterGates(
   log: StageLog,
   mode: string,
 ): Promise<ProcessResult> {
-  const analysis = await analyseClaim(db, deps, input, gates, retrieval, intake, observer, log);
+  const analysis = await analyseRequest(db, deps, input, gates, retrieval, intake, observer, log);
   if (analysis.outcome === 'question') {
     return askedResult(analysis.question, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log);
   }
@@ -251,6 +298,58 @@ async function afterGates(
   };
 }
 
+function analyseRequest(
+  db: Db,
+  deps: PipelineDeps,
+  input: ProcessInput,
+  gates: GateResult,
+  retrieval: Retrieval,
+  intake: Intake,
+  observer: AttemptObserver,
+  log: StageLog,
+): Promise<AnalyseOutcome> {
+  return analyseClaim(
+    db,
+    deps,
+    input,
+    gates,
+    retrieval.order,
+    intake,
+    observer,
+    log,
+  );
+}
+
+/**
+ * The asked branch of the pipeline, built in one place so the two question
+ * exits - OrderRetrieval's deterministic clarify, and the model's own ask -
+ * cannot drift apart.
+ */
+function askedResult(
+  question: string,
+  order: OrderRecord | null,
+  itemIds: readonly string[],
+  intake: Intake,
+  llmCalled: boolean,
+  aiMode: string,
+  log: StageLog,
+): Extract<ProcessResult, { stage: 'asked' }> {
+  return {
+    stage: 'asked',
+    question,
+    customer: intake.customer,
+    order,
+    resolvedOrderId: order?.id ?? null,
+    itemIds,
+    injection: intake.injection,
+    llmCalled,
+    aiMode,
+    timings: log.all(),
+  };
+}
+
+// --- Stages ------------------------------------------------------------------
+
 interface Intake {
   readonly customer: CustomerRecord;
   readonly injection: InjectionScan;
@@ -258,6 +357,7 @@ interface Intake {
   readonly context: PolicyContext;
 }
 
+/** Stage 1: scan the message, load the customer, run the integrity rule. */
 function runIntake(
   db: Db,
   input: ProcessInput,
@@ -291,6 +391,8 @@ function runIntake(
     orderTotalCents: 0,
   };
 
+  // R-14 runs at intake but is resolved last, so a hostile message can still
+  // be shown being clamped rather than being quietly dropped.
   return {
     customer,
     injection,
@@ -305,6 +407,7 @@ interface Retrieval {
   readonly context: PolicyContext;
 }
 
+/** Stage 2: resolve the order and the duplicate-charge sibling. */
 function retrieveOrder(db: Db, input: ProcessInput, intake: Intake, log: StageLog): Retrieval {
   const found = identifyOrder(db, intake.customer, input.orderId, input.message, input.now, input.itemIds);
   const order = found.order;
@@ -324,12 +427,39 @@ function retrieveOrder(db: Db, input: ProcessInput, intake: Intake, log: StageLo
   };
 }
 
+/**
+ * The one question the pipeline asks without the model: "which order?".
+ *
+ * Between retrieval and the fact gates, because an unresolved order leaves the
+ * fact gates nothing to run on. Every guard here is load-bearing and each one
+ * answers a way this could go wrong:
+ *
+ *  - `unresolved` only - a resolved order proceeds to the model, which may ask
+ *    its own question in its own words.
+ *  - `available` - the question is only worth asking if a model will be there
+ *    to read the customer's answer. Without one, asking just delays the
+ *    escalation by a round trip.
+ *  - no injection attempt - a hostile message gets the safe path (R-14, a
+ *    person) instead of a friendly conversation.
+ *  - at least one candidate - a customer with no orders on file has nothing to
+ *    clarify; the question would be nonsense and the escalation is correct.
+ *
+ * Returns null (proceed) rather than throwing, so the ordinary pipeline shape -
+ * everything terminal escalates - is untouched.
+ */
 function clarifyOrder(
   found: Identification,
   analyzer: AIAnalyzer,
   injection: InjectionScan,
   log: StageLog,
 ): string | null {
+  // Two or more of the customer's own orders stand behind the ambiguity: this
+  // is "which order do you mean?", a question only the customer can answer. A
+  // single unresolved reference - a typo, or an id that belongs to nobody on
+  // this account - is deliberately NOT asked about: probing an id must not be
+  // answered with a confirmation that it does or does not exist, so that case
+  // keeps the R-13 escalation a person reviews. Injection attempts and a
+  // missing model are likewise not conversable, and proceed to the pipeline.
   if (found.basis !== 'unresolved' || !analyzer.available || injection.detected || found.candidates < 2) {
     return null;
   }
@@ -355,12 +485,27 @@ const NO_ANALYSIS: AnalyseOutcome = {
   proposal: null,
 };
 
+/**
+ * Stage 4: the one model call, plus the grounding check on its output.
+ *
+ * The model may answer with a question or with a claim; either is a valid
+ * reply and both are real behaviours of a messenger. A question flows straight
+ * out as the `asked` result - nothing was decided, so nothing is handed to the
+ * resolver. A claim gets grounded against the full customer corpus: the current
+ * message and every earlier message of theirs, so the model is permitted to
+ * quote an earlier turn and the check still catches a quote from anywhere else.
+ *
+ * The catch is the point, not a best-effort convenience. Every rule has already
+ * run on order facts by this point, so a provider that is down, rate-limited or
+ * simply wrong about the schema costs the request its evidence and nothing
+ * else - and "no claim" can only escalate, never approve.
+ */
 async function analyseClaim(
   db: Db,
   deps: PipelineDeps,
   input: ProcessInput,
   gates: GateResult,
-  retrieval: Retrieval,
+  order: OrderRecord | null,
   intake: Intake,
   observer: AttemptObserver,
   log: StageLog,
@@ -382,12 +527,11 @@ async function analyseClaim(
     return noComplaint;
   }
 
+  // Intake loop: model extracts claim with clarification loops until complete
   let extraction: ClaimExtraction | null = null;
   let grounding: GroundingResult | null = null;
   const injectionDetected = intake.injection.detected;
   let reply: IntakeReply;
-
-  while (true) {
     try {
       reply = await deps.analyzer.analyze(
         { message: input.message, order: toAnalyzerOrder(order), history },
@@ -400,7 +544,11 @@ async function analyseClaim(
     }
 
     if (reply.kind === 'question') {
-      if (intake.injection.detected) {
+      // A flagged message cannot leave through the question branch: doing so
+      // would let model-authored text bypass R-14's denial/escalation entirely.
+      // Discard the model response and continue with no claim so the resolver
+      // records the configured integrity outcome.
+      if (injectionDetected) {
         log.record('ai_analysis', 'discarded model question after an injection signal');
         return NO_ANALYSIS;
       }
@@ -412,6 +560,7 @@ async function analyseClaim(
       );
     }
 
+    // Complete extraction received
     extraction = reply.extraction;
     break;
   }
@@ -420,8 +569,11 @@ async function analyseClaim(
     return { outcome: 'claim', extraction: null, grounding: null, proposal: null };
   }
 
+  // Only the customer's side of the transcript is eligible evidence. The model
+  // may quote something the customer said two messages ago, but never its own
+  // question and never its own phrasing.
   const corpus = [...history.filter((line) => line.role === 'customer').map((line) => line.text), input.message];
-  const grounding = verifyGrounding(extraction, corpus);
+  grounding = verifyGrounding(extraction, corpus);
   log.record(
     'ai_analysis',
     `reason="${extraction.reason}" intent="${extraction.intent}" ` +
@@ -429,6 +581,8 @@ async function analyseClaim(
       `via ${reply.model}`,
   );
 
+  // The proposal is generated by the policy engine, not the model.
+  // We create a synthetic proposal for the audit trail.
   const proposal: AiProposal = {
     suggestedDecision: 'escalated',
     suggestedAmountCents: 0,
@@ -445,6 +599,78 @@ async function analyseClaim(
   };
 }
 
+/** Keep a damage report without observed condition out of policy analysis. */
+function clarifyDamageReport(
+  message: string,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome | null {
+  const question = clarifySparseDamage(message);
+  if (question === null) {
+    return null;
+  }
+  log.record('ai_analysis', 'sparse damage report; asked for the observed condition before claim analysis');
+  return respondToQuestion(
+    { kind: 'question', question, model: 'deterministic-damage-clarification-v1' },
+    order,
+    history,
+    log,
+  );
+}
+
+/** Keep greetings and social-only turns out of claim analysis. */
+function clarifyNoComplaint(
+  message: string,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome | null {
+  if (!isNoComplaint(message)) {
+    return null;
+  }
+  log.record('ai_analysis', 'no complaint in the message; answered from the deterministic floor');
+  return respondToQuestion(
+    { kind: 'question', question: noComplaintQuestion(message, order !== null), model: NO_COMPLAINT_MODEL },
+    order,
+    history,
+    log,
+  );
+}
+
+/**
+ * The deterministic floor under the messenger's questions.
+ *
+ * The prompt tells the model never to open with a greeting, never to demand an
+ * order number the pipeline has resolved, and never to repeat itself; the guard
+ * makes those rules hold when the model ignores them. A canned question is
+ * replaced with a warm restatement, a repeat hands the thread to a person, and
+ * only a real question reaches the customer.
+ */
+function respondToQuestion(
+  reply: Awaited<ReturnType<AIAnalyzer['analyze']>> & { readonly kind: 'question' },
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome {
+  const refined = refineQuestion(reply.question, {
+    orderResolved: order !== null,
+    priorAssistantText: assistantLines(history),
+  });
+  if (refined.kind === 'escalate') {
+    log.record('ai_analysis', 'asked a question already asked; escalating to a person');
+    return NO_ANALYSIS;
+  }
+  const question = refined.kind === 'replace' ? refined.question : reply.question;
+  log.record(
+    'ai_analysis',
+    refined.kind === 'replace'
+      ? `replaced a canned question with a warm restatement (${reply.model})`
+      : `asked the customer the missing detail (${reply.model})`,
+  );
+  return { outcome: 'question', question, model: reply.model };
+}
+
 function orderIdFor(order: OrderRecord | null): string | null {
   return order?.id ?? null;
 }
@@ -457,29 +683,7 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
-function askedResult(
-  question: string,
-  order: OrderRecord | null,
-  itemIds: readonly string[],
-  intake: Intake,
-  llmCalled: boolean,
-  aiMode: string,
-  log: StageLog,
-): Extract<ProcessResult, { stage: 'asked' }> {
-  return {
-    stage: 'asked',
-    question,
-    customer: intake.customer,
-    order,
-    resolvedOrderId: order?.id ?? null,
-    itemIds,
-    injection: intake.injection,
-    llmCalled,
-    aiMode,
-    timings: log.all(),
-  };
-}
-
+/** Stage 5: the rules that need the model's claim, plus R-14's veto. */
 function runReasonRules(
   context: PolicyContext,
   gates: GateResult,
@@ -542,22 +746,24 @@ function resolveDecision(
   });
 }
 
+/**
+ * Stage 7: the customer-facing text.
+ *
+ * Composed from the decision and the order, never from the model's output and
+ * never from the customer's message. That is a security property, not a
+ * simplification: no instruction embedded in a customer's message can reach
+ * text a customer reads, because the message is not an input to this function.
+ */
 function composeReply(decision: RefundDecision, order: OrderRecord | null, message: string, log: StageLog): string {
+  // The message is passed for one narrow purpose: recognising an attachment the
+  // system cannot open, and frustration worth acknowledging. It is not used to
+  // phrase the decision itself, which is assembled from the decision and order
+  // alone - that separation is what stops a customer's own words, or an
+  // instruction hidden in them, from reaching the answer they are given.
   const text = composeDeterministicResponse(decision, order, message);
   log.record('respond', 'composed from the decision, no model in this path');
   return text;
 }
 
-function orderIdFor(order: OrderRecord | null): string | null {
-  return order?.id ?? null;
-}
+// --- Helpers -----------------------------------------------------------------
 
-function groundedLabel(grounding: GroundingResult | null): string {
-  return String(grounding?.grounded ?? false);
-}
-
-function truncate(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-}
-
-export { DEFAULT_DISCRETION };

@@ -19,6 +19,9 @@ export const DECISION_LABEL: Record<Decision, string> = {
   approved: 'Approved',
   denied: 'Denied',
   escalated: 'Escalated',
+  partial_refund: 'Partial refund',
+  exchange: 'Exchange',
+  store_credit: 'Store credit',
 };
 
 export const OUTCOME_LABEL: Record<RuleOutcome, string> = {
@@ -55,6 +58,10 @@ export const OVERRIDE_LABEL: Record<OverrideCode, string> = {
   amount_not_payable_until_reviewed: 'Escalated — not payable',
   risk_rule_deny_rejected: 'Risk-rule deny rejected',
   ungrounded_reason_escalated: 'Ungrounded reason escalated',
+  discretion_approve: 'Discretion approved',
+  discretion_partial_refund: 'Discretion partial refund',
+  discretion_exchange: 'Discretion offered exchange',
+  discretion_store_credit: 'Discretion offered store credit',
 };
 
 export function truncate(text: string, max: number): string {

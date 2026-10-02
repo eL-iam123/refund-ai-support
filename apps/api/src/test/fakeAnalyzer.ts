@@ -1,9 +1,9 @@
 import type { ClaimExtraction } from '@refund/shared';
 import {
   AiUnavailableError,
-  type AgentReply,
   type AIAnalyzer,
-  type AnalyzerInput,
+  type IntakeInput,
+  type IntakeReply,
   type AttemptObserver,
   type ChatInput,
   type ChatReply,
@@ -73,9 +73,9 @@ function fixedAnalyzer(behaviour: { readonly extraction: Partial<ClaimExtraction
     model: 'fake-fixed-v1',
     available: true,
     unavailableReason: null,
-    analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
+    analyze(_input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
       recordOk(observer, 'fake-fixed-v1');
-      return Promise.resolve(claimReply(extraction, 'fake-fixed-v1'));
+      return Promise.resolve(completeReply(extraction, 'fake-fixed-v1'));
     },
     chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       observer({
@@ -89,6 +89,14 @@ function fixedAnalyzer(behaviour: { readonly extraction: Partial<ClaimExtraction
       });
       return Promise.resolve({ kind: 'text', text: "I'm here to help while your agent reviews your case.", model: 'fake-fixed-v1' });
     },
+  };
+}
+
+function completeReply(extraction: ClaimExtraction, model: string): IntakeReply {
+  return {
+    kind: 'complete',
+    extraction,
+    model,
   };
 }
 
@@ -111,12 +119,12 @@ function askAnalyzer(behaviour: {
     model: 'fake-ask-v1',
     available: true,
     unavailableReason: null,
-    analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
+    analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
       recordOk(observer, 'fake-ask-v1');
       if (input.history.length === 0) {
         return Promise.resolve({ kind: 'question', question: behaviour.question, model: 'fake-ask-v1' });
       }
-      return Promise.resolve(claimReply(extraction, 'fake-ask-v1'));
+      return Promise.resolve(completeReply(extraction, 'fake-ask-v1'));
     },
     chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       observer({
@@ -133,30 +141,13 @@ function askAnalyzer(behaviour: {
   };
 }
 
-function claimReply(extraction: ClaimExtraction, model: string): AgentReply {
-  return {
-    kind: 'claim',
-    extraction,
-    proposal: {
-      suggestedDecision: 'approved',
-      suggestedAmountCents: extraction.claimedAmountCents ?? 0,
-      confidence: extraction.confidence,
-      reason: extraction.reason,
-      model,
-    },
-    model,
-  };
-}
-
 function unavailableAnalyzer(message: string): AIAnalyzer {
   return {
     label: 'fake (test)',
     model: 'fake-unavailable-v1',
-    // Mirrors the real `UnavailableAnalyzer`: the reason is the message, and the
-    // status endpoint that reports it is exercised by the same contract.
     available: false,
     unavailableReason: message,
-    analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
+    analyze(_input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
       recordOk(observer, 'fake-unavailable-v1');
       return Promise.reject(new AiUnavailableError(message));
     },

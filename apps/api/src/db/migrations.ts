@@ -69,7 +69,7 @@ const MIGRATIONS: readonly Migration[] = [
       // anything else nothing is at stake as far as this system decided.
       db.exec(
         `UPDATE refund_requests
-            SET eligible_amount_cents = CASE WHEN decision = 'approved'
+            SET eligible_amount_cents = CASE WHEN decision IN ('approved', 'partial_refund')
                                              THEN refund_amount_cents ELSE 0 END
           WHERE eligible_amount_cents IS NULL`,
       );

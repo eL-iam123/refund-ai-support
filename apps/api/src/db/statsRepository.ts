@@ -74,7 +74,7 @@ function countOf(db: Db, sql: string, ...params: unknown[]): number {
 }
 
 function emptyDecisionTally(): Record<Decision, number> {
-  return { approved: 0, denied: 0, escalated: 0 };
+  return { approved: 0, denied: 0, escalated: 0, partial_refund: 0, exchange: 0, store_credit: 0 };
 }
 
 /** Requests per decision, ignoring any value the enum does not recognise. */

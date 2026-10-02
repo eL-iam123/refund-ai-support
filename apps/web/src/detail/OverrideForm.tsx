@@ -3,7 +3,14 @@ import type { Decision, RefundRequestDto } from '@refund/shared';
 import { api, describe } from '../api';
 import { ErrorNote, Panel } from '../components';
 
-const DECISIONS: readonly Decision[] = ['approved', 'denied', 'escalated'];
+const DECISIONS: readonly Decision[] = [
+  'approved',
+  'partial_refund',
+  'exchange',
+  'store_credit',
+  'denied',
+  'escalated',
+];
 
 /**
  * The human in the loop, and the only write path in the whole UI.

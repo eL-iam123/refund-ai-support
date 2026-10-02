@@ -1,4 +1,5 @@
 import type { Decision, RuleEvaluation, RuleId } from '@refund/shared';
+import { MONEY_DECISIONS } from '@refund/shared';
 
 /**
  * What a human is allowed to overturn.
@@ -78,9 +79,15 @@ export function hardBlockRuleIds(trace: readonly RuleEvaluation[]): readonly Rul
  */
 export function checkOverride(attempt: OverrideAttempt): OverrideRefusal | null {
   // Only an override that *turns a refusal into a payment* is restricted. Denying,
-  // re-escalating, or re-confirming an approval that is already approved move no
-  // money, so they are never blocked.
-  if (attempt.next !== 'approved' || attempt.current === 'approved') {
+  // re-escalating, or moving between non-money outcomes costs the business nothing
+  // and gives the customer another chance. An admin should never be stopped from
+  // tightening an outcome, and asking them to acknowledge a "hard block" they are
+  // not reversing would be a misleading prompt as well as an obstacle.
+  //
+  // `partial_refund` is a payment, so it is restricted on the way in exactly as an
+  // approval is. Moving between two money outcomes (partial to full, or back) is
+  // not introducing a payment where there was none, so it is not restricted here.
+  if (!MONEY_DECISIONS.has(attempt.next) || MONEY_DECISIONS.has(attempt.current)) {
     return null;
   }
 

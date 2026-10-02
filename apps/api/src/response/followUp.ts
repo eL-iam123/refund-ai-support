@@ -89,6 +89,25 @@ function humanDecision(facts: FollowUpFacts, order: string): string {
       'go back to your original payment method once it is.'
     );
   }
+  if (facts.decision === 'partial_refund') {
+    return (
+      `A member of our team has reviewed your request${order} and refunded ` +
+      `${formatCents(facts.amountCents)}. It has been checked again before it is sent, and it will ` +
+      'go back to your original payment method once it is.'
+    );
+  }
+  if (facts.decision === 'exchange') {
+    return (
+      `A member of our team has reviewed your request${order} and arranged an exchange for you. ` +
+      'They will confirm the details here - you do not need to do anything else.'
+    );
+  }
+  if (facts.decision === 'store_credit') {
+    return (
+      `A member of our team has reviewed your request${order} and added store credit to your ` +
+      'account. They will confirm the details here - you do not need to do anything else.'
+    );
+  }
   if (facts.decision === 'denied') {
     return (
       `A member of our team has reviewed your request${order} and we are not able to refund it. ` +

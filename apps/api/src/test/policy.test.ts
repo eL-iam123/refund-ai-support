@@ -400,6 +400,147 @@ describe('resolver clamps', () => {
   });
 });
 
+describe('resolver discretion', () => {
+  const order: OrderRecord = {
+    id: 'ORD-DISC',
+    customerId: 'C',
+    placedAt: new Date('2026-01-01T00:00:00.000Z'),
+    deliveredAt: new Date('2026-01-05T00:00:00.000Z'),
+    ageDays: 10,
+    status: 'delivered',
+    paymentState: 'settled',
+    refundedCents: 0,
+    totalCents: 10000,
+    isSubscription: false,
+    trackingStatus: 'delivered',
+    signedByCustomer: true,
+    conditionAtDelivery: null,
+    items: [{ id: 'I1', name: 'Mug', unitPriceCents: 10000, quantity: 1, finalSale: false, digital: false, downloaded: false, isSubscription: false }],
+  };
+
+  const customer = {
+    id: 'C',
+    name: 'Pat',
+    email: 'pat@example.com',
+    tier: 'standard' as const,
+    accountCreatedAt: new Date('2020-01-01T00:00:00.000Z'),
+    accountAgeDays: 2000,
+    priorRefundCount: 0,
+    refundRequestsLast30Days: 0,
+  };
+
+  const gateResult = {
+    evaluations: [evaluation({ ruleId: 'R-03', ruleClass: 'approval-authority' as const, outcome: 'escalate' })],
+    eligibleItems: order.items,
+    blockedItems: [],
+    eligibleAmountCents: 10000,
+    terminal: false,
+    decidingRuleId: null,
+  };
+
+  const extraction = {
+    intent: 'refund' as const,
+    reason: 'damaged' as const,
+    condition: 'damaged' as const,
+    confidence: 0.9,
+    orderRef: null,
+    claimedAmountCents: null,
+    items: [],
+    evidenceQuotes: ['the mug arrived cracked'],
+    language: 'en',
+    urgency: 'normal' as const,
+    policyOverrideAttempted: false,
+  };
+
+  const grounding = { grounded: true, verifiedQuotes: ['the mug arrived cracked'], rejectedQuotes: [] };
+
+  const discretion = (over: Record<string, unknown> = {}) => ({
+    enabled: true,
+    maxAmountCents: 50_000,
+    loyaltyMaxAmountCents: 150_000,
+    maxAgeDays: 45,
+    allowPartial: false,
+    allowExchange: false,
+    allowStoreCredit: false,
+    minConfidence: 0.5,
+    nearMissQuote: false,
+    ...over,
+  });
+
+  const input = (over: Record<string, unknown> = {}) => ({
+    intakeEvaluations: [],
+    gateResult,
+    reasonEvaluations: [],
+    grounding,
+    aiProposal: null,
+    disputeCeilingCents: null,
+    db: openMemoryDatabase(),
+    order,
+    orderTotalCents: 10000,
+    orderId: 'ORD-DISC',
+    extraction,
+    customer,
+    discretion: discretion(),
+    ...over,
+  });
+
+  it('leaves an escalation standing when discretion is off', () => {
+    const decision = resolve(input({ discretion: { ...discretion(), enabled: false } }));
+    expect(decision.decision).toBe('escalated');
+    expect(decision.overrides.filter((o) => o.code.startsWith('discretion_'))).toHaveLength(0);
+  });
+
+  it('softens a small grounded escalation to an approval', () => {
+    const decision = resolve(input());
+    expect(decision.decision).toBe('approved');
+    expect(decision.refundAmountCents).toBe(10000);
+    expect(decision.overrides.map((o) => o.code)).toContain('discretion_approve');
+  });
+
+  it('softens a large grounded escalation to a partial refund', () => {
+    const decision = resolve(
+      input({
+        gateResult: { ...gateResult, eligibleAmountCents: 80000 },
+        orderTotalCents: 80000,
+        discretion: discretion({ allowPartial: true }),
+      }),
+    );
+    expect(decision.decision).toBe('partial_refund');
+    expect(decision.refundAmountCents).toBe(50_000);
+    expect(decision.overrides.map((o) => o.code)).toContain('discretion_partial_refund');
+  });
+
+  it('caps a partial refund at the eligible amount', () => {
+    // A near-miss quote on a small claim, with the pre-authorised cap set far above
+    // the eligible amount: the partial refund must not exceed what is eligible.
+    const decision = resolve(
+      input({
+        grounding: { grounded: false, verifiedQuotes: [], rejectedQuotes: ['the mug arrived cracked'] },
+        discretion: discretion({ allowPartial: true, maxAmountCents: 500_000, nearMissQuote: true }),
+      }),
+    );
+    expect(decision.decision).toBe('partial_refund');
+    expect(decision.refundAmountCents).toBe(10000);
+  });
+
+  it('never softens a denial', () => {
+    const decision = resolve(
+      input({
+        gateResult: {
+          evaluations: [evaluation({ ruleId: 'R-01', ruleClass: 'eligibility' as const, outcome: 'deny' })],
+          eligibleItems: [],
+          blockedItems: [],
+          eligibleAmountCents: 0,
+          terminal: true,
+          decidingRuleId: 'R-01',
+        },
+      }),
+    );
+    expect(decision.decision).toBe('denied');
+    expect(decision.overrides.filter((o) => o.code.startsWith('discretion_'))).toHaveLength(0);
+  });
+});
+
 describe('fail-soft behaviour', () => {
   it('still decides safely when the model is unreachable', async () => {
     const fixture = scenario('S-01');

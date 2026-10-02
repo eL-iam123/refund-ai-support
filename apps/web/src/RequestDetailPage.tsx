@@ -46,9 +46,9 @@ function Drawer({ detail, onApplied }: { detail: RequestDetail; onApplied: () =>
       <header className="drawer-head">
         <h1>
           <DecisionBadge decision={request.decision.decision} />
-          {request.decision.decision === 'denied' ? null : (
+          {request.decision.decision === 'approved' || request.decision.decision === 'partial_refund' ? (
             <strong>{formatCents(request.decision.refundAmountCents)}</strong>
-          )}
+          ) : null}
         </h1>
         <p className="muted">
           {request.customerName} · {request.orderId ?? 'no order'} · {formatTime(request.createdAt)} ·{' '}

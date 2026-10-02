@@ -54,7 +54,7 @@ export interface ShopOrder {
 
 /** The decision as the refund engine returns it, nested under `decision`. */
 export interface Decision {
-  readonly decision: 'approved' | 'denied' | 'escalated' | 'pass';
+  readonly decision: 'approved' | 'denied' | 'escalated' | 'partial_refund' | 'exchange' | 'store_credit' | 'pass';
   readonly refundAmountCents: number;
   readonly eligibleAmountCents: number;
   readonly currency: string;
@@ -234,11 +234,11 @@ export type ChatTurn =
       readonly responseText: string;
       /**
        * The refund decision vocabulary, declared locally for the reason above.
-      * `pass` is deliberately absent: it is an order-status value, not something a
+       * `pass` is deliberately absent: it is an order-status value, not something a
        * refund request can be decided as, and a chat turn can only ever be one of
-       * these three.
+       * these.
        */
-      readonly decision: 'approved' | 'denied' | 'escalated';
+      readonly decision: 'approved' | 'denied' | 'escalated' | 'partial_refund' | 'exchange' | 'store_credit';
       readonly refundAmountCents: number;
       readonly itemIds: readonly string[];
       readonly createdAt: string;

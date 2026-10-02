@@ -45,7 +45,10 @@ export interface DialogueLine {
   readonly text: string;
 }
 
-export interface AnalyzerInput {
+/**
+ * Input for the intake phase: model extracts structured claim from conversation.
+ */
+export interface IntakeInput {
   readonly message: string;
   /** Null when no order could be resolved for the customer. */
   readonly order: AnalyzerOrder | null;
@@ -57,8 +60,33 @@ export interface AnalyzerInput {
   readonly history: readonly DialogueLine[];
 }
 
+/** One prior turn of the conversation, oldest first. */
+export interface DialogueLine {
+  readonly role: 'customer' | 'assistant';
+  readonly text: string;
+}
+
 /**
- * What the model is allowed to do back.
+ * What the model returns during intake.
+ *
+ * Two options: ask a clarifying question, or submit a complete claim extraction.
+ * The model is an intake specialist, NOT a decision maker.
+ */
+export type IntakeReply =
+  | {
+      readonly kind: 'question';
+      /** Exactly one question, written in the customer's own language. */
+      readonly question: string;
+      readonly model: string;
+    }
+  | {
+      readonly kind: 'complete';
+      readonly extraction: ClaimExtraction;
+      readonly model: string;
+    };
+
+/**
+ * What the model is allowed to do back in the legacy flow (kept for chat mode).
  *
  * Two options, and nothing else. `question` is the messenger half of the job:
  * the model may ask the customer for the one detail it is missing. `claim` is
@@ -158,13 +186,13 @@ export interface AIAnalyzer {
    */
   readonly unavailableReason: string | null;
   /**
-   * Replies to the customer's message.
+   * Intake phase: model extracts structured claim with clarification loops.
    *
    * Rejects with `AiUnavailableError` when no configured model produced
    * schema-valid output. Callers treat that as "no claim", which can only
    * escalate - the decision is computed from order facts either way.
    */
-  analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply>;
+  analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply>;
   /**
    * Chat mode for escalated conversations.
    *

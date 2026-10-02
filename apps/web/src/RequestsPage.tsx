@@ -161,7 +161,9 @@ function RequestTable({ requests }: { requests: readonly RefundRequestSummaryDto
               <DecisionBadge decision={row.decision} />
             </td>
             <td className="num">
-              {row.decision === 'denied' ? '—' : formatCents(row.refundAmountCents)}
+              {row.decision === 'denied' || row.decision === 'exchange' || row.decision === 'store_credit'
+                ? '—'
+                : formatCents(row.refundAmountCents)}
             </td>
             <td>
               {row.reasonCodes.map((code) => (

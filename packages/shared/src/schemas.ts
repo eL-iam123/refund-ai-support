@@ -44,27 +44,44 @@ export const CreateRefundRequestSchema = z.object({
 });
 export type CreateRefundRequest = z.infer<typeof CreateRefundRequestSchema>;
 
-export const OverrideDecisionSchema = z.object({
-  decision: z.enum(DECISIONS),
-  // Trimmed first, then length-checked: an all-whitespace note is no
-  // justification at all, and an override nobody can account for is exactly
-  // what this table exists to prevent.
-  note: z
-    .string()
-    .transform((value) => value.trim())
-    .pipe(z.string().min(1, 'a human override must be justified').max(2000)),
-  // There is deliberately no `agentId` here. The acting staff member comes from
-  // the verified token, never the request body: an audit trail that records a
-  // name the caller chose is not an audit trail, it is a comment box.
-  /**
-   * Required to approve a request the policy refused for a hard reason.
-   *
-   * Deliberately a separate boolean rather than something inferred from the
-   * note: the note is prose nobody can check, and the whole point is that
-   * reversing a hard denial has to be a deliberate act, not a slip.
-   */
-  acknowledgeHardBlock: z.boolean().optional(),
-});
+export const OverrideDecisionSchema = z
+  .object({
+    decision: z.enum(DECISIONS),
+    // Trimmed first, then length-checked: an all-whitespace note is no
+    // justification at all, and an override nobody can account for is exactly
+    // what this table exists to prevent.
+    note: z
+      .string()
+      .transform((value) => value.trim())
+      .pipe(z.string().min(1, 'a human override must be justified').max(2000)),
+    // There is deliberately no `agentId` here. The acting staff member comes from
+    // the verified token, never the request body: an audit trail that records a
+    // name the caller chose is not an audit trail, it is a comment box.
+    /**
+     * Required to approve a request the policy refused for a hard reason.
+     *
+     * Deliberately a separate boolean rather than something inferred from the
+     * note: the note is prose nobody can check, and the whole point is that
+     * reversing a hard denial has to be a deliberate act, not a slip.
+     */
+    acknowledgeHardBlock: z.boolean().optional(),
+    /**
+     * The amount a `partial_refund` authorises. Required for that decision,
+     * forbidden for every other: an approval re-derives the full eligible amount
+     * and a non-money outcome carries none, so a figure on either would be a
+     * second, conflicting source of truth.
+     */
+    amountCents: z.number().int().positive().optional(),
+  })
+  .superRefine((value, ctx) => {
+    const needsAmount = value.decision === 'partial_refund';
+    if (needsAmount && value.amountCents === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['amountCents'], message: 'a partial refund must name the amount to authorise' });
+    }
+    if (!needsAmount && value.amountCents !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['amountCents'], message: `a ${value.decision} override cannot carry an amount` });
+    }
+  });
 export type OverrideDecision = z.infer<typeof OverrideDecisionSchema>;
 
 export const RefundStatusSchema = z.enum(['pending_verification', 'settled', 'released']);

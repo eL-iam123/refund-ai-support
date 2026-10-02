@@ -1,5 +1,6 @@
 import {
   type AiProposal,
+  type ClaimExtraction,
   type Decision,
   type GroundingResult,
   type OverrideCode,
@@ -11,10 +12,18 @@ import { assertAmountSane } from '../lib/assert.js';
 import { formatCents } from '../lib/money.js';
 import { settledCentsForOrder, pendingCentsForOrder } from '../db/refundLedger.js';
 import type { Db } from '../db/connection.js';
-import type { OrderRecord } from '../db/records.js';
+import type { CustomerRecord, OrderRecord } from '../db/records.js';
+import type { DiscretionConfig } from '../config/env.js';
 import { precedenceFold } from './engine.js';
 import type { GateResult } from './gates.js';
 import { describeCeiling } from '../retrieval/identifyOrder.js';
+import {
+  recommendDiscretion,
+  DEFAULT_DISCRETION,
+  decisionFromRecommendation,
+  type DecisionKind,
+  type DiscretionRecommendation,
+} from './discretion.js';
 
 export interface ResolveInput {
   /** R-14 and anything else established during intake. */
@@ -36,12 +45,21 @@ export interface ResolveInput {
   readonly db: Db;
   /** Null when no order resolved; the outstanding figures are then zero. */
   readonly order: OrderRecord | null;
+  /** The model's reading of the message, when it produced one. Inert data. */
+  readonly extraction?: ClaimExtraction | null;
+  /** The customer, for the discretion layer's loyalty rule. */
+  readonly customer?: CustomerRecord | null;
+  /** The operator's pre-authorised discretion bounds. Defaults to off. */
+  readonly discretion?: DiscretionConfig;
 }
 
 const VERB: Record<Decision, string> = {
   approved: 'Approved',
   denied: 'Denied',
   escalated: 'Escalated for human review',
+  partial_refund: 'Partially refunded',
+  exchange: 'Resolved with an exchange',
+  store_credit: 'Resolved with store credit',
 };
 
 /**
@@ -59,11 +77,12 @@ export function resolve(input: ResolveInput): RefundDecision {
     ...input.reasonEvaluations,
   ];
   const winner = decidingRule(input, evaluations);
-  const decision = decisionFrom(winner);
-  const amount = amountFor(decision, input);
+  const baseDecision = decisionFrom(winner);
+  const softened = applyDiscretion(baseDecision, winner, evaluations, input);
+  const decision = softened.decision;
+  const amount = amountFor(decision, input, softened.partialAmountCents);
   const ceiling = ceilingOverride(input, amount);
-  const overrides = reconcile(input, decision, amount);
-
+  const overrides = [...softened.overrides, ...reconcile(input, decision, amount), ...ceiling];
   assertAmountSane(amount, input.orderTotalCents);
 
   return {
@@ -71,10 +90,10 @@ export function resolve(input: ResolveInput): RefundDecision {
     refundAmountCents: amount,
     eligibleAmountCents: input.gateResult.eligibleAmountCents,
     currency: 'USD',
-    summary: summarise(decision, winner, input, amount),
+    summary: summarise(decision, winner, input, amount, softened.applied),
     policyRef: winner?.policyRef ?? 'REFUND_POLICY.md §9',
     trace: evaluations,
-    overrides: [...overrides, ...ceiling],
+    overrides,
     eligibleItemIds: input.gateResult.eligibleItems.map((item) => item.id),
     blockedItems: input.gateResult.blockedItems,
     ...outstandingFor(input),
@@ -156,22 +175,116 @@ function decisionFrom(winner: RuleEvaluation | null): Decision {
   return 'approved';
 }
 
+/** The result of consulting the discretion layer. */
+interface Softened {
+  readonly decision: Decision;
+  /** The amount a partial-refund discretion authorised, when that was the recommendation. */
+  readonly partialAmountCents: number | null;
+  /** True when discretion changed the outcome. */
+  readonly applied: boolean;
+  /** The audit records for the adjustment, in the order they should read. */
+  readonly overrides: OverrideRecord[];
+}
+
+/**
+ * Consult the discretion layer and apply its recommendation.
+ *
+ * The layer only ever softens an escalation, so a `denied` base decision passes
+ * through untouched - only a person can overturn a denial (`overrideGuard.ts`).
+ * Every adjustment is recorded as an override so the audit trail shows both the
+ * policy outcome and the discretion that softened it.
+ */
+function applyDiscretion(
+  baseDecision: Decision,
+  winner: RuleEvaluation | null,
+  evaluations: readonly RuleEvaluation[],
+  input: ResolveInput,
+): Softened {
+  const recommendation = recommendDiscretion({
+    baseDecision,
+    winner,
+    trace: evaluations,
+    order: input.order,
+    customer: input.customer ?? null,
+    eligibleAmountCents: input.gateResult.eligibleAmountCents,
+    orderTotalCents: input.orderTotalCents,
+    extraction: input.extraction ?? null,
+    grounding: input.grounding,
+    config: input.discretion ?? DEFAULT_DISCRETION,
+  });
+
+  if (recommendation.kind === 'none') {
+    return { decision: baseDecision, partialAmountCents: null, applied: false, overrides: [] };
+  }
+
+  const decision = decisionFromRecommendation(recommendation.kind);
+  const partialAmountCents = recommendation.kind === 'partial_refund' ? recommendation.amountCents : null;
+  return {
+    decision,
+    partialAmountCents,
+    applied: true,
+    overrides: [
+      {
+        code: discretionOverrideCode(recommendation.kind),
+        detail: discretionDetail(recommendation, winner, input),
+        aiProposal: input.aiProposal,
+      },
+    ],
+  };
+}
+
+function discretionOverrideCode(kind: DecisionKind): OverrideCode {
+  if (kind === 'approve') {
+    return 'discretion_approve';
+  }
+  if (kind === 'partial_refund') {
+    return 'discretion_partial_refund';
+  }
+  if (kind === 'exchange') {
+    return 'discretion_exchange';
+  }
+  return 'discretion_store_credit';
+}
+
+function discretionDetail(
+  recommendation: DiscretionRecommendation,
+  winner: RuleEvaluation | null,
+  input: ResolveInput,
+): string {
+  const reason = winner === null ? 'no rule concluded' : `${winner.ruleId} (${winner.policyRef})`;
+  const eligible = formatCents(input.gateResult.eligibleAmountCents);
+  if (recommendation.kind === 'approve') {
+    return `discretion approved ${eligible} that ${reason} had escalated for review`;
+  }
+  if (recommendation.kind === 'partial_refund') {
+    return `discretion approved ${formatCents(recommendation.amountCents)} of ${eligible} that ${reason} had escalated; the remainder needs a person`;
+  }
+  if (recommendation.kind === 'exchange') {
+    return `discretion offered an exchange instead of a refund; ${reason} had escalated`;
+  }
+  return `discretion offered store credit instead of a refund; ${reason} had escalated`;
+}
+
 /**
  * What actually gets paid.
  *
- * Only an approval authorises money. A denial pays nothing, and an escalation
- * authorises nothing either: it is a request for a person to look, so putting
- * the eligible figure in the payable field would mean a $700 machine is queued
- * for payment on a decision that a human has not yet made. Whatever consumes
- * `refundAmountCents` is then reading exactly the right thing - money that may
- * leave the till - and the amount a reviewer is looking at is on
- * `eligibleAmountCents` and the trace.
+ * Only an approval authorises money, and a partial refund authorises a reduced
+ * amount. A denial pays nothing, and an escalation authorises nothing either: it
+ * is a request for a person to look, so putting the eligible figure in the payable
+ * field would mean a $700 machine is queued for payment on a decision that a human
+ * has not yet made. Whatever consumes `refundAmountCents` is then reading exactly
+ * the right thing - money that may leave the till - and the amount a reviewer is
+ * looking at is on `eligibleAmountCents` and the trace.
  */
-function amountFor(decision: Decision, input: ResolveInput): number {
-  if (decision !== 'approved') {
-    return 0;
+function amountFor(decision: Decision, input: ResolveInput, partialAmountCents: number | null): number {
+  if (decision === 'approved') {
+    return capToDispute(input);
   }
-  return capToDispute(input);
+  if (decision === 'partial_refund') {
+    const base = capToDispute(input);
+    return partialAmountCents === null ? base : Math.min(partialAmountCents, base);
+  }
+  return 0;
 }
 
 function capToDispute(input: ResolveInput): number {
@@ -290,6 +403,7 @@ function summarise(
   winner: RuleEvaluation | null,
   input: ResolveInput,
   amount: number,
+  discretionApplied: boolean,
 ): string {
   if (winner === null) {
     return `${VERB[decision]}: no policy rule reached a conclusion, so a person must decide.`;
@@ -297,5 +411,8 @@ function summarise(
   const rulePart = `${winner.ruleId} (${winner.policyRef}): ${winner.evidence}`;
   const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
   const orderPart = input.orderId === null ? '' : ` Order ${input.orderId}.`;
-  return `${VERB[decision]} under ${rulePart}${orderPart} ${amountPart}`;
+  const discretionPart = discretionApplied
+    ? ' Softened by the discretion layer within pre-authorised bounds.'
+    : '';
+  return `${VERB[decision]} under ${rulePart}${orderPart} ${amountPart}${discretionPart}`;
 }

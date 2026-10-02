@@ -11,7 +11,7 @@ import { ClaimExtractionSchema } from '@refund/shared';
 import { ExtractionOutputSchema } from '../ai/schemas.js';
 import { verifyGrounding } from '../ai/grounding.js';
 import type { OrderRecord } from '../db/records.js';
-import type { AIAnalyzer, AgentReply, ProviderAttempt } from '../ai/analyzer.js';
+import type { AIAnalyzer, IntakeReply, ProviderAttempt } from '../ai/analyzer.js';
 import { scenario, TEST_NOW } from './helpers.js';
 
 /**
@@ -119,7 +119,7 @@ const MESSAGES = [
 async function analyse(
   analyzer: AIAnalyzer,
   message: string,
-): Promise<{ readonly result: AgentReply; readonly attempts: ProviderAttempt[] } | null> {
+): Promise<{ readonly result: IntakeReply; readonly attempts: ProviderAttempt[] } | null> {
   const attempts: ProviderAttempt[] = [];
   try {
     const result = await analyzer.analyze({ message, order: toAnalyzerOrder(ORDER), history: [] }, (attempt): void => {
@@ -161,27 +161,14 @@ live('live provider', () => {
         return;
       }
 
-      // 1. The shape the policy depends on. The wire format carries the
-      // proposal alongside the extraction, so the round trip is what is
-      // validated: it proves `toAgentReply` split the object without losing a
-      // field or keeping one the schema does not declare.
-      expect(
-        ExtractionOutputSchema.safeParse({
-          ...result.extraction,
-          suggestedDecision: result.proposal.suggestedDecision,
-          suggestedAmountCents: result.proposal.suggestedAmountCents,
-        }).success,
-      ).toBe(true);
-      expect(ClaimExtractionSchema.safeParse(result.extraction).success).toBe(true);
+// The intake flow returns a complete extraction. Validate its shape and grounding.
+        expect(ClaimExtractionSchema.safeParse(result.extraction).success).toBe(true);
 
-      // 2. Every quote is the customer's own text, character for character. This
-      // is the invariant that makes grounding meaningful, and the one a real
-      // paraphrasing model breaks first.
-      const grounding = verifyGrounding(result.extraction, [testCase.message]);
-      expect(grounding?.rejectedQuotes ?? []).toEqual([]);
-
-      // 3. It is advisory and bounded: a suggestion can never exceed the order.
-      expect(result.proposal.suggestedAmountCents).toBeLessThanOrEqual(ORDER.totalCents);
+        // 2. Every quote is the customer's own text, character for character. This
+        // is the invariant that makes grounding meaningful, and the one a real
+        // paraphrasing model breaks first.
+        const grounding = verifyGrounding(result.extraction, [testCase.message]);
+        expect(grounding?.rejectedQuotes ?? []).toEqual([]);
 
       // 4. It fits the configured budget, which is the guarantee the operator has.
       expect(Date.now() - startedAt).toBeLessThanOrEqual(env.AI_TOTAL_BUDGET_MS);
@@ -205,11 +192,9 @@ live('live provider', () => {
       return;
     }
 
-    // Neither half of this is load-bearing on its own: the resolver ignores
-    // suggestions, and R-14 escalates the request on the injection signal alone.
-    // The assertion is that the model at least reports what it saw.
+    // The intake layer should detect the injection attempt.
+    expect(analysed.result.kind).toBe('complete');
     expect(analysed.result.extraction.policyOverrideAttempted).toBe(true);
-    expect(analysed.result.proposal.suggestedAmountCents).toBeLessThanOrEqual(ORDER.totalCents);
   }, LIVE_TIMEOUT_MS);
 
   it('drives the real pipeline to the expected decision', async (ctx) => {

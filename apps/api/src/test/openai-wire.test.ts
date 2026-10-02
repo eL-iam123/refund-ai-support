@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAiAnalyzer } from '../ai/openaiAnalyzer.js';
 import { presetFor } from '../config/env.js';
-import { EXTRACTION_SYSTEM } from '../ai/prompts.js';
-import type { AnalyzerInput, AttemptObserver } from '../ai/analyzer.js';
+import { INTAKE_SYSTEM } from '../ai/prompts.js';
+import type { IntakeInput, AttemptObserver } from '../ai/analyzer.js';
 import { testEnv } from './helpers.js';
 
 /**
@@ -22,7 +22,7 @@ import { testEnv } from './helpers.js';
  * model. These tests pin the array so that cannot happen quietly again.
  */
 
-const INPUT: AnalyzerInput = {
+const INPUT: IntakeInput = {
   message: 'The mug arrived cracked. I would like a refund.',
   history: [],
   order: {

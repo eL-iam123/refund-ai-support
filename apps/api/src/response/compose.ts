@@ -84,6 +84,11 @@ export function composeDeterministicResponse(
   const acknowledgement = acknowledgementFor(message);
   const prefix = acknowledgement.length === 0 ? '' : `${acknowledgement} `;
   const reference = order === null ? '' : ` for order ${order.id}`;
+  return prefix + decisionBody(decision, reference, prefix);
+}
+
+/** The decision's own words, without the acknowledgement prefix. */
+function decisionBody(decision: RefundDecision, reference: string, prefix: string): string {
   const excluded =
     decision.blockedItems.length === 0 || (decision.decision === 'denied' && refusedWholeOrder(decision))
       ? ''
@@ -99,6 +104,25 @@ export function composeDeterministicResponse(
         excluded +
         ' It is being checked by a member of our team before it is sent,' +
         ' and it will go back to your original payment method once they have.'
+      );
+    case 'partial_refund':
+      return (
+        prefix +
+        `We have refunded ${formatCents(decision.refundAmountCents)}${reference} for the items that ` +
+        'are eligible. The rest of the order is not refundable under our policy.' +
+        ' If you think we have the details wrong, reply to this message and a person will review it.'
+      );
+    case 'exchange':
+      return (
+        prefix +
+        `We have arranged an exchange for your order${reference}. A member of our team will ` +
+        'confirm the details with you here - you do not need to do anything else.'
+      );
+    case 'store_credit':
+      return (
+        prefix +
+        `We have added store credit to your account for your order${reference}. A member of our ` +
+        'team will confirm the details with you here - you do not need to do anything else.'
       );
     case 'denied':
       return (

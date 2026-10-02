@@ -118,6 +118,12 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .pill-approved, .badge-approved, .gate-ok { color: var(--ok); background: var(--ok-soft); border-color: #abefc6; }
 .pill-denied, .badge-denied, .gate-error, .flag-warn, .tag-warn { color: var(--no); background: var(--no-soft); border-color: #fecdca; }
 .pill-escalated, .badge-escalated, .gate-note, .tag-scenario { color: var(--wait); background: var(--wait-soft); border-color: #f1d080; }
+/* A partial refund is a payment, so it carries the approval tone; the amount on
+   the line is what says it is not the whole claim. */
+.pill-partial_refund, .badge-partial_refund { color: var(--ok); background: var(--ok-soft); border-color: #abefc6; }
+/* Exchange and store credit resolve the request without moving refund money, so
+   they take the brand tone rather than a payment or a refusal. */
+.pill-exchange, .pill-store_credit, .badge-exchange, .badge-store_credit { color: var(--brand-deep); background: var(--brand-soft); border-color: #ffd3b5; }
 /* A rule that ran and found nothing blocking. Distinct from `approve`: it is not
    a decision about this case, it is the absence of one. */
 .pill-pass { color: var(--ink-faint); background: var(--surface-soft); border-color: var(--line); }

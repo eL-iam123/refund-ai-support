@@ -1,6 +1,7 @@
 import type { Db } from '../db/connection.js';
 import { createAttemptRecorder } from '../db/attemptRecorder.js';
 import type { Env } from '../config/env.js';
+import { discretionConfig } from '../config/env.js';
 import { createAnalyzer } from '../ai/index.js';
 import type { PipelineDeps } from '../orchestrator.js';
 import type { Logger } from '../lib/logger.js';
@@ -43,6 +44,7 @@ export function buildContext(
         analyzer: createAnalyzer(env),
         recordAttempt: createAttemptRecorder(db),
         injectionAction: env.INJECTION_ACTION,
+        discretion: discretionConfig(env),
       },
     log,
     now,
