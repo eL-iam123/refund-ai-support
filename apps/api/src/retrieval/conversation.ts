@@ -74,6 +74,7 @@ export type ChatTurn =
       readonly id: string;
       readonly message: string;
       readonly question: string;
+      readonly itemIds: readonly string[];
       readonly createdAt: string;
     }
   | {
@@ -104,6 +105,7 @@ interface TurnRow {
   readonly decision: string;
   readonly refund_amount_cents: number;
   readonly eligible_item_ids_json: string | null;
+  readonly claim_item_ids_json: string | null;
   readonly created_at: string;
 }
 
@@ -191,7 +193,7 @@ function pushRequests(
 ): void {
   const rows = queryAll<TurnRow>(
     db.prepare(
-      `SELECT id, message, response_text, decision, refund_amount_cents, eligible_item_ids_json, created_at
+      `SELECT id, message, response_text, decision, refund_amount_cents, eligible_item_ids_json, claim_item_ids_json, created_at
          FROM refund_requests
         WHERE customer_id = ? AND order_id IS ?
         ORDER BY created_at DESC, rowid DESC
@@ -228,6 +230,7 @@ function pushDialogue(
         id: turn.id,
         message: turn.customerMessage,
         question: turn.assistantQuestion,
+        itemIds: turn.itemIds,
         createdAt: turn.createdAt,
       },
       // Before the request it led to. In the ask-first flow the question is what
@@ -387,11 +390,10 @@ export function transcriptForOrder(
   now: Date,
   limit: number,
 ): readonly DialogueLine[] {
-  const stray = dialogueLines(db, customerId, null, limit);
   if (orderId === null) {
-    return stray;
+    return dialogueLines(db, customerId, null, limit);
   }
-  const lines: DialogueLine[] = [...stray];
+  const lines: DialogueLine[] = [];
   for (const turn of conversationForOrder(db, customerId, orderId, now, limit)) {
     switch (turn.kind) {
       case 'request':
@@ -454,7 +456,19 @@ function hydrateTurn(row: TurnRow): ChatTurn {
     responseText: row.response_text,
     decision: row.decision,
     refundAmountCents: row.refund_amount_cents,
-    itemIds: row.eligible_item_ids_json === null ? [] : JSON.parse(row.eligible_item_ids_json) as readonly string[],
+    itemIds: parseIds(row.claim_item_ids_json),
     createdAt: row.created_at,
   };
+}
+
+function parseIds(value: string | null): readonly string[] {
+  if (value === null) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.every((id): id is string => typeof id === 'string') ? parsed : [];
+  } catch {
+    return [];
+  }
 }

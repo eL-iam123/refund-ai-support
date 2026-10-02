@@ -12,6 +12,18 @@
 export const DECISIONS = ['approved', 'denied', 'escalated'] as const;
 export type Decision = (typeof DECISIONS)[number];
 
+// --- Handoffs ---------------------------------------------------------------
+
+/**
+ * The `agent_id` of a live takeover no person has claimed yet.
+ *
+ * An escalation raises the takeover with this id and a staff member claiming it
+ * replaces it with their own. Shared so the client can recognise "waiting for a
+ * person" from the id alone, which keeps a new client correct even when it is
+ * talking to a server older than the `unattended` flag.
+ */
+export const AWAITING_AGENT_ID = 'awaiting-agent';
+
 // --- Rules ------------------------------------------------------------------
 
 /**

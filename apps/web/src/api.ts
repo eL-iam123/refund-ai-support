@@ -156,7 +156,13 @@ export interface StaffConversation {
   readonly orderId: string | null;
   readonly lastActivityAt: string;
   readonly activityCount: number;
-  readonly activeHandoff: { readonly id: string; readonly agentId: string; readonly startedAt: string } | null;
+  readonly activeHandoff: {
+    readonly id: string;
+    readonly agentId: string;
+    readonly startedAt: string;
+    /** Still the automatic escalation marker; no person has claimed it yet. */
+    readonly unattended: boolean;
+  } | null;
   /** Refusals the customer is asking a person to look at again. */
   readonly openAppeals: readonly { readonly requestId: string; readonly reason: string; readonly createdAt: string }[];
 }
@@ -196,6 +202,8 @@ export interface HandoffBrief {
   readonly customerName: string;
   readonly orderId: string | null;
   readonly agentId: string | null;
+  /** Live takeover still waiting for a person to claim it. */
+  readonly unattended: boolean;
   readonly since: string | null;
   readonly chatClosed: { readonly closedAt: string; readonly closedBy: string; readonly requestId: string } | null;
   readonly canCloseChat: boolean;
@@ -257,7 +265,7 @@ export const api = {
   }) =>
     post<
       | { request: RefundRequestDto; duplicate?: DuplicateNotice }
-      | { question: string; dialogueId: string }
+      | { question: string; dialogueId: string; itemIds: readonly string[] }
       | ({ received: true } & AgentRoutedReply)
     >('/api/chat/messages', input),
 

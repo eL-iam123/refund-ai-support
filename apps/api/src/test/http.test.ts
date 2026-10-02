@@ -396,6 +396,18 @@ describe('HTTP infrastructure guards', () => {
     }
   });
 
+  it('does not rate limit loopback traffic from the Vite dev proxy', async () => {
+    const localDev = await appHarness(undefined, testEnv({ NODE_ENV: 'development', RATE_LIMIT_MAX: 2 }));
+    try {
+      for (let request = 0; request < 5; request += 1) {
+        expect((await localDev.app.inject({ method: 'GET', url: '/api/health' })).statusCode).toBe(200);
+      }
+    } finally {
+      await localDev.app.close();
+      localDev.db.close();
+    }
+  });
+
   it('maps malformed and oversized request bodies to client errors', async () => {
     const malformed = await app.inject({
       method: 'POST',

@@ -7,7 +7,7 @@ import { findRequestById } from '../../db/requestRepository.js';
 import type { PersistedRequest } from '../../db/records.js';
 import { persistDecision } from '../../db/persistDecision.js';
 import { rowFromDecision } from '../../db/requestRow.js';
-import { recordDialogueTurn } from '../../db/dialogue.js';
+import { pendingDialogueItemIds, recordDialogueTurn } from '../../db/dialogue.js';
 import {
   duplicateResponseText,
   findDuplicateReport,
@@ -21,8 +21,9 @@ import { ESCALATION_AGENT, recordAgentMessage, takeoverForEscalated, type Active
 import { isChatClosed } from '../../db/chatClosures.js';
 import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
-import { findCustomer } from '../../db/orderRepository.js';
+import { findCustomer, findOrder } from '../../db/orderRepository.js';
 import { identifyOrder } from '../../retrieval/identifyOrder.js';
+import { conversationForOrder } from '../../retrieval/conversation.js';
 
 /**
  * POST /api/chat/messages
@@ -48,14 +49,25 @@ async function handleChatMessage(
   reply: FastifyReply,
   ctx: AppContext,
   hub: LiveHub,
-): Promise<HandoffBody | { question: string; dialogueId: string } | { request: RefundRequestDto }> {
+): Promise<HandoffBody | { question: string; dialogueId: string; itemIds: readonly string[] } | { request: RefundRequestDto }> {
   const body = parseChatBody(request, ctx);
   const cookies = request.cookies as Record<string, string | undefined>;
   const session = resolveShopSession(ctx.db, cookies[SESSION_COOKIE], ctx.now());
   if (session === null) {
     throw new HttpError(401, 'unauthorized', 'sign in to start a refund request');
   }
-  const resolved: CreateRefundRequest = { ...body, customerId: session.customerId };
+  const orderIsOwned = body.orderId !== null && findOrder(ctx.db, session.customerId, body.orderId, ctx.now()) !== null;
+  const latestTurn = !orderIsOwned || body.orderId === null
+    ? undefined
+    : conversationForOrder(ctx.db, session.customerId, body.orderId, ctx.now(), 1).at(-1);
+  const pendingScope = orderIsOwned && body.orderId !== null && latestTurn?.kind === 'dialogue'
+    ? pendingDialogueItemIds(ctx.db, session.customerId, body.orderId)
+    : [];
+  const resolved: CreateRefundRequest = {
+    ...body,
+    customerId: session.customerId,
+    itemIds: body.itemIds.length > 0 ? body.itemIds : [...pendingScope],
+  };
   const now = ctx.now();
 
   assertThreadOpen(ctx, resolved, now);
@@ -77,13 +89,14 @@ async function handleChatMessage(
   if (result.stage === 'asked') {
     const turn = recordDialogueTurn(ctx.db, {
       customerId: input.customerId,
-      orderId: null,
+      orderId: result.resolvedOrderId,
       customerMessage: input.message,
       assistantQuestion: result.question,
+      itemIds: result.itemIds,
       now: ctx.now(),
     });
     ctx.log.info({ requestId: input.requestId, question: result.question }, 'chat.asked');
-    return { question: result.question, dialogueId: turn.id };
+    return { question: result.question, dialogueId: turn.id, itemIds: turn.itemIds };
   }
 
   const stored = storeDecided(ctx, input, result);

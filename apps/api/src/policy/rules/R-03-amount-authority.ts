@@ -3,8 +3,11 @@ import { escalate, pass, type PolicyRule } from '../types.js';
 import { formatCents } from '../../lib/money.js';
 
 /**
- * R-03 - amount authority. Evaluated against the *eligible* amount, not the
- * order total, which is what makes R-03b meaningful.
+ * R-03 - amount authority. Evaluated against the *order total*, before
+ * item-level denials are applied, so a large order cannot be split under the
+ * threshold by excluding its expensive lines. The eligible amount is what a
+ * reviewer would authorise, so it is reported alongside; the threshold itself
+ * is a fact about the order, not about which items happen to survive.
  */
 export const R03AmountAuthority: PolicyRule = {
   id: 'R-03',
@@ -13,20 +16,20 @@ export const R03AmountAuthority: PolicyRule = {
   scope: 'order',
   stage: 'fact_gates',
   policyRef: 'REFUND_POLICY.md §4.1',
-  summary: `Refunds above ${formatCents(HUMAN_REVIEW_THRESHOLD_CENTS)} require human review.`,
+  summary: `Refunds against orders over ${formatCents(HUMAN_REVIEW_THRESHOLD_CENTS)} require human review.`,
   evaluate(context) {
-    if (context.eligibleAmountCents === 0) {
-      return pass(this, 'no eligible amount to review');
+    if (context.orderTotalCents === 0) {
+      return pass(this, 'no order total to review');
     }
-    if (context.eligibleAmountCents > HUMAN_REVIEW_THRESHOLD_CENTS) {
+    if (context.orderTotalCents > HUMAN_REVIEW_THRESHOLD_CENTS) {
       return escalate(
         this,
-        `eligible refund of ${formatCents(context.eligibleAmountCents)} exceeds the ${formatCents(HUMAN_REVIEW_THRESHOLD_CENTS)} review threshold`,
+        `order total of ${formatCents(context.orderTotalCents)} exceeds the ${formatCents(HUMAN_REVIEW_THRESHOLD_CENTS)} review threshold`,
       );
     }
     return pass(
       this,
-      `eligible refund of ${formatCents(context.eligibleAmountCents)} is within the review threshold`,
+      `order total of ${formatCents(context.orderTotalCents)} is within the review threshold`,
     );
   },
 };

@@ -129,10 +129,10 @@ const SECTIONS: readonly SectionSpec[] = [
   },
   {
     number: '4.2',
-    title: 'Threshold re-check on eligible remainder',
+    title: 'Eligible remainder after item-level denials',
     body: [
-      'When item-level clauses (§2.1, §2.2) reduced the eligible amount below the order total, and that reduction is exactly what brought the request under the review threshold of §4.1, the reduction is recorded explicitly in the audit trail.',
-      'This clause never decides anything. It exists so the outcome is legible to an auditor instead of looking accidental.',
+      'When item-level clauses (§2.1, §2.2, §2.4) reduce the eligible amount below the order total, the reduction is recorded explicitly in the audit trail.',
+      'The §4.1 review threshold is evaluated against the order total, before those denials are applied, so it is not affected by them. This clause never decides anything. It exists so the eligible remainder is legible to an auditor instead of looking accidental.',
     ],
     ruleId: 'R-03b',
   },

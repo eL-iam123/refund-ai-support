@@ -38,6 +38,7 @@ export function rowFromDecision(args: {
     messageFingerprint: messageFingerprint(message),
     ...decisionColumns(result.decision),
     responseText: result.responseText,
+    claimItemIdsJson: JSON.stringify(result.itemIds),
     extractionJson: toJson(result.extraction),
     groundingJson: toJson(result.grounding),
     injectionJson: JSON.stringify(result.injection),
@@ -62,6 +63,7 @@ function decisionColumns(decision: RefundDecision): Pick<
   | 'traceJson'
   | 'overridesJson'
   | 'eligibleItemIdsJson'
+  | 'claimItemIdsJson'
   | 'blockedItemsJson'
 > {
   return {

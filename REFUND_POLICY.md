@@ -107,21 +107,21 @@ These clauses bound what the automated flow may approve on its own. They cannot 
 | --- | --- | --- | --- | --- |
 | `R-03` | fact_gates | order | approval-authority | escalate, pass |
 
-_Refunds above $500.00 require human review._
+_Refunds against orders over $500.00 require human review._
 
 A refund of more than $500.00 against a single order requires human review. This is checked against the **order total**, before item-level denials are applied, so an order cannot be split to evade it.
 
-## §4.2 — Threshold re-check on eligible remainder
+## §4.2 — Eligible remainder after item-level denials
 
 | Rule | Stage | Scope | Class | May return |
 | --- | --- | --- | --- | --- |
 | `R-03b` | fact_gates | order | approval-authority | escalate, pass |
 
-_Records that the amount threshold was re-evaluated after item-level denials._
+_Records the eligible amount after item-level denials reduce it below the order total._
 
-When item-level clauses (§2.1, §2.2) reduced the eligible amount below the order total, and that reduction is exactly what brought the request under the review threshold of §4.1, the reduction is recorded explicitly in the audit trail.
+When item-level clauses (§2.1, §2.2, §2.4) reduce the eligible amount below the order total, the reduction is recorded explicitly in the audit trail.
 
-This clause never decides anything. It exists so the outcome is legible to an auditor instead of looking accidental.
+The §4.1 review threshold is evaluated against the order total, before those denials are applied, so it is not affected by them. This clause never decides anything. It exists so the eligible remainder is legible to an auditor instead of looking accidental.
 
 # §5 — Reason rules
 
@@ -256,7 +256,7 @@ Rule classes are constrained so that authority cannot leak. An **eligibility** r
 | §6.2 | `R-08` | Refund abuse signals | risk | fact_gates |
 | §6.4 | `R-13` | Order reference cannot be resolved | risk | fact_gates |
 | §4.1 | `R-03` | Human review above threshold | approval-authority | fact_gates |
-| §4.2 | `R-03b` | Threshold re-check on eligible remainder | approval-authority | fact_gates |
+| §4.2 | `R-03b` | Eligible remainder after item-level denials | approval-authority | fact_gates |
 | §3.1 | `R-01b` | Standard refund window | approval-authority | reason_rules |
 | §5.1 | `R-04` | Damaged or incorrect goods | eligibility | reason_rules |
 | §6.3 | `R-09` | Conflicting customer and fulfilment evidence | risk | reason_rules |

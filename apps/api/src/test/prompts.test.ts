@@ -58,4 +58,20 @@ describe('the agent prompt', () => {
     expect(user).toContain('No order has been identified yet.');
     expect(user).not.toContain('has already been identified');
   });
+
+  it('always shows the order total, even when the rest of the order is withheld', () => {
+    const user = buildAgentUser('The whole order is wrong.', ORDER, [], false);
+    expect(user).toContain('ORD-1');
+    expect(user).toContain('total $42.00');
+    expect(user).toContain('Item details withheld at this stage.');
+  });
+
+  it('withholds item names and prices unless order facts are shared', () => {
+    const withheld = buildAgentUser('It is damaged.', ORDER, [], false);
+    expect(withheld).not.toContain('Ceramic mug');
+
+    const shared = buildAgentUser('It is damaged.', ORDER, [], true);
+    expect(shared).toContain('Ceramic mug');
+    expect(shared).toContain('total $42.00');
+  });
 });

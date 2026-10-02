@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { openMemoryDatabase } from '../db/connection.js';
+import { openMemoryDatabase, type Db } from '../db/connection.js';
 import {
   ALLOWED_OUTCOMES,
   PRECEDENCE,
@@ -17,7 +17,10 @@ import { verifyGrounding } from '../ai/grounding.js';
 import { parseJson } from '../ai/json.js';
 import { scanForInjection } from '../security/injection.js';
 import { composeDeterministicResponse } from '../response/compose.js';
-import { scenarioHarness, scenario, decided } from './helpers.js';
+import { scenarioHarness, scenario, decided, TEST_NOW } from './helpers.js';
+import { daysAgo } from '../db/seed.js';
+import { R03AmountAuthority } from '../policy/rules/R-03-amount-authority.js';
+import type { PolicyContext } from '../policy/types.js';
 import type { OrderRecord } from '../db/records.js';
 
 /**
@@ -453,6 +456,69 @@ describe('customer-facing text', () => {
 
     expect(result.responseText).toContain('Espresso Machine');
     expect(result.responseText).toContain('$200.00');
+  });
+});
+
+/**
+ * The exact shape of the live bug: a $710 order whose final-sale and
+ * subscription lines are denied leaves only $420 eligible. §4.1 reviews the
+ * order total, so the request must still go to a person rather than pay $420
+ * automatically.
+ */
+function seedLargeMixedOrder(db: Db): void {
+  db.prepare(
+    `INSERT INTO customers (id, name, email, tier, account_created_at, prior_refund_count, refund_requests_last_30d)
+     VALUES ('CUST-THRESHOLD', 'Threshold Buyer', 'threshold@example.com', 'standard', ?, 0, 0)`,
+  ).run(daysAgo(TEST_NOW, 400).toISOString());
+  db.prepare(
+    `INSERT INTO orders (id, customer_id, placed_at, delivered_at, status, payment_state,
+       refunded_cents, is_subscription, tracking_status, signed_by_customer, condition_at_delivery)
+     VALUES ('ORD-THRESHOLD', 'CUST-THRESHOLD', ?, ?, 'delivered', 'settled', 0, 0, 'delivered', 1, NULL)`,
+  ).run(daysAgo(TEST_NOW, 5).toISOString(), daysAgo(TEST_NOW, 4).toISOString());
+  const insertItem = db.prepare(
+    `INSERT INTO order_items (id, order_id, name, unit_price_cents, quantity, final_sale, digital, downloaded, is_subscription)
+     VALUES (?, 'ORD-THRESHOLD', ?, ?, 1, ?, 0, 0, ?)`,
+  );
+  insertItem.run('ITM-THR-A', 'Meridian Wool Coat', 30000, 1, 0);
+  insertItem.run('ITM-THR-B', 'Cloud Storage Annual Plan', 10000, 0, 1);
+  insertItem.run('ITM-THR-C', 'Harbour Stoneware Mug', 20000, 0, 0);
+  insertItem.run('ITM-THR-D', 'Aurora Desk Lamp', 20000, 0, 0);
+}
+
+describe('amount authority (R-03)', () => {
+  const contextWith = (orderTotalCents: number, eligibleAmountCents: number): PolicyContext =>
+    ({ orderTotalCents, eligibleAmountCents, blockedItems: [] }) as unknown as PolicyContext;
+
+  it('escalates on the order total even when item denials leave a smaller eligible amount', () => {
+    expect(R03AmountAuthority.evaluate(contextWith(71000, 42000)).outcome).toBe('escalate');
+  });
+
+  it('passes when the order total is within the review threshold', () => {
+    expect(R03AmountAuthority.evaluate(contextWith(45000, 20000)).outcome).toBe('pass');
+  });
+
+  it('passes when there is no order total to review', () => {
+    expect(R03AmountAuthority.evaluate(contextWith(0, 0)).outcome).toBe('pass');
+  });
+
+  it('sends a large order to a person before the model is ever consulted', async () => {
+    const h = scenarioHarness();
+    seedLargeMixedOrder(h.db);
+    const result = decided(await h.run({
+      requestId: 'REQ-THRESHOLD',
+      customerId: 'CUST-THRESHOLD',
+      orderId: 'ORD-THRESHOLD',
+      message: 'The mug arrived broken and shattered.',
+    }));
+
+    expect(result.decision.decision).toBe('escalated');
+    expect(result.decision.refundAmountCents).toBe(0);
+    expect(result.decision.eligibleAmountCents).toBe(40000);
+    expect(result.decision.policyRef).toBe('REFUND_POLICY.md §4.1');
+    expect(result.decision.trace.find((evaluation) => evaluation.ruleId === 'R-03')?.outcome).toBe(
+      'escalate',
+    );
+    expect(result.llmCalled).toBe(false);
   });
 });
 

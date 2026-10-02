@@ -48,29 +48,18 @@ export function ChatPage(): ReactNode {
     () => orderList.find((candidate) => candidate.id === selected.orderId) ?? null,
     [orderList, selected.orderId],
   );
-  const [reportedItemIds, setReportedItemIds] = useState<readonly string[]>([]);
-  const ticks = useItemTicks(order, reportedItemIds);
-
   const chat = useConversation(
     customerId,
     selected.orderId,
     complaintFor(handoff?.issue ?? null),
-    ticks.itemIds,
   );
-
-  useEffect(() => {
-    const next = [...new Set(
-      chat.turns.flatMap((turn) =>
-        turn.kind === 'replied' || turn.kind === 'stored' ? turn.result.itemIds ?? [] : [],
-      ),
-    )];
-    setReportedItemIds((current) => {
-      if (current.length === next.length && current.every((id, index) => id === next[index])) {
-        return current;
-      }
-      return next;
-    });
-  }, [chat.turns]);
+  const reportedItemIds = useMemo(
+    () => [...new Set(chat.turns.flatMap((turn) =>
+      turn.kind === 'replied' || turn.kind === 'stored' ? turn.result.itemIds ?? [] : [],
+    ))],
+    [chat.turns],
+  );
+  const ticks = useItemTicks(order, reportedItemIds);
   useShopSocket(customerId, chat.refresh);
 
   return (
@@ -83,14 +72,12 @@ export function ChatPage(): ReactNode {
           selected={selected.orderId}
           onSelect={selected.select}
           order={order}
-          ticks={ticks}
-          reportedItemIds={reportedItemIds}
         />
         <AssistantStatus />
         <PolicyNote />
       </aside>
 
-      <ChatThread chat={chat} />
+      <ChatThread chat={chat} order={order} ticks={ticks} reportedItemIds={reportedItemIds} />
     </div>
   );
 }
@@ -112,6 +99,7 @@ export function ChatPage(): ReactNode {
 interface ItemTicks {
   readonly itemIds: readonly string[];
   readonly toggle: (itemId: string) => void;
+  readonly select: (itemId: string) => void;
 }
 
 function useItemTicks(order: ShopOrder | null, reportedItemIds: readonly string[] = []): ItemTicks {
@@ -131,7 +119,9 @@ function useItemTicks(order: ShopOrder | null, reportedItemIds: readonly string[
     [reportedItemIds],
   );
 
-  return { itemIds, toggle };
+  const select = useCallback((itemId: string) => setChosen([itemId]), []);
+
+  return { itemIds, toggle, select };
 }
 
 /**
@@ -143,50 +133,54 @@ function useItemTicks(order: ShopOrder | null, reportedItemIds: readonly string[
  * makes by ticking nothing, and silence about it is how a basket-wide claim
  * happens by accident.
  */
-function ItemPicker({ order, ticks, reportedItemIds }: { order: ShopOrder; ticks: ItemTicks; reportedItemIds: readonly string[] }): ReactNode {
-  if (order.items.length < 2) {
-    return null;
+/**
+ * Whether the composer must open the picker before it can send.
+ *
+ * Only for a multi-line order with nothing ticked and no question waiting. The
+ * `some` is the part that matters: once every line carries a decision or an open
+ * escalation the picker has nothing selectable, so forcing it open stranded the
+ * customer on a list of disabled buttons - with the follow-up they had typed,
+ * the appeal, the photo and the handoff reply all sitting behind a control they
+ * could never get past. With nothing to pick, the message is a whole-order one.
+ */
+function mustPickItem(
+  order: ShopOrder | null,
+  selectedItemIds: readonly string[],
+  clarificationItemIds: readonly string[],
+  reportedItemIds: readonly string[],
+): boolean {
+  if (order === null || order.items.length <= 1) {
+    return false;
   }
+  if (selectedItemIds.length > 0 || clarificationItemIds.length > 0) {
+    return false;
+  }
+  return order.items.some((item) => !reportedItemIds.includes(item.itemId));
+}
 
-  const alreadyReported = new Set(reportedItemIds);
-  const disabledCount = order.items.filter((item) => alreadyReported.has(item.itemId)).length;
+/** The lines the last assistant question asked about, or none if it did not ask. */
+function clarificationFrom(turn: Turn | undefined): readonly string[] {
+  return turn?.kind === 'asked' || turn?.kind === 'storedAsk' ? turn.itemIds : [];
+}
 
-  return (
-    <div className="item-picker">
-      <span className="label">Which item is this about?</span>
-      <ul className="lines">
-        {order.items.map((item) => {
-          const reported = alreadyReported.has(item.itemId);
-          return (
-            <li key={item.itemId}>
-              <label className={reported ? 'muted' : undefined}>
-                <input
-                  type="checkbox"
-                  checked={ticks.itemIds.includes(item.itemId)}
-                  disabled={reported}
-                  onChange={() => ticks.toggle(item.itemId)}
-                  title={reported ? 'This item was already reported in this chat. Choose another item or tell me about a different problem.' : undefined}
-                />
-                <span>
-                  {item.name}
-                  {item.quantity > 1 ? ` x${item.quantity}` : ''}
-                  {reported ? ' (already reported)' : ''}
-                </span>
-                <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
-              </label>
-            </li>
-          );
-        })}
-      </ul>
-      <p className="muted small">
-        {disabledCount > 0
-          ? 'This item was already reported in this chat. Please choose a different item from the order, or tell me about a different problem. I’m here to help with anything else.'
-          : ticks.itemIds.length === 0
-            ? 'Tick what went wrong and only that is treated as the claim. With nothing ticked, the whole order is.'
-            : `${ticks.itemIds.length} ticked. Only those are treated as the claim.`}
-      </p>
-    </div>
-  );
+/**
+ * Send from the composer, opening the picker first only when a line must be
+ * chosen. Pulled out of the component so its branch is not counted against the
+ * thread's own complexity budget.
+ */
+function composerSend(
+  chat: Conversation,
+  order: ShopOrder | null,
+  selectedItemIds: readonly string[],
+  clarificationItemIds: readonly string[],
+  reportedItemIds: readonly string[],
+  openPicker: () => void,
+): Promise<void> {
+  if (mustPickItem(order, selectedItemIds, clarificationItemIds, reportedItemIds)) {
+    openPicker();
+    return Promise.resolve();
+  }
+  return chat.send(selectedItemIds.length > 0 ? selectedItemIds : clarificationItemIds);
 }
 
 /**
@@ -250,8 +244,19 @@ async function handleAppeal(deps: ChatThreadDeps, requestId: string): Promise<vo
   }
 }
 
-function ChatThread({ chat }: { chat: Conversation }): ReactNode {
+function ChatThread({
+  chat,
+  order,
+  ticks,
+  reportedItemIds,
+}: {
+  chat: Conversation;
+  order: ShopOrder | null;
+  ticks: ItemTicks;
+  reportedItemIds: readonly string[];
+}): ReactNode {
   const logRef = useRef<HTMLDivElement>(null);
+  const [showItemPicker, setShowItemPicker] = useState(false);
 
   useEffect(() => {
     const log = logRef.current;
@@ -265,6 +270,9 @@ function ChatThread({ chat }: { chat: Conversation }): ReactNode {
   const [appealState, setAppealState] = useState<{ requestId: string; reason: string; submitting: boolean } | null>(null);
 
   const deps: ChatThreadDeps = { chat, inHandoff, appealState, setAppealState };
+  const clarificationItemIds = clarificationFrom(chat.turns.at(-1));
+  const sendFromComposer = (): Promise<void> =>
+    composerSend(chat, order, ticks.itemIds, clarificationItemIds, reportedItemIds, () => setShowItemPicker(true));
 
   return (
     <section className="chat-main">
@@ -277,6 +285,14 @@ function ChatThread({ chat }: { chat: Conversation }): ReactNode {
         {chat.turns.map((turn) => (
           <TurnView key={turn.id} turn={turn} {...(turn.kind === 'replied' && turn.result.decision === 'denied' ? { onAppeal: (id: string) => handleAppeal(deps, id) } : {})} />
         ))}
+        <ItemPicker
+          open={showItemPicker}
+          order={order}
+          reportedItemIds={reportedItemIds}
+          ticks={ticks}
+          chat={chat}
+          onClose={() => setShowItemPicker(false)}
+        />
       </div>
 
       <Composer
@@ -285,13 +301,69 @@ function ChatThread({ chat }: { chat: Conversation }): ReactNode {
         blocked={chat.blocked}
         closed={chat.closed}
         onDraft={chat.setDraft}
-        onSend={chat.send}
+        onSend={sendFromComposer}
         inHandoff={inHandoff}
         onAttachPhoto={() => handleAttachPhoto(deps)}
       />
       {appealState && <p className="muted small">Sending your appeal…</p>}
       {chat.error.length > 0 ? <ErrorNote error={chat.error} /> : null}
     </section>
+  );
+}
+
+function ItemPicker({
+  open,
+  order,
+  reportedItemIds,
+  ticks,
+  chat,
+  onClose,
+}: {
+  open: boolean;
+  order: ShopOrder | null;
+  reportedItemIds: readonly string[];
+  ticks: ItemTicks;
+  chat: Conversation;
+  onClose: () => void;
+}): ReactNode {
+  if (!open || order === null) {
+    return null;
+  }
+  const alreadyReported = new Set(reportedItemIds);
+  const selectable = order.items.filter((item) => !alreadyReported.has(item.itemId));
+  const choose = (itemId: string): void => {
+    onClose();
+    if (itemId.length > 0) {
+      ticks.select(itemId);
+    }
+    void chat.send(itemId.length > 0 ? [itemId] : []);
+  };
+  return (
+    <div className="bubble-them item-choice-prompt" role="group" aria-label="Choose the item you need help with">
+      <p>Which item is this about? Choose one from this order, and I’ll check the policy for that item.</p>
+      <ul className="item-choice-list">
+        {order.items.map((item) => {
+          const reported = alreadyReported.has(item.itemId);
+          return (
+            <li key={item.itemId}>
+              <button type="button" className="item-choice" disabled={reported} onClick={() => choose(item.itemId)}>
+                <span>{item.name}{item.quantity > 1 ? ` ×${item.quantity}` : ''}{reported ? ' · already reported' : ''}</span>
+                <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {/* The escape hatch. Every line already decided or escalated leaves the
+          list above entirely disabled; without this the picker is a dead end and
+          the message the customer typed can never be sent. */}
+      {selectable.length === 0 ? (
+        <button type="button" className="item-choice" onClick={() => choose('')}>
+          <span>None of these - send it as a whole-order message</span>
+        </button>
+      ) : null}
+      <p className="muted small">Previously reported items are unavailable here. You can report a different issue about them in a new conversation if needed.</p>
+    </div>
   );
 }
 
@@ -372,16 +444,12 @@ function OrderScope({
   selected,
   onSelect,
   order,
-  ticks,
-  reportedItemIds,
 }: {
   orders: readonly ShopOrder[];
   loading: boolean;
   selected: string | null;
   onSelect: (id: string) => void;
   order: ShopOrder | null;
-  ticks: ItemTicks;
-  reportedItemIds: readonly string[];
 }): ReactNode {
   if (loading) {
     return <p className="muted small">Loading your orders…</p>;
@@ -414,7 +482,6 @@ function OrderScope({
         </select>
       </label>
       {order !== null ? <OrderFacts order={order} /> : null}
-      {order !== null ? <ItemPicker order={order} ticks={ticks} reportedItemIds={reportedItemIds} /> : null}
     </div>
   );
 }

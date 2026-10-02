@@ -142,11 +142,12 @@ const EnvSchema = z.object({
   AI_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
   AI_MAX_TOKENS: z.coerce.number().int().positive().default(700),
   /**
-   * Withhold order facts from the prompt. S-18 is the reason this exists: a model
-   * that is shown the order total can produce a "verbatim" quote containing
-   * figures the customer never wrote, so the quote check passes and grounding
-   * proves nothing. The default is therefore the stronger guarantee - the model
-   * sees only the customer's own words - and sharing is an explicit opt-in.
+   * Withhold the order's item detail from the prompt. The order total is always
+   * shared - it is the figure §4.1 reviews and the one the customer means by
+   * "the whole order" - but item names and prices are hidden by default. S-18 is
+   * the reason: the fewer order facts the model reads, the harder it is for a
+   * fabricated quote to look like the customer's own words. Sharing the full
+   * breakdown is an explicit opt-in.
    */
   AI_SHARE_ORDER_FACTS: z
     .enum(['true', 'false', '1', '0'])
@@ -419,7 +420,16 @@ export function readEnv(envFile?: string): Env {
 }
 
 function parseEnv(source: NodeJS.ProcessEnv): Env {
-  const parsed = EnvSchema.safeParse(source);
+  // A Vite development session sends a burst of ordinary API reads through one
+  // proxy/IP (and React StrictMode deliberately replays mount effects). Keep a
+  // real limiter in development, but give that local workflow a larger default;
+  // production and test retain the tighter 30/minute default. Explicit config
+  // always wins.
+  const withDevelopmentLimit =
+    source.RATE_LIMIT_MAX === undefined && (source.NODE_ENV ?? 'development') === 'development'
+      ? { ...source, RATE_LIMIT_MAX: '300' }
+      : source;
+  const parsed = EnvSchema.safeParse(withDevelopmentLimit);
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)

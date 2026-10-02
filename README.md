@@ -451,7 +451,7 @@ Nothing else needs setting to run. Every variable below has a default.
 | `INJECTION_ACTION` | `deny` | `deny` \| `escalate`. What a detected policy-override attempt does |
 | `MAX_MESSAGE_LENGTH` | `4000` | Enforced on the request, not by the shared schema — it is a token-cost control, so it belongs to the deployment |
 | `DUPLICATE_WINDOW_HOURS` | `72` | How far back a repeat of the same complaint counts as the same report. 72h spans a weekend, which is the commonest case: sent Friday, heard nothing, sent again Monday |
-| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW` | `30` / `1 minute` | Applied across HTTP routes, including health and authentication endpoints; the in-memory limiter is per process |
+| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW` | `300` / `1 minute` in development; `30` / `1 minute` otherwise | Applied across HTTP routes, including health and authentication endpoints; the in-memory limiter is per process. An explicit `RATE_LIMIT_MAX` always wins. |
 | `DATABASE_PATH` | `./data/refund.sqlite` | |
 | `CORS_ORIGIN` | localhost:5173,8080 | Comma-separated |
 | `API_PORT` / `API_HOST` / `LOG_LEVEL` / `NODE_ENV` | `4000` / `0.0.0.0` / `info` / `development` | |

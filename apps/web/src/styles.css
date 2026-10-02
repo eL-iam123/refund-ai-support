@@ -136,6 +136,11 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .item-picker .lines label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; cursor: pointer; }
 .item-picker input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--brand); }
 .item-picker .lines li:has(input:checked) { font-weight: 700; }
+.item-choice-prompt { display: grid; gap: 10px; max-width: min(88%, 620px); }
+.item-choice-list { display: grid; gap: 7px; }
+.item-choice { width: 100%; min-height: 46px; justify-content: space-between; color: var(--ink); background: #fff; border-color: var(--line-strong); text-align: left; }
+.item-choice:hover:not(:disabled) { color: var(--brand-deep); background: var(--brand-soft); border-color: var(--brand); }
+.item-choice:disabled { color: var(--ink-faint); background: #f5f5f5; }
 .orders { display: grid; gap: 16px; }
 .issue-picker, .override-form { display: grid; gap: 12px; margin-top: 16px; padding: 16px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; }
 .issue-list { display: grid; gap: 7px; }

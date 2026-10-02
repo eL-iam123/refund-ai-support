@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { RefundRequestDto } from '@refund/shared';
 import { api, describe } from './api';
 import { shopApi, type ChatTurn as StoredTurn } from './shop/api';
@@ -71,6 +71,7 @@ export type Turn =
       readonly id: string;
       readonly text: string;
       readonly question: string;
+      readonly itemIds: readonly string[];
     }
   | {
       /** A turn loaded from storage rather than decided in this session. */
@@ -85,6 +86,7 @@ export type Turn =
       readonly id: string;
       readonly text: string;
       readonly question: string;
+      readonly itemIds: readonly string[];
     }
   | {
       /**
@@ -138,7 +140,7 @@ export interface Conversation {
   /** True while an order's stored history is loading. */
   readonly loading: boolean;
   readonly setDraft: (next: string) => void;
-  readonly send: () => Promise<void>;
+  readonly send: (itemIds?: readonly string[]) => Promise<void>;
   /** Re-reads the stored thread: the socket tells us something changed. */
   readonly refresh: () => void;
 }
@@ -292,7 +294,6 @@ export function useConversation(
   customerId: string | null,
   orderId: string | null,
   initialDraft = '',
-  itemIds: readonly string[] = [],
 ): Conversation {
   const stored = useStoredThread(customerId, orderId);
   const live = useLiveTurns(orderId);
@@ -308,14 +309,7 @@ export function useConversation(
     : reasonBlocked(customerId, orderId);
   const turns = merge(stored.turns, live.turns);
 
-  // A stable id list per send. `itemIds` is an array rebuilt on every render of
-  // the picker, so it cannot be a dependency of `send` directly without
-  // re-creating this callback - and, worse, without the callback that closes over
-  // one render's ticks being the one that fires.
-  const ticked = itemIds.join(',');
-  const selectedIds = useMemo(() => (ticked === '' ? [] : ticked.split(',')), [ticked]);
-
-  const send = useCallback(async (): Promise<void> => {
+  const send = useCallback(async (selectedIds: readonly string[] = []): Promise<void> => {
     const message = draft.trim();
     if (message.length === 0 || customerId === null || orderId === null || busy || stored.closed) {
       return;
@@ -340,14 +334,14 @@ export function useConversation(
 
     try {
       const reply = await api.sendMessage({ customerId, orderId, message, itemIds: selectedIds });
-      settleReply(orderId, localId, message, reply, live);
+      settleReply(orderId, localId, message, selectedIds, reply, live);
     } catch (cause: unknown) {
       setError(describe(cause));
       live.abandon(orderId, localId);
     } finally {
       setBusy(false);
     }
-  }, [busy, customerId, draft, live, orderId, selectedIds, stored.closed, turns]);
+  }, [busy, customerId, draft, live, orderId, stored.closed, turns]);
 
   return {
     turns,
@@ -379,6 +373,7 @@ function settleReply(
   orderId: string,
   localId: string,
   message: string,
+  itemIds: readonly string[],
   reply: Awaited<ReturnType<typeof api.sendMessage>>,
   live: { settle: (order: string, id: string, turn: Turn) => void },
 ): void {
@@ -388,6 +383,7 @@ function settleReply(
       id: reply.dialogueId,
       text: message,
       question: reply.question,
+      itemIds: reply.itemIds,
     });
     return;
   }
@@ -411,7 +407,7 @@ function settleReply(
       decision: request.decision.decision,
       refundAmountCents: request.decision.refundAmountCents,
       responseText: request.responseText,
-      itemIds: request.decision.eligibleItemIds,
+      itemIds: itemIds.length > 0 ? itemIds : request.decision.eligibleItemIds,
     },
     duplicate: duplicate ?? null,
   });
@@ -431,7 +427,7 @@ function toTurn(stored: StoredTurn): Turn {
     return { kind: 'update', id: stored.id, text: stored.body, ofRequestId: stored.requestId };
   }
   if (stored.kind === 'dialogue') {
-    return { kind: 'storedAsk', id: stored.id, text: stored.message, question: stored.question };
+    return { kind: 'storedAsk', id: stored.id, text: stored.message, question: stored.question, itemIds: stored.itemIds };
   }
   if (stored.kind === 'agent') {
     return {

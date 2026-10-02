@@ -24,6 +24,7 @@ export interface DialogueTurn {
   readonly orderId: string | null;
   readonly customerMessage: string;
   readonly assistantQuestion: string;
+  readonly itemIds: readonly string[];
 }
 
 interface DialogueRow {
@@ -33,6 +34,7 @@ interface DialogueRow {
   readonly order_id: string | null;
   readonly customer_message: string;
   readonly assistant_question: string;
+  readonly item_ids_json: string;
 }
 
 export interface RecordDialogueInput {
@@ -40,6 +42,7 @@ export interface RecordDialogueInput {
   readonly orderId: string | null;
   readonly customerMessage: string;
   readonly assistantQuestion: string;
+  readonly itemIds: readonly string[];
   readonly now: Date;
 }
 
@@ -51,10 +54,11 @@ export function recordDialogueTurn(db: Db, input: RecordDialogueInput): Dialogue
     orderId: input.orderId,
     customerMessage: input.customerMessage,
     assistantQuestion: input.assistantQuestion,
+    itemIds: input.itemIds,
   };
   db.prepare(
-    `INSERT INTO shop_dialogue (id, created_at, customer_id, order_id, customer_message, assistant_question)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO shop_dialogue (id, created_at, customer_id, order_id, customer_message, assistant_question, item_ids_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     turn.id,
     turn.createdAt,
@@ -62,6 +66,7 @@ export function recordDialogueTurn(db: Db, input: RecordDialogueInput): Dialogue
     turn.orderId,
     turn.customerMessage,
     turn.assistantQuestion,
+    JSON.stringify(turn.itemIds),
   );
   return turn;
 }
@@ -81,7 +86,7 @@ export function listDialogueForOrder(
 ): readonly DialogueTurn[] {
   const rows = queryAll<DialogueRow>(
     db.prepare(
-      `SELECT id, created_at, customer_id, order_id, customer_message, assistant_question
+      `SELECT id, created_at, customer_id, order_id, customer_message, assistant_question, item_ids_json
          FROM shop_dialogue
         WHERE customer_id = ? AND order_id IS ?
         ORDER BY created_at DESC, rowid DESC
@@ -111,8 +116,29 @@ export function adoptDialogueToOrder(db: Db, customerId: string, orderId: string
   db.prepare(
     `UPDATE shop_dialogue
         SET order_id = ?
-      WHERE customer_id = ? AND order_id IS NULL`,
+      WHERE id = (
+        SELECT id FROM shop_dialogue
+         WHERE customer_id = ? AND order_id IS NULL
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT 1
+      )`,
   ).run(orderId, customerId);
+}
+
+/** The final thread turn, when it is an unanswered assistant clarification. */
+export function pendingDialogueItemIds(
+  db: Db,
+  customerId: string,
+  orderId: string,
+): readonly string[] {
+  const row = db.prepare(
+    `SELECT item_ids_json
+       FROM shop_dialogue
+      WHERE customer_id = ? AND order_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT 1`,
+  ).get(customerId, orderId) as { item_ids_json: string } | undefined;
+  return row === undefined ? [] : parseItemIds(row.item_ids_json);
 }
 
 function hydrate(row: DialogueRow): DialogueTurn {
@@ -123,5 +149,15 @@ function hydrate(row: DialogueRow): DialogueTurn {
     orderId: row.order_id,
     customerMessage: row.customer_message,
     assistantQuestion: row.assistant_question,
+    itemIds: parseItemIds(row.item_ids_json),
   };
+}
+
+function parseItemIds(value: string): readonly string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.every((id): id is string => typeof id === 'string') ? parsed : [];
+  } catch {
+    return [];
+  }
 }

@@ -119,7 +119,7 @@ export function buildAgentUser(
     history.length === 0
       ? '(none)'
       : history.map((line) => `${line.role === 'customer' ? 'Customer' : 'You'}: ${line.text}`).join('\n');
-  const facts = shareOrderFacts ? describeOrder(order) : 'Order details withheld at this stage.';
+  const facts = shareOrderFacts ? describeOrder(order) : describeOrderTotal(order);
   const identified =
     order === null
       ? 'No order has been identified yet. Ask for the product name or a way to find the order only if the claim cannot proceed without it.'
@@ -138,6 +138,21 @@ ${identified}
 Choose one tool call: ask_question to ask for the single missing detail, or decide_claim
 to submit the claim now. Remember: JSON only, and evidenceQuotes in a claim must be copied
 verbatim from a customer message above.`;
+}
+
+/**
+ * The order total is always shared, even when the rest of the order is
+ * withheld: it is the one fact the customer is talking about when they ask for
+ * "the whole order", and the figure §4.1 reviews. It cannot launder a fabricated
+ * quote into evidence, because grounding checks quotes against the customer's
+ * own messages and never against the prompt. Item names and prices stay withheld
+ * unless `AI_SHARE_ORDER_FACTS` is on.
+ */
+function describeOrderTotal(order: AnalyzerOrder | null): string {
+  if (order === null) {
+    return 'Order details withheld at this stage.';
+  }
+  return `Order ${order.id}, total ${formatCents(order.totalCents)}. Item details withheld at this stage.`;
 }
 
 function describeOrder(order: AnalyzerOrder | null): string {

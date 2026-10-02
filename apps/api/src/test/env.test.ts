@@ -15,7 +15,7 @@ import { missingApiKeyFor, readEnv, PLACEHOLDER_SECRET } from '../config/env.js'
  * has to be restored deliberately.
  */
 
-const KEYS = ['API_PORT', 'AI_PROVIDER', 'GROQ_API_KEY', 'ADMIN_API_SECRET', 'LOG_LEVEL'] as const;
+const KEYS = ['API_PORT', 'AI_PROVIDER', 'GROQ_API_KEY', 'ADMIN_API_SECRET', 'LOG_LEVEL', 'NODE_ENV', 'RATE_LIMIT_MAX'] as const;
 
 describe('environment precedence', () => {
   let saved: Map<string, string | undefined>;
@@ -57,6 +57,19 @@ describe('environment precedence', () => {
 
     expect(env.API_PORT).toBe(4000);
     expect(env.GROQ_API_KEY).toBe('from-the-file');
+    expect(env.RATE_LIMIT_MAX).toBe(300);
+  });
+
+  it('keeps the lower rate-limit default outside development and honors explicit values', () => {
+    for (const key of KEYS) {
+      delete process.env[key];
+    }
+    process.env.NODE_ENV = 'test';
+    expect(readEnv(envFile).RATE_LIMIT_MAX).toBe(30);
+
+    process.env.NODE_ENV = 'development';
+    process.env.RATE_LIMIT_MAX = '42';
+    expect(readEnv(envFile).RATE_LIMIT_MAX).toBe(42);
   });
 
   it('lets a real environment variable override the file', () => {

@@ -257,6 +257,17 @@ function identifyFromHistory(
   }
 
   const result = matchOrders(orders, message);
+  // A message that names products from different orders is a choice the
+  // customer has to make, even if one product has an extra matching modifier
+  // such as "floor". A weighted keyword lead must not erase an explicitly
+  // mentioned second product: ask which order instead of attaching the whole
+  // complaint to the stronger lexical match.
+  if (result.matches.length > 1) {
+    return unresolved(
+      result.matches.length,
+      `message describes products from multiple orders: ${result.matches.map((match) => match.order.id).join(', ')} - needs clarification`,
+    );
+  }
   const match = confidentMatch(result);
   return {
     order: match?.order ?? null,
@@ -316,9 +327,10 @@ export function disputeCeiling(
   }
   const disputed = new Set(identification.items.map((item) => item.id));
   const inScope = eligibleItems.filter((item) => disputed.has(item.id));
-  if (inScope.length === 0) {
-    return null;
-  }
+  // A named item that is blocked by policy has a zero ceiling, not a missing
+  // ceiling. Treating it as null would widen "the final-sale coat" to every
+  // other eligible line in the basket - the exact cross-item refund failure the
+  // picker is meant to prevent.
   return inScope.reduce((total, item) => total + item.unitPriceCents * item.quantity, 0);
 }
 

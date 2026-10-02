@@ -35,6 +35,7 @@ export interface NewRequestRow {
   readonly traceJson: string;
   readonly overridesJson: string;
   readonly eligibleItemIdsJson: string;
+  readonly claimItemIdsJson?: string;
   readonly blockedItemsJson: string;
   readonly responseText: string;
   readonly extractionJson: string | null;
@@ -50,13 +51,13 @@ const INSERT_SQL = `
 INSERT INTO refund_requests (
   id, created_at, customer_id, order_id, message, message_sha256, message_fingerprint,
   decision, refund_amount_cents, eligible_amount_cents, summary, policy_ref,
-  trace_json, overrides_json, eligible_item_ids_json, blocked_items_json,
+  trace_json, overrides_json, eligible_item_ids_json, claim_item_ids_json, blocked_items_json,
   response_text, extraction_json, grounding_json, injection_json,
   ai_mode, llm_called, timings_json, scenario_id
 ) VALUES (
   @id, @createdAt, @customerId, @orderId, @message, @messageSha256, @messageFingerprint,
   @decision, @refundAmountCents, @eligibleAmountCents, @summary, @policyRef,
-  @traceJson, @overridesJson, @eligibleItemIdsJson, @blockedItemsJson,
+  @traceJson, @overridesJson, @eligibleItemIdsJson, @claimItemIdsJson, @blockedItemsJson,
   @responseText, @extractionJson, @groundingJson, @injectionJson,
   @aiMode, @llmCalled, @timingsJson, @scenarioId
 )`;
@@ -66,13 +67,17 @@ export function insertRequest(db: Db, row: NewRequestRow): void {
   // decision first reaches the database, so it is the last point at which an
   // incoherent pair can be refused instead of stored.
   assertDecisionCoherent(row.decision, row.refundAmountCents);
-  db.prepare(INSERT_SQL).run({ ...row, llmCalled: row.llmCalled ? 1 : 0 });
+  db.prepare(INSERT_SQL).run({
+    ...row,
+    claimItemIdsJson: row.claimItemIdsJson ?? '[]',
+    llmCalled: row.llmCalled ? 1 : 0,
+  });
 }
 
 const SELECT_COLUMNS = `
   id, created_at, customer_id, order_id, message, message_sha256,
   decision, refund_amount_cents, eligible_amount_cents, summary, policy_ref,
-  trace_json, overrides_json, eligible_item_ids_json, blocked_items_json,
+  trace_json, overrides_json, eligible_item_ids_json, claim_item_ids_json, blocked_items_json,
   response_text, extraction_json, grounding_json, injection_json,
   ai_mode, llm_called, timings_json, overridden_by, override_note, scenario_id,
   (SELECT name FROM customers WHERE customers.id = refund_requests.customer_id) AS customer_name
@@ -95,6 +100,7 @@ interface RequestRow {
   readonly trace_json: string;
   readonly overrides_json: string;
   readonly eligible_item_ids_json: string;
+  readonly claim_item_ids_json: string;
   readonly blocked_items_json: string;
   readonly response_text: string;
   readonly extraction_json: string | null;
@@ -124,6 +130,7 @@ function hydrate(row: RequestRow): PersistedRequest {
     traceJson: row.trace_json,
     overridesJson: row.overrides_json,
     eligibleItemIdsJson: row.eligible_item_ids_json,
+    claimItemIdsJson: row.claim_item_ids_json,
     blockedItemsJson: row.blocked_items_json,
     responseText: row.response_text,
     extractionJson: row.extraction_json,

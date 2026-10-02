@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AWAITING_AGENT_ID } from '@refund/shared';
 import type { Db } from './connection.js';
 import { queryAll } from './sql.js';
 import { openAppealsForCustomer, type Appeal } from './appeals.js';
@@ -33,7 +34,7 @@ import { latestRequestForThread } from './requestRepository.js';
  * keys on the presence of a handoff; only this id says the conversation is
  * unattended.
  */
-export const ESCALATION_AGENT = 'awaiting-agent';
+export const ESCALATION_AGENT = AWAITING_AGENT_ID;
 
 export interface ActiveHandoff {
   readonly id: string;
@@ -41,6 +42,13 @@ export interface ActiveHandoff {
   readonly orderId: string | null;
   readonly agentId: string;
   readonly startedAt: string;
+  /**
+   * True while the takeover is still the automatic escalation marker and no
+   * person has claimed it. The staff console keys its verbs on this rather than
+   * on `agentId`, so "waiting for a person" does not render as "a colleague has
+   * taken over" and offer a reply box that the message route then refuses.
+   */
+  readonly unattended: boolean;
 }
 
 export interface AgentMessage {
@@ -106,6 +114,7 @@ export function startHandoff(db: Db, input: StartHandoffInput): ActiveHandoff {
     orderId: input.orderId,
     agentId: input.agentId,
     startedAt: input.now.toISOString(),
+    unattended: input.agentId === ESCALATION_AGENT,
   };
   db.prepare(
     `INSERT INTO handoffs (id, customer_id, order_id, agent_id, started_at, ended_at)
@@ -358,6 +367,7 @@ function toActive(row: HandoffRow): ActiveHandoff {
     orderId: row.order_id,
     agentId: row.agent_id,
     startedAt: row.started_at,
+    unattended: row.agent_id === ESCALATION_AGENT,
   };
 }
 

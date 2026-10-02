@@ -19,13 +19,30 @@ import { cookiesOf, shopHarness, signIn, type SignedIn } from './shop-helpers.js
  * rather than by reading the SQL and agreeing with it.
  */
 
-interface Turn {
-  readonly requestId: string;
-  readonly message: string;
-  readonly responseText: string;
-  readonly decision: string;
-  readonly refundAmountCents: number;
-  readonly itemIds: readonly string[];
+type Turn =
+  | {
+      readonly kind: 'request';
+      readonly requestId: string;
+      readonly message: string;
+      readonly responseText: string;
+      readonly decision: string;
+      readonly refundAmountCents: number;
+      readonly itemIds: readonly string[];
+    }
+  | { readonly kind: 'dialogue'; readonly id: string; readonly message: string; readonly question: string; readonly itemIds: readonly string[] }
+  | { readonly kind: 'update'; readonly id: string; readonly body: string; readonly requestId: string }
+  | { readonly kind: 'agent'; readonly id: string; readonly body: string; readonly sender: 'agent' | 'customer' }
+  | { readonly kind: 'handoff'; readonly id: string; readonly body: string };
+
+function messageOf(turn: Turn): string {
+  if (turn.kind === 'request' || turn.kind === 'dialogue') {
+    return turn.message;
+  }
+  return turn.kind === 'agent' && turn.sender === 'customer' ? turn.body : '';
+}
+
+function itemIdsOf(turn: Turn | undefined): readonly string[] {
+  return turn?.kind === 'request' || turn?.kind === 'dialogue' ? turn.itemIds : [];
 }
 
 let harness: AppHarness | null = null;
@@ -61,9 +78,11 @@ describe('a greeting is not a request', () => {
     expect(reply.question).toBeDefined();
     expect(reply.question).toContain('what happened');
 
-    // An ask is stored as dialogue, not as a decision the pipeline can pay out,
-    // so the thread holds no request and no person is paged for a greeting.
-    expect(await threadFor(harness, session, session.orderId)).toHaveLength(0);
+    // An ask is visible in the order's persisted thread, but it is not a
+    // decision the pipeline can pay out and no person is paged for a greeting.
+    const history = await threadFor(harness, session, session.orderId);
+    expect(history).toHaveLength(1);
+    expect(history[0]?.kind).toBe('dialogue');
   });
 
   it('answers a greeting even against a provider that would claim it', async () => {
@@ -168,16 +187,16 @@ describe('per-order chat history', () => {
 
     // Oldest first. A thread read newest-first puts the answer to the first
     // question below every question asked after it was already answered.
-    expect(first[0]?.message).toContain('cracked shade');
-    expect(first[1]?.message).toContain('still cracked');
-    expect(second[0]?.message).toContain('zip');
+    expect(first[0]).toMatchObject({ kind: 'request', message: expect.stringContaining('cracked shade') });
+    expect(first[1]).toMatchObject({ kind: 'request', message: expect.stringContaining('still cracked') });
+    expect(second[0]).toMatchObject({ kind: 'request', message: expect.stringContaining('zip') });
 
     // The part that actually matters: neither thread contains the other's turns.
     for (const turn of first) {
-      expect(turn.message).not.toContain('coat');
+      expect(messageOf(turn)).not.toContain('coat');
     }
     for (const turn of second) {
-      expect(turn.message).not.toContain('lamp');
+      expect(messageOf(turn)).not.toContain('lamp');
     }
   });
 
@@ -189,8 +208,118 @@ describe('per-order chat history', () => {
 
     const history = await threadFor(harness, session, session.orderId);
     expect(history).toHaveLength(1);
-    expect(Array.isArray(history[0]?.itemIds)).toBe(true);
-    expect(history[0]?.itemIds?.length).toBeGreaterThan(0);
+    expect(Array.isArray(itemIdsOf(history[0]))).toBe(true);
+    expect(itemIdsOf(history[0]).length).toBeGreaterThan(0);
+  });
+
+  it('keeps the selected line through a clarification even when the answer only says “it”', async () => {
+    harness = await shopHarness({
+      kind: 'ask',
+      question: 'What happened to the item?',
+      then: {
+        intent: 'refund',
+        reason: 'damaged',
+        condition: 'damaged',
+        confidence: 0.9,
+        evidenceQuotes: ['I want to return this package'],
+      },
+    });
+    const session = await signIn(harness, 'sam@shop.demo');
+    const checkout = await harness.app.inject({
+      method: 'POST',
+      url: '/api/shop/checkout',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        lines: [
+          { productId: 'PRD-LAMP-01', quantity: 1 },
+          { productId: 'PRD-JACKET-01', quantity: 1 },
+          { productId: 'PRD-COFFEE-01', quantity: 1 },
+        ],
+      },
+    });
+    const order = checkout.json<{ order: { id: string; items: readonly { itemId: string; name: string }[] } }>().order;
+    const coat = order.items.find((item) => item.name.includes('Meridian Wool Coat'));
+    const lamp = order.items.find((item) => item.name.includes('Aurora Desk Lamp'));
+    expect(coat).toBeDefined();
+    expect(lamp).toBeDefined();
+    if (coat === undefined) {
+      throw new Error('checkout did not include the final-sale coat');
+    }
+    if (lamp === undefined) {
+      throw new Error('checkout did not include the desk lamp');
+    }
+
+    const first = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        customerId: session.customerId,
+        orderId: order.id,
+        message: 'I want to return this package',
+        itemIds: [lamp.itemId],
+      },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json<{ itemIds: readonly string[] }>().itemIds).toEqual([lamp.itemId]);
+
+    const answer = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        customerId: session.customerId,
+        orderId: order.id,
+        message: 'It arrived damaged and broken in two',
+      },
+    });
+    expect(answer.statusCode, answer.body).toBe(201);
+    const request = answer.json<{ request: { decision: { decision: string; refundAmountCents: number } } }>().request;
+    expect(request.decision.decision).toBe('approved');
+    expect(request.decision.refundAmountCents).toBe(12900);
+
+    const history = await threadFor(harness, session, order.id);
+    expect(itemIdsOf(history.at(-1))).toEqual([lamp.itemId]);
+    expect(history.some((turn) => turn.kind === 'dialogue' && turn.itemIds.includes(lamp.itemId))).toBe(true);
+  });
+
+  it('does not refund an eligible line when the selected line is final sale', async () => {
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+    const checkout = await harness.app.inject({
+      method: 'POST',
+      url: '/api/shop/checkout',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        lines: [
+          { productId: 'PRD-LAMP-01', quantity: 1 },
+          { productId: 'PRD-JACKET-01', quantity: 1 },
+        ],
+      },
+    });
+    const order = checkout.json<{ order: { id: string; items: readonly { itemId: string; name: string }[] } }>().order;
+    const coat = order.items.find((item) => item.name.includes('Meridian Wool Coat'));
+    expect(coat).toBeDefined();
+    if (coat === undefined) {
+      throw new Error('checkout did not include the final-sale coat');
+    }
+
+    const response = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        customerId: session.customerId,
+        orderId: order.id,
+        message: 'I want to return this package',
+        itemIds: [coat.itemId],
+      },
+    });
+
+    expect(response.statusCode, response.body).toBe(201);
+    const request = response.json<{ request: { decision: { decision: string; refundAmountCents: number } } }>().request;
+    expect(request.decision.decision).toBe('denied');
+    expect(request.decision.refundAmountCents).toBe(0);
   });
 
   it('keeps an escalated order from swallowing the next one', async () => {
@@ -236,7 +365,9 @@ describe('per-order chat history', () => {
 
     const before = await threadFor(harness, session, session.orderId);
     const after = await threadFor(harness, session, session.orderId);
-    expect(after.map((turn) => turn.requestId)).toEqual(before.map((turn) => turn.requestId));
+    expect(after.filter((turn) => turn.kind === 'request').map((turn) => turn.requestId)).toEqual(
+      before.filter((turn) => turn.kind === 'request').map((turn) => turn.requestId),
+    );
 
     // Resending the same complaint is still suppressed, not decided twice, and
     // the suppressed message does not appear in the thread a second time.

@@ -55,20 +55,19 @@ function seedHistory(db: Db): void {
   insertItem.run('ITM-D3-A', HEADPHONE_ORDER, 'Studio Headphones', 32000);
 }
 
-const QUESTION = 'Which of your orders is that about?';
+const ORDER_CLARIFICATION = /which order .* about/i;
 
 describe('the ask-then-decide loop', () => {
   let harness: AppHarness;
   let cookie: string;
 
   beforeEach(async () => {
-    // Not the heuristic analyzer: a real fake that asks exactly once, then
-    // submits the claim once the customer has spoken again. The claim grounds on
-    // the customer's *first* message, which only the dialogue context makes
-    // possible - pinning the "the model may quote an earlier turn" contract.
+    // The pipeline deterministically asks which order before invoking this
+    // analyzer. Once the customer identifies a product, the fake analyzer sees
+    // that persisted context and submits a claim grounded in the earlier turn.
     harness = await appHarness({
       kind: 'ask',
-      question: QUESTION,
+      question: 'What happened to the headphones?',
       then: {
         intent: 'refund',
         reason: 'damaged',
@@ -112,13 +111,16 @@ describe('the ask-then-decide loop', () => {
     // A question is a 200 with no request row: nothing was decided, and nothing
     // may be persisted as though it was.
     expect(response.statusCode).toBe(200);
-    const body = response.json<{ question: string; dialogueId: string }>();
-    expect(body.question).toBe(QUESTION);
+    const body = response.json<{ question: string; dialogueId: string; itemIds: readonly string[] }>();
+    expect(body.question).toMatch(ORDER_CLARIFICATION);
     expect(body.dialogueId).toMatch(/^DLG-/);
+    expect(body.itemIds).toEqual([]);
     expect(requestCount(harness.db)).toBe(before);
 
-    // The dialogue half is real storage, not a by-product of the reply: the turn
-    // survives with its order unresolved, which is the only honest place for it.
+    // It remains unresolved until the customer identifies which order they mean.
+    const unresolved = listDialogueForOrder(harness.db, CUSTOMER, null, 20);
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0]?.assistantQuestion).toMatch(ORDER_CLARIFICATION);
     const dialogue = listDialogueForOrder(harness.db, CUSTOMER, HEADPHONE_ORDER, 20);
     expect(dialogue).toHaveLength(0);
   });
@@ -128,7 +130,7 @@ describe('the ask-then-decide loop', () => {
 
     const response = await post("It's the headphones, they arrived broken.");
 
-    expect(response.statusCode).toBe(201);
+    expect(response.statusCode, response.body).toBe(201);
     const { request } = response.json<{ request: { orderId: string; decision: { decision: string; refundAmountCents: number }; grounding: { grounded: boolean; verifiedQuotes: readonly string[] } | null } }>();
     expect(request.orderId).toBe(HEADPHONE_ORDER);
     expect(request.decision.decision).toBe('approved');
@@ -149,7 +151,7 @@ describe('the ask-then-decide loop', () => {
     const dialogue = listDialogueForOrder(harness.db, CUSTOMER, HEADPHONE_ORDER, 20);
     expect(dialogue).toHaveLength(1);
     expect(dialogue[0]?.customerMessage).toBe('The floor lamp and the headphones both arrived broken.');
-    expect(dialogue[0]?.assistantQuestion).toBe(QUESTION);
+    expect(dialogue[0]?.assistantQuestion).toMatch(ORDER_CLARIFICATION);
 
     const thread = conversationForOrder(harness.db, CUSTOMER, HEADPHONE_ORDER, TEST_NOW, 20);
     expect(thread.map((turn) => turn.kind)).toEqual(['dialogue', 'request']);

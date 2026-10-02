@@ -30,6 +30,12 @@ export interface HandoffBrief {
   readonly orderId: string | null;
   /** Who is on the line, when a takeover is live. */
   readonly agentId: string | null;
+  /**
+   * True while a takeover is live but no person has claimed it. `state` alone
+   * cannot say this: it is `handed_off` for both the automatic escalation marker
+   * and a real agent, and the console must not offer a reply box for the former.
+   */
+  readonly unattended: boolean;
   readonly since: string | null;
   readonly chatClosed: { readonly closedAt: string; readonly closedBy: string; readonly requestId: string } | null;
   readonly canCloseChat: boolean;
@@ -80,6 +86,7 @@ export function buildHandoffBrief(db: Db, customerId: string, orderId: string | 
     customerName: customerNameFor(nameRow),
     orderId,
     agentId: agentIdFor(active),
+    unattended: active?.unattended ?? false,
     since: sinceFor(active),
     chatClosed: closure === null ? null : { closedAt: closure.closedAt, closedBy: closure.closedBy, requestId: closure.requestId },
     canCloseChat,

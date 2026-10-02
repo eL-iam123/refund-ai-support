@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Bot, FileText, Headset, Inbox, MessageSquare, Send, User, Scale, ShieldAlert } from 'lucide-react';
-import type { RuleOutcome } from '@refund/shared';
+import { AWAITING_AGENT_ID, type RuleOutcome } from '@refund/shared';
 import {
   api,
   describe,
@@ -276,11 +276,20 @@ const OUTCOME_PILL: Record<RuleOutcome, string> = {
   pass: 'pill-pass',
 };
 
-/** What the brief's `state` means, in words an agent would say out loud. */
-const STATE_TEXT: Record<HandoffBrief['state'], string> = {
-  ai: 'Assistant is handling this',
-  handed_off: 'A colleague has taken over',
-};
+/**
+ * What the brief's `state` means, in words an agent would say out loud.
+ *
+ * `state` is only `ai` or `handed_off`, and `handed_off` covers both an escalated
+ * thread nobody owns yet and one a colleague holds. `unattended` is what tells
+ * them apart, so the one line an agent reads first does not claim a colleague is
+ * on a case that is in fact still waiting for one.
+ */
+function stateText(brief: HandoffBrief): string {
+  if (brief.state === 'ai') {
+    return 'Assistant is handling this';
+  }
+  return isUnattended(brief) ? 'Waiting for a person to pick this up' : 'A colleague has taken over';
+}
 
 /** The choose-one list: every conversation that moved in the last 24 hours. */
 function ConversationList({
@@ -335,6 +344,42 @@ function ConversationList({
   );
 }
 
+/**
+ * Whether a live handoff is still waiting for a person.
+ *
+ * The server sends `unattended`, but falling back to the `awaiting-agent` id
+ * keeps the console honest against a server that predates the flag: without the
+ * fallback the field is `undefined`, `!undefined` is true, and every waiting
+ * escalation silently reverts to showing a reply box it will refuse.
+ */
+function isUnattended(handoff: {
+  readonly agentId: string | null;
+  readonly unattended?: boolean;
+}): boolean {
+  return handoff.unattended ?? handoff.agentId === AWAITING_AGENT_ID;
+}
+
+/**
+ * The handoff pill: "waiting" while nobody has claimed the escalated thread,
+ * "taken over" once a colleague actually holds it. Flattening both to
+ * "taken over" told every agent a case was being handled when it was still
+ * sitting in the queue for one.
+ */
+function HandoffPill({ handoff }: { handoff: NonNullable<StaffConversation['activeHandoff']> }): ReactNode {
+  if (isUnattended(handoff)) {
+    return (
+      <span className="pill pill-escalated" title="Waiting for a person to pick this up">
+        waiting
+      </span>
+    );
+  }
+  return (
+    <span className="pill pill-escalated" title="A colleague has taken this over">
+      taken over
+    </span>
+  );
+}
+
 function renderRows(
   rows: readonly StaffConversation[] | null,
   selected: StaffConversation | null,
@@ -369,9 +414,7 @@ function renderRows(
             <span className="live-row-name">{row.customerName}</span>
             {row.activeHandoff !== null || row.openAppeals.length > 0 ? (
               <span className="live-row-status">
-                {row.activeHandoff !== null ? (
-                  <span className="pill pill-escalated" title="A colleague has taken this over">taken over</span>
-                ) : null}
+                {row.activeHandoff !== null ? <HandoffPill handoff={row.activeHandoff} /> : null}
                 {row.openAppeals.length > 0 ? (
                   <span className="pill pill-denied" title={row.openAppeals.map((a) => a.reason).join('; ')}>
                     {row.openAppeals.length} appeal{row.openAppeals.length > 1 ? 's' : ''}
@@ -421,6 +464,11 @@ function TakeoverConsole({
 }): ReactNode {
   const [errand, setErrand] = useState<string>('');
   const active = conversation.activeHandoff;
+  // An escalation raises a takeover before any person claims it. Treating that
+  // marker as "a colleague has taken over" showed the hand-back button and the
+  // reply box to every agent, and both verbs then refused with "claim this
+  // conversation before replying". Only a claimed takeover is actually held.
+  const takenOver = active !== null && !isUnattended(active);
 
   const run = async (verb: () => Promise<unknown>): Promise<void> => {
     setErrand('');
@@ -436,14 +484,14 @@ function TakeoverConsole({
     <div className="case-viewer">
       <CaseHead
         brief={brief}
-        takenOver={active !== null}
+        takenOver={takenOver}
         onTakeOver={() => void run(() => api.staffTakeOver(conversation.customerId, conversation.orderId))}
         onHandBack={() => void run(() => api.staffHandBack(conversation.customerId))}
       />
       {errand.length > 0 ? <p className="error">{errand}</p> : null}
       <div className="case-thread">
         <ThreadView thread={thread} />
-        {active !== null ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
+        {takenOver ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
       </div>
     </div>
   );
@@ -486,7 +534,7 @@ function CaseHead({
           </div>
           <div className="kv-pair">
             <dt>Status</dt>
-            <dd>{STATE_TEXT[brief.state]}</dd>
+            <dd>{stateText(brief)}</dd>
           </div>
         </dl>
       </div>

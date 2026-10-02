@@ -84,6 +84,12 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     global: false,
     max: options.env.RATE_LIMIT_MAX,
     timeWindow: options.env.RATE_LIMIT_WINDOW,
+    // Vite proxies every browser request through one local connection, so the
+    // API sees them all as the same IP. In dev, Fast Refresh and StrictMode
+    // replay ordinary page loads and quickly exhaust the shared limit. Exempt
+    // only loopback callers, and only in NODE_ENV=development; remote dev
+    // clients, tests and every production request remain rate limited.
+    allowList: (request) => isDevelopmentLoopback(options.env.NODE_ENV, request.ip),
   });
   let enforceRateLimit: ReturnType<typeof app.rateLimit> | null = null;
   app.addHook('onRequest', (request, reply) => {
@@ -124,6 +130,13 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
   registerNotFound(app, options.staticDir);
   return app;
+}
+
+function isDevelopmentLoopback(nodeEnv: Env['NODE_ENV'], ip: string): boolean {
+  if (nodeEnv !== 'development') {
+    return false;
+  }
+  return ip === '::1' || ip === '::ffff:127.0.0.1' || /^127(?:\.\d{1,3}){3}$/.test(ip);
 }
 
 /**

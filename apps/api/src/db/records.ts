@@ -63,6 +63,7 @@ export interface PersistedRequest {
   readonly traceJson: string;
   readonly overridesJson: string;
   readonly eligibleItemIdsJson: string;
+  readonly claimItemIdsJson: string;
   readonly blockedItemsJson: string;
   readonly responseText: string;
   readonly extractionJson: string | null;

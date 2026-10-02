@@ -262,9 +262,17 @@ describe('the live takeover console', () => {
       headers: { authorization: agent() },
     });
     const listedBefore = beforeClaim
-      .json<{ conversations: readonly { customerId: string; activeHandoff: { agentId: string } | null }[] }>()
+      .json<{
+        conversations: readonly {
+          customerId: string;
+          activeHandoff: { agentId: string; unattended: boolean } | null;
+        }[];
+      }>()
       .conversations.find((row) => row.customerId === session.customerId);
     expect(listedBefore?.activeHandoff?.agentId).toBe('awaiting-agent');
+    // The console must be able to tell "waiting for a person" from "a colleague
+    // has taken over"; both are `handed_off`, and only this flag separates them.
+    expect(listedBefore?.activeHandoff?.unattended).toBe(true);
 
     const claim = await app.inject({
       method: 'POST',
@@ -293,8 +301,9 @@ describe('the live takeover console', () => {
       url: `/api/staff/conversation?customerId=${encodeURIComponent(session.customerId)}&orderId=${encodeURIComponent(session.orderId)}`,
       headers: { authorization: agent() },
     });
-    const brief = opened.json<{ brief: { state: string; agentId: string | null } }>().brief;
+    const brief = opened.json<{ brief: { state: string; agentId: string | null; unattended: boolean } }>().brief;
     expect(brief.agentId).toBe('test-staff');
+    expect(brief.unattended).toBe(false);
     expect(brief.state).not.toBe('ai');
   });
 
@@ -378,6 +387,17 @@ describe('the live takeover console', () => {
     // Non-delivery escalates, raising the unattended takeover.
     const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
     expect(escalated.decision).toBe('escalated');
+
+    // The case file says nobody holds it yet, so the console shows the claim verb
+    // rather than a reply box that the message route would then refuse.
+    const openedBeforeClaim = await app.inject({
+      method: 'GET',
+      url: `/api/staff/conversation?customerId=${encodeURIComponent(session.customerId)}&orderId=${encodeURIComponent(session.orderId)}`,
+      headers: { authorization: agent() },
+    });
+    const beforeBrief = openedBeforeClaim.json<{ brief: { state: string; unattended: boolean } }>().brief;
+    expect(beforeBrief.state).toBe('handed_off');
+    expect(beforeBrief.unattended).toBe(true);
 
     const routed = await app.inject({
       method: 'POST',

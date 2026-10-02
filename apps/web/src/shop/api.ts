@@ -234,7 +234,7 @@ export type ChatTurn =
       readonly responseText: string;
       /**
        * The refund decision vocabulary, declared locally for the reason above.
-       * `pass` is deliberately absent: it is an order-status value, not something a
+      * `pass` is deliberately absent: it is an order-status value, not something a
        * refund request can be decided as, and a chat turn can only ever be one of
        * these three.
        */
@@ -248,6 +248,7 @@ export type ChatTurn =
       readonly id: string;
       readonly message: string;
       readonly question: string;
+      readonly itemIds: readonly string[];
       readonly createdAt: string;
     }
   | {

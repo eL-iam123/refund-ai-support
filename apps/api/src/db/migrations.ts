@@ -620,6 +620,26 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 15,
+    name: 'shop_dialogue.item_ids_json',
+    up: (db) => {
+      if (!hasTable(db, 'shop_dialogue') || hasColumn(db, 'shop_dialogue', 'item_ids_json')) {
+        return;
+      }
+      db.exec("ALTER TABLE shop_dialogue ADD COLUMN item_ids_json TEXT NOT NULL DEFAULT '[]'");
+    },
+  },
+  {
+    version: 16,
+    name: 'refund_requests.claim_item_ids_json',
+    up: (db) => {
+      if (!hasTable(db, 'refund_requests') || hasColumn(db, 'refund_requests', 'claim_item_ids_json')) {
+        return;
+      }
+      db.exec("ALTER TABLE refund_requests ADD COLUMN claim_item_ids_json TEXT NOT NULL DEFAULT '[]'");
+    },
+  },
 ];
 
 /**

@@ -113,6 +113,7 @@ export type ProcessResult =
       readonly customer: CustomerRecord;
       readonly order: OrderRecord | null;
       readonly resolvedOrderId: string | null;
+      readonly itemIds: readonly string[];
       readonly injection: InjectionScan;
       readonly llmCalled: boolean;
       readonly aiMode: string;
@@ -127,6 +128,7 @@ export type ProcessResult =
       readonly grounding: GroundingResult | null;
       readonly injection: InjectionScan;
       readonly responseText: string;
+      readonly itemIds: readonly string[];
       readonly llmCalled: boolean;
       readonly aiMode: string;
       readonly timings: readonly StageTiming[];
@@ -175,6 +177,13 @@ export async function processRefundRequest(
   const intake = runIntake(db, input, deps.injectionAction, log);
   const retrieval = retrieveOrder(db, input, intake, log);
 
+  // Unresolved-order clarifications belong to the order the customer just
+  // identified. Attach them before the model reads history so their answer is
+  // grounded in the right thread and cannot leak into every order on the account.
+  if (retrieval.order !== null) {
+    adoptDialogueToOrder(db, input.customerId, retrieval.order.id);
+  }
+
   // The clarify turn, before the fact gates. Its guards are its whole safety:
   // unresolved order, a real analyzer to continue the conversation, no
   // injection attempt, and at least one order to clarify against. Without all
@@ -183,10 +192,19 @@ export async function processRefundRequest(
   const mode = `${deps.analyzer.label} (${deps.analyzer.model})`;
   const clarification = clarifyOrder(retrieval.found, deps.analyzer, intake.injection, log);
   if (clarification !== null) {
-    return askedResult(clarification, retrieval.order, intake, false, mode, log);
+    return askedResult(clarification, retrieval.order, retrieval.found.items.map((item) => item.id), intake, false, mode, log);
   }
 
-  const gates = runFactGates(retrieval.context);
+  const gates = runFactGates(
+    retrieval.context,
+    // Only the lines the customer actually ticked can terminate the request at
+    // the gate. A keyword match in the message is the looser, older signal:
+    // letting it deny would refuse a whole mixed basket for merely naming a
+    // subscription or final-sale line, which is an adjustment (S-17), not a
+    // verdict. Those same matches still cap an approval through the dispute
+    // ceiling, so nothing is widened by ignoring them here.
+    input.itemIds,
+  );
   log.record(
     'fact_gates',
     gates.terminal
@@ -196,7 +214,7 @@ export async function processRefundRequest(
 
   const analysis = await analyseRequest(db, deps, input, gates, retrieval, intake, observer, log);
   if (analysis.outcome === 'question') {
-    return askedResult(analysis.question, retrieval.order, intake, true, mode, log);
+    return askedResult(analysis.question, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log);
   }
 
   const reasonEvaluations = runReasonRules(retrieval.context, gates, analysis, log);
@@ -211,13 +229,6 @@ export async function processRefundRequest(
   log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
 
   const responseText = composeReply(decision, retrieval.order, input.message, log);
-
-  // An unresolved-order question was answered; its dialogue belongs to the
-  // order it resolved to. Adoption is a display-and-context concern only - the
-  // decision above is what it is either way.
-  if (retrieval.order !== null) {
-    adoptDialogueToOrder(db, input.customerId, retrieval.order.id);
-  }
 
   return {
     stage: 'decided',
@@ -234,6 +245,7 @@ export async function processRefundRequest(
     aiMode: mode,
     timings: log.all(),
     resolvedOrderId: retrieval.order?.id ?? null,
+    itemIds: retrieval.found.items.map((item) => item.id),
   };
 }
 
@@ -267,6 +279,7 @@ function analyseRequest(
 function askedResult(
   question: string,
   order: OrderRecord | null,
+  itemIds: readonly string[],
   intake: Intake,
   llmCalled: boolean,
   aiMode: string,
@@ -278,6 +291,7 @@ function askedResult(
     customer: intake.customer,
     order,
     resolvedOrderId: order?.id ?? null,
+    itemIds,
     injection: intake.injection,
     llmCalled,
     aiMode,
