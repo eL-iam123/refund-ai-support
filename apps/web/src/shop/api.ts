@@ -1,17 +1,15 @@
 /**
  * The storefront's view of the API.
  *
- * Two things here are load-bearing rather than incidental.
- *
- * Every call sends `credentials: 'include'`. The session lives in an httpOnly
- * cookie, so without it the server sees an anonymous visitor and the shopper's
- * orders vanish - which reads as a bug in the shop rather than a missing header.
- *
  * Product types are declared locally instead of imported from `@refund/shared`.
  * The storefront is a separate deployable that depends on the shop API alone;
  * coupling it to the refund engine's types would drag its decision vocabulary
- * into a page that has no business knowing it.
+ * into a page that has no business knowing it. The transport is the shared one in
+ * `httpClient`, so the session cookie rides on every call here as it does in the
+ * staff console.
  */
+
+import { request, post } from '../httpClient';
 
 export interface Product {
   readonly id: string;
@@ -76,43 +74,6 @@ export interface RefundRequest {
 export interface CartLineInput {
   readonly productId: string;
   readonly quantity: number;
-}
-
-export class ShopApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'ShopApiError';
-  }
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    credentials: 'include',
-    headers: { 'content-type': 'application/json', ...init?.headers },
-  });
-
-  if (!response.ok) {
-    let code = 'http_error';
-    let message = `request failed with status ${response.status}`;
-    try {
-      const envelope = (await response.json()) as { error?: string; message?: string };
-      code = envelope.error ?? code;
-      message = envelope.message ?? message;
-    } catch {
-      // A non-JSON body still has to render as something readable.
-    }
-    throw new ShopApiError(response.status, code, message);
-  }
-  return (await response.json()) as T;
-}
-
-function post<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, { method: 'POST', body: JSON.stringify(body) });
 }
 
 export const shopApi = {

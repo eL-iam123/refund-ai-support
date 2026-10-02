@@ -351,17 +351,27 @@ export function applyHumanOverride(
   // override that merely changed the decision must not leave the old amount
   // live on the row. An approval re-derives the full eligible amount; a partial
   // refund carries the amount the admin named, defaulting to the eligible figure.
-  const amount = decision === 'approved'
-    ? eligibleAmountCents
-    : decision === 'partial_refund'
-      ? (amountCents ?? eligibleAmountCents)
-      : 0;
+  const amount = overrideAmount(decision, eligibleAmountCents, amountCents);
   assertDecisionCoherent(decision, amount);
   db.prepare(
     `UPDATE refund_requests
         SET decision = ?, refund_amount_cents = ?, overridden_by = ?, override_note = ?
       WHERE id = ?`,
   ).run(decision, amount, agentId, note, id);
+}
+
+function overrideAmount(
+  decision: Decision,
+  eligibleAmountCents: number,
+  amountCents: number | undefined,
+): number {
+  if (decision === 'approved') {
+    return eligibleAmountCents;
+  }
+  if (decision === 'partial_refund') {
+    return amountCents ?? eligibleAmountCents;
+  }
+  return 0;
 }
 
 /**

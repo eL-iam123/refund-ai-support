@@ -640,6 +640,44 @@ const MIGRATIONS: readonly Migration[] = [
       db.exec("ALTER TABLE refund_requests ADD COLUMN claim_item_ids_json TEXT NOT NULL DEFAULT '[]'");
     },
   },
+  {
+    version: 17,
+    name: 'chat_closures.final_state covers every decision',
+    up: (db) => {
+      if (!hasTable(db, 'chat_closures')) {
+        return;
+      }
+      // The CHECK listed only the base policy's two outcomes, so it could not
+      // hold the truth about a request the discretion layer resolved as a
+      // partial refund, an exchange or store credit - and the writer collapsed
+      // anything that was not `approved` into `denied` to satisfy it. The result
+      // was an audit record that called a partial refund a denial. The table is
+      // rebuilt because SQLite cannot alter a CHECK in place, and the index is
+      // recreated with it because the rebuild drops it.
+      db.exec(`
+        CREATE TABLE chat_closures_widened (
+          id          TEXT PRIMARY KEY,
+          customer_id TEXT NOT NULL REFERENCES customers(id),
+          order_id    TEXT,
+          request_id  TEXT NOT NULL REFERENCES refund_requests(id),
+          closed_at   TEXT NOT NULL,
+          closed_by   TEXT NOT NULL,
+          final_state TEXT NOT NULL CHECK (
+                        final_state IN ('approved', 'partial_refund', 'exchange',
+                                        'store_credit', 'denied', 'escalated')
+                      )
+        );
+        INSERT INTO chat_closures_widened
+          (id, customer_id, order_id, request_id, closed_at, closed_by, final_state)
+        SELECT id, customer_id, order_id, request_id, closed_at, closed_by, final_state
+          FROM chat_closures;
+        DROP TABLE chat_closures;
+        ALTER TABLE chat_closures_widened RENAME TO chat_closures;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_closures_thread
+          ON chat_closures(customer_id, COALESCE(order_id, ''));
+      `);
+    },
+  },
 ];
 
 /**

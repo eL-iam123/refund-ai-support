@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { DECISIONS, type Decision } from '@refund/shared';
 import type { AppContext } from '../context.js';
 import { staffOnly } from '../../auth/guards.js';
 
@@ -47,11 +48,12 @@ export function registerStaffAnalyticsRoutes(app: FastifyInstance, ctx: AppConte
           GROUP BY decision`,
       )
       .all(dayStart) as { d: string; n: number }[];
-    const decisionsToday = {
-      approved: decisionRows.find((row) => row.d === 'approved')?.n ?? 0,
-      denied: decisionRows.find((row) => row.d === 'denied')?.n ?? 0,
-      escalated: decisionRows.find((row) => row.d === 'escalated')?.n ?? 0,
-    };
+    // Every decision value the system can produce, not a hand-picked three. The
+    // discretion layer can resolve a request as a partial refund, an exchange or
+    // store credit, and a tally that counted only the base policy's outcomes
+    // would report a day of twenty exchanges as a day where nothing was decided
+    // - which is the exact reading the strip exists to prevent.
+    const decisionsToday = tallyDecisions(decisionRows);
 
     return {
       analytics: {
@@ -64,6 +66,29 @@ export function registerStaffAnalyticsRoutes(app: FastifyInstance, ctx: AppConte
       },
     };
   });
+}
+
+/**
+ * Requests per decision, oldest first, keyed by the enum.
+ *
+ * Initialised from `DECISIONS` rather than written out, so a new outcome is
+ * counted the day it is added instead of being silently dropped by a literal
+ * that was last edited when there were three outcomes. An unrecognised value in
+ * the column is ignored rather than invented into the tally.
+ */
+function tallyDecisions(rows: readonly { d: string; n: number }[]): Record<Decision, number> {
+  const tally: Record<Decision, number> = {
+    approved: 0,
+    denied: 0,
+    escalated: 0,
+    partial_refund: 0,
+    exchange: 0,
+    store_credit: 0,
+  };
+  for (const decision of DECISIONS) {
+    tally[decision] = rows.find((row) => row.d === decision)?.n ?? 0;
+  }
+  return tally;
 }
 
 function count(ctx: AppContext, sql: string, ...params: unknown[]): number {

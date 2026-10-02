@@ -57,9 +57,38 @@ export interface DiscretionContext {
   readonly config: DiscretionConfig;
 }
 
-/** The rule ids that escalated, for reading *why* the request landed with a person. */
+/**
+ * The rule ids that escalated, for reading *why* the request landed with a person.
+ *
+ * Item-scoped evaluations are left out on purpose: R-02 and R-05 answer
+ * eligibility rather than authority, and the resolver already decides by the
+ * strongest outcome, so counting them here would make the reason for a request
+ * disagree with the reason the decision record names.
+ */
 function escalatedRuleIds(trace: readonly RuleEvaluation[]): Set<string> {
-  return new Set(trace.filter((evaluation) => evaluation.outcome === 'escalate').map((evaluation) => evaluation.ruleId));
+  return new Set(
+    trace
+      .filter((evaluation) => evaluation.outcome === 'escalate' && evaluation.scope === 'order')
+      .map((evaluation) => evaluation.ruleId),
+  );
+}
+
+/**
+ * Whether anything that escalated did so because the request must not be settled
+ * automatically.
+ *
+ * `risk` and `integrity` are the two classes that exist for exactly that:
+ * chargebacks and abuse (§6), conflicting evidence (§6.3), and policy-override
+ * attempts (§7.1). The integrity case matters most, because the request that
+ * triggers it is one where the *content* is untrustworthy - every field the model
+ * read from it is suspect, including the grounding that makes a claim look solid.
+ */
+function hasPersonOnlyEscalation(trace: readonly RuleEvaluation[]): boolean {
+  return trace.some(
+    (evaluation) =>
+      evaluation.outcome === 'escalate' &&
+      (evaluation.ruleClass === 'risk' || evaluation.ruleClass === 'integrity'),
+  );
 }
 
 /** A refund claim the customer's own words support, in one of the qualifying reasons. */
@@ -70,12 +99,24 @@ function hasGroundedFault(extraction: ClaimExtraction | null, grounding: Groundi
   return extraction.intent === 'refund' && FAULTY_REASONS.includes(extraction.reason);
 }
 
-/** A plausible claim that is not a qualifying fault - the customer has a problem, just not a refundable one. */
-function hasPlausibleNonFaultClaim(extraction: ClaimExtraction | null): boolean {
+/**
+ * A plausible claim that is not a qualifying fault.
+ *
+ * A qualifying fault is deliberately excluded. When the claim *is* a fault but
+ * exceeds the pre-authorised amount, the choices a person has are "authorise more
+ * money" or "authorise less" - neither of which is an exchange. Turning a genuine
+ * faulty item into an exchange because it was expensive would resolve the request
+ * with an outcome nobody asked for, and the customer's remedy would be an
+ * alternative to the one the policy contemplated.
+ */
+function hasPlausibleNonFaultClaim(extraction: ClaimExtraction | null, grounding: GroundingResult | null): boolean {
   if (extraction === null) {
     return false;
   }
-  return extraction.intent === 'refund' && extraction.reason !== 'none' && extraction.reason !== 'other';
+  if (extraction.intent !== 'refund' || extraction.reason === 'none' || extraction.reason === 'other') {
+    return false;
+  }
+  return !hasGroundedFault(extraction, grounding);
 }
 
 /**
@@ -281,12 +322,15 @@ export function recommendDiscretion(context: DiscretionContext): DiscretionRecom
   if (order === null || eligibleAmountCents <= 0) {
     return { kind: 'none' };
   }
+  if (hasPersonOnlyEscalation(trace)) {
+    return { kind: 'none' };
+  }
 
   const input: RuleInput = {
     escalated: escalatedRuleIds(trace),
     grounded: hasGroundedFault(extraction, grounding),
     loyal: customer !== null && customer.tier !== 'standard',
-    plausibleNonFault: hasPlausibleNonFaultClaim(extraction),
+    plausibleNonFault: hasPlausibleNonFaultClaim(extraction, grounding),
     extraction,
     grounding,
     eligibleAmountCents,

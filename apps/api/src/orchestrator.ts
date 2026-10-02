@@ -9,7 +9,7 @@ import type {
   Stage,
   StageTiming,
 } from '@refund/shared';
-import type { IntakeInput, IntakeReply } from './ai/analyzer.js';
+import type { IntakeReply } from './ai/analyzer.js';
 import type { Db } from './db/connection.js';
 import type { CustomerRecord, OrderRecord } from './db/records.js';
 import type { DiscretionConfig } from './config/env.js';
@@ -68,7 +68,15 @@ export interface PipelineDeps {
   readonly analyzer: AIAnalyzer;
   readonly recordAttempt: AttemptRecorder;
   readonly injectionAction: InjectionAction;
-  readonly discretion: DiscretionConfig;
+  /**
+   * The operator's pre-authorised discretion bounds.
+   *
+   * Optional so a caller that has no opinion about discretion gets
+   * `DEFAULT_DISCRETION`, which has the layer switched off. That default is the
+   * safe one: an escalation with no bounds supplied still escalates, so omitting
+   * this can never widen what is paid.
+   */
+  readonly discretion?: DiscretionConfig;
 }
 
 export interface ProcessInput {
@@ -355,6 +363,22 @@ const NO_ANALYSIS: AnalyseOutcome = {
   proposal: null,
 };
 
+/**
+ * Stage 4: the intake call, plus the grounding check on its output.
+ *
+ * The model is an intake specialist, so this is one call per turn: it either
+ * asks one question, which leaves the pipeline as `asked`, or it hands back a
+ * complete `ClaimExtraction`. The clarification loop is therefore a loop across
+ * *requests*, not inside one - the question is stored, the customer's answer
+ * arrives as the next message with the transcript attached, and the model reads
+ * it there. Looping inside a single request could not make progress, because the
+ * only thing that answers a question is the customer.
+ *
+ * The catch on a provider failure is the point, not a convenience. Every rule has
+ * already run on order facts by this stage, so a provider that is down,
+ * rate-limited or simply wrong about the schema costs the request its evidence
+ * and nothing else - and "no claim" can only escalate, never approve.
+ */
 async function analyseClaim(
   db: Db,
   deps: PipelineDeps,
@@ -370,6 +394,7 @@ async function analyseClaim(
     return NO_ANALYSIS;
   }
 
+  const order = retrieval.order;
   const history = transcriptForOrder(db, input.customerId, orderIdFor(order), input.now, HISTORY_LIMIT);
 
   const damageClarification = clarifyDamageReport(input.message, order, history, log);
@@ -382,44 +407,34 @@ async function analyseClaim(
     return noComplaint;
   }
 
-  let extraction: ClaimExtraction | null = null;
-  let grounding: GroundingResult | null = null;
-  const injectionDetected = intake.injection.detected;
   let reply: IntakeReply;
-
-  while (true) {
-    try {
-      reply = await deps.analyzer.analyze(
-        { message: input.message, order: toAnalyzerOrder(order), history },
-        observer,
-      );
-    } catch (error: unknown) {
-      const reason = error instanceof Error ? error.message : String(error);
-      log.record('ai_analysis', `no usable extraction (${truncate(reason, 120)}); continuing without a claim`);
-      return { outcome: 'claim', extraction: null, grounding: null, proposal: null };
-    }
-
-    if (reply.kind === 'question') {
-      if (intake.injection.detected) {
-        log.record('ai_analysis', 'discarded model question after an injection signal');
-        return NO_ANALYSIS;
-      }
-      return respondToQuestion(
-        { kind: 'question', question: reply.question, model: reply.model },
-        order,
-        history,
-        log,
-      );
-    }
-
-    extraction = reply.extraction;
-    break;
+  try {
+    reply = await deps.analyzer.analyze(
+      { message: input.message, order: toAnalyzerOrder(order), history },
+      observer,
+    );
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error);
+    log.record('ai_analysis', `no usable extraction (${truncate(reason, 120)}); continuing without a claim`);
+    return NO_ANALYSIS;
   }
 
-  if (extraction === null) {
-    return { outcome: 'claim', extraction: null, grounding: null, proposal: null };
+  if (reply.kind === 'question') {
+    // A flagged message cannot leave through the question branch: doing so would
+    // let model-authored text bypass R-14's denial/escalation entirely. Discard
+    // the model response and continue with no claim so the resolver records the
+    // configured integrity outcome.
+    if (intake.injection.detected) {
+      log.record('ai_analysis', 'discarded model question after an injection signal');
+      return NO_ANALYSIS;
+    }
+    return respondToQuestion(reply, order, history, log);
   }
 
+  // Only the customer's side of the transcript is eligible evidence. The model
+  // may quote something the customer said two messages ago, but never its own
+  // question and never its own phrasing.
+  const extraction: ClaimExtraction = reply.extraction;
   const corpus = [...history.filter((line) => line.role === 'customer').map((line) => line.text), input.message];
   const grounding = verifyGrounding(extraction, corpus);
   log.record(
@@ -428,21 +443,79 @@ async function analyseClaim(
       `lang=${extraction.language} grounded=${groundedLabel(grounding)} ` +
       `via ${reply.model}`,
   );
+  return { outcome: 'claim', extraction, grounding, proposal: null };
+}
 
-  const proposal: AiProposal = {
-    suggestedDecision: 'escalated',
-    suggestedAmountCents: 0,
-    confidence: extraction.confidence,
-    reason: extraction.reason,
-    model: reply.model,
-  };
+/** Keep a damage report without observed condition out of policy analysis. */
+function clarifyDamageReport(
+  message: string,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome | null {
+  const question = clarifySparseDamage(message);
+  if (question === null) {
+    return null;
+  }
+  log.record('ai_analysis', 'sparse damage report; asked for the observed condition before claim analysis');
+  return respondToQuestion(
+    { kind: 'question', question, model: 'deterministic-damage-clarification-v1' },
+    order,
+    history,
+    log,
+  );
+}
 
-  return {
-    outcome: 'claim',
-    extraction,
-    grounding,
-    proposal,
-  };
+/** Keep greetings and social-only turns out of claim analysis. */
+function clarifyNoComplaint(
+  message: string,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome | null {
+  if (!isNoComplaint(message)) {
+    return null;
+  }
+  log.record('ai_analysis', 'no complaint in the message; answered from the deterministic floor');
+  return respondToQuestion(
+    { kind: 'question', question: noComplaintQuestion(message, order !== null), model: NO_COMPLAINT_MODEL },
+    order,
+    history,
+    log,
+  );
+}
+
+/**
+ * The deterministic floor under the intake specialist's questions.
+ *
+ * The prompt tells the model never to open with a greeting, never to demand an
+ * order number the pipeline has resolved, and never to repeat itself; the guard
+ * makes those rules hold when the model ignores them. A canned question is
+ * replaced with a warm restatement, a repeat hands the thread to a person, and
+ * only a real question reaches the customer.
+ */
+function respondToQuestion(
+  reply: IntakeReply & { readonly kind: 'question' },
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome {
+  const refined = refineQuestion(reply.question, {
+    orderResolved: order !== null,
+    priorAssistantText: assistantLines(history),
+  });
+  if (refined.kind === 'escalate') {
+    log.record('ai_analysis', 'asked a question already asked; escalating to a person');
+    return NO_ANALYSIS;
+  }
+  const question = refined.kind === 'replace' ? refined.question : reply.question;
+  log.record(
+    'ai_analysis',
+    refined.kind === 'replace'
+      ? `replaced a canned question with a warm restatement (${reply.model})`
+      : `asked the customer the missing detail (${reply.model})`,
+  );
+  return { outcome: 'question', question, model: reply.model };
 }
 
 function orderIdFor(order: OrderRecord | null): string | null {
@@ -546,18 +619,6 @@ function composeReply(decision: RefundDecision, order: OrderRecord | null, messa
   const text = composeDeterministicResponse(decision, order, message);
   log.record('respond', 'composed from the decision, no model in this path');
   return text;
-}
-
-function orderIdFor(order: OrderRecord | null): string | null {
-  return order?.id ?? null;
-}
-
-function groundedLabel(grounding: GroundingResult | null): string {
-  return String(grounding?.grounded ?? false);
-}
-
-function truncate(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
 export { DEFAULT_DISCRETION };

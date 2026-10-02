@@ -279,35 +279,57 @@ INTAKE → RETRIEVE → FACT GATES → AI ANALYSIS → REASON RULES → RESOLVER
 ```
 
 Fact gates can terminate before the model is ever called. Everything after the gates
-can only make the outcome *stricter* — a model proposal can escalate a request, never
-approve one.
+can only make the outcome *stricter*, because the model returns no outcome to
+read: intake yields a clarifying question or a structured claim, and the claim
+carries a reason, a condition and the figure the customer asked for — never a
+decision.
 
 | Stage | Owns |
 |---|---|
 | Intake | injection scan, customer lookup, R-14 |
 | Retrieve | order, duplicate-charge sibling |
 | Fact gates | item eligibility, windows, payment state, risk signals |
-| AI analysis | **proposes** a reason + quotes; never decides |
-| Reason rules | whether the proposed reason justifies a refund |
+| Intake loop | **reads** a reason + quotes, or asks one question; never decides |
+| Reason rules | whether the reason the model read justifies a refund |
 | Resolver | **the only writer of a decision and of the amount** |
 | Response | deterministic text; the model never writes the reply |
 
+### Discretion, and why it is off
+
+`REFUND_POLICY.md` §10 adds a deterministic layer that resolves an escalation a
+person would have resolved: a courtesy window just past the refund deadline, a
+loyalty member, a reduced amount, an exchange or store credit. It only ever
+softens an escalation, never a denial, and every adjustment it makes is recorded
+as an override.
+
+It is off unless `DISCRETION_ENABLED=true`, because the thing it replaces - a
+human clicking approve - is the part of this system that is *supposed* to be
+slow. Every bound is a separate variable (`DISCRETION_MAX_CENTS`,
+`DISCRETION_MAX_AGE_DAYS`, `DISCRETION_ALLOW_PARTIAL`, and so on) so a
+deployment can widen one of them without opening the layer wholesale.
+
 ### Why the model cannot decide
 
-Four separate mechanisms, not one convention:
+Five separate mechanisms, not one convention:
 
 1. **Total precedence** — `deny (3) > escalate (2) > approve (1) > pass (0)`. The
    highest non-pass outcome in the trace wins. A denial anywhere outranks an approval
    anywhere else.
 2. **The amount is computed** — `eligibleAmountCents` is a sum of eligible item prices
-   from the order table. `suggestedAmountCents` is never an input. `assertAmountSane()`
-   re-checks at the boundary that the amount is a non-negative integer no greater than
-   the order total.
+   from the order table. Neither the figure the customer asked for nor anything the
+   model read is ever an input. `assertAmountSane()` re-checks at the boundary that
+   the amount is a non-negative integer no greater than the order total.
 3. **Escalation is the default** — when no rule concludes, the request goes to a human.
    Never an automatic approval.
-4. **Disagreement is recorded** — if the model proposed something else,
-    `reconcile()` writes an `OverrideRecord` into the audit trail. You can always see
-    what the model wanted versus what the policy decided.
+4. **The model contract has no outcome field** — `IntakeReply` is a question or a
+   `ClaimExtraction`, and an extraction carries a reason, a condition, quotes and
+   the figure the customer asked for. There is no field that could be read as a
+   decision, so this is enforced by the seam rather than by checking afterwards.
+5. **Disagreement is recorded** — `reconcile()` writes an `OverrideRecord` whenever
+   what the model read differs from what the policy concluded: the figure claimed
+   against the figure authorised, a denial that authorises nothing, and a claim
+   discarded because an integrity rule fired. You can always see what was read
+   versus what was decided.
 
 ### The assistant asks before it assumes
 
@@ -318,10 +340,12 @@ expected to ask when it has not.
 - **An ask is a question, never a decision.** It returns `200 { question, dialogueId }`,
   writes no `refund_requests` row, and is stored as dialogue — so a refresh keeps
   the exchange.
-- **Asks are anchor-neutral.** A turn is recorded with no order until the customer's
-  answer resolves one; the ask is then adopted onto that order, so the answer is
-  decided against the conversation that asked it and the customer's thread reads as
-  one continuous conversation.
+- **An ask joins the order's thread.** When the order is already known - which it
+  is on the storefront's order page - the question is recorded against it, so the
+  answer is decided against the conversation that asked it, the customer's thread
+  reads as one continuous conversation, and the item scope they had selected
+  survives the round trip. A turn with no resolvable order is still stored with
+  none, and adopted onto the order the answer identifies.
 - **The deterministic half.** When the message genuinely spans more than one of the
   customer's own orders (equal product matches), order resolution stays unresolved
   and the pipeline asks *which order* — a coin flip is never resolved as a pick.

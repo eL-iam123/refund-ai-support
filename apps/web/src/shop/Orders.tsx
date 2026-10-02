@@ -32,29 +32,7 @@ export function Orders({
   onBrowse: () => void;
 }): ReactNode {
   const countMap = useMemo(() => new Map(counts.map((row) => [row.orderId, row.count])), [counts]);
-  const [notice, setNotice] = useState<{ orderId: string; count: number } | null>(null);
-  const previousCounts = useRef<Map<string, number>>(new Map());
-
-  useEffect(() => {
-    let nextNotice: { orderId: string; count: number } | null = null;
-
-    for (const row of counts) {
-      const previous = previousCounts.current.get(row.orderId) ?? 0;
-      if (row.count > previous && previous > 0) {
-        nextNotice = { orderId: row.orderId, count: row.count };
-      }
-    }
-
-    previousCounts.current = new Map(counts.map((row) => [row.orderId, row.count]));
-
-    if (nextNotice === null) {
-      return;
-    }
-
-    setNotice(nextNotice);
-    const timeout = window.setTimeout(() => setNotice(null), 7000);
-    return () => window.clearTimeout(timeout);
-  }, [counts]);
+  const notice = useNewReplyNotice(counts);
 
   if (!signedIn) {
     return (
@@ -91,6 +69,64 @@ export function Orders({
       ))}
     </div>
   );
+}
+
+const NOTICE_MS = 7000;
+
+/**
+ * Which order gained replies since the last time these counts arrived.
+ *
+ * "Since the last time" is the whole difficulty, and it is why this is a hook
+ * rather than a derived value: the comparison needs a snapshot of the previous
+ * counts, and the snapshot belongs next to the data rather than in the server.
+ * The snapshot is a ref because it is bookkeeping, not something to render - a
+ * ref write is invisible, which is exactly right for a value the shopper never
+ * sees.
+ *
+ * The notice state is set from a timer rather than directly in the effect body.
+ * Setting it inline would force a second render in the same tick as the data
+ * arriving - a cascade React has good reason to warn about - and the toast is an
+ * announcement, so a tick of delay changes nothing anyone can perceive. Both
+ * timers are cleared on cleanup, so a count that changes again before the toast
+ * is up replaces it rather than stacking.
+ */
+function useNewReplyNotice(
+  counts: readonly { orderId: string; count: number }[],
+): { orderId: string; count: number } | null {
+  const [notice, setNotice] = useState<{ orderId: string; count: number } | null>(null);
+  const previousCounts = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    const next = firstCountIncrease(counts, previousCounts.current);
+    previousCounts.current = new Map(counts.map((row) => [row.orderId, row.count]));
+
+    if (next === null) {
+      return;
+    }
+
+    const show = window.setTimeout(() => setNotice(next), 0);
+    const dismiss = window.setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => {
+      window.clearTimeout(show);
+      window.clearTimeout(dismiss);
+    };
+  }, [counts]);
+
+  return notice;
+}
+
+/** The first order whose count rose above a count this customer already had. */
+function firstCountIncrease(
+  counts: readonly { orderId: string; count: number }[],
+  previous: ReadonlyMap<string, number>,
+): { orderId: string; count: number } | null {
+  for (const row of counts) {
+    const before = previous.get(row.orderId) ?? 0;
+    if (row.count > before && before > 0) {
+      return { orderId: row.orderId, count: row.count };
+    }
+  }
+  return null;
 }
 
 /** When it was bought and where it got to. Facts, not status vocabulary. */
@@ -147,16 +183,7 @@ function OrderCard({
       <p className="mono small">{order.id}</p>
       <OrderMeta order={order} />
 
-      <ul className="lines">
-        {order.items.map((item, index) => (
-          <li key={`${item.name}-${index}`}>
-            <span>
-              {item.name} <span className="muted">x{item.quantity}</span>
-            </span>
-            <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
-          </li>
-        ))}
-      </ul>
+      <OrderLines items={order.items} />
 
       <div className="row">
         <button type="button" className="btn-secondary" disabled={buyable.length === 0} onClick={refill}>
@@ -180,6 +207,22 @@ function OrderCard({
         />
       ) : null}
     </article>
+  );
+}
+
+/** The lines of one order, as bought. Facts, not a re-order form. */
+function OrderLines({ items }: { items: ShopOrder['items'] }): ReactNode {
+  return (
+    <ul className="lines">
+      {items.map((item, index) => (
+        <li key={`${item.name}-${index}`}>
+          <span>
+            {item.name} <span className="muted">x{item.quantity}</span>
+          </span>
+          <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 

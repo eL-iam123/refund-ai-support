@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { MONEY_DECISIONS, type Decision } from '@refund/shared';
 import type { Db } from './connection.js';
 import { appendAuditEvent } from './auditChain.js';
 import { latestRequestForThread } from './requestRepository.js';
@@ -11,7 +12,15 @@ export interface ChatClosure {
   readonly requestId: string;
   readonly closedAt: string;
   readonly closedBy: string;
-  readonly finalState: 'approved' | 'denied';
+  /**
+   * The decision this thread closed on.
+   *
+   * A `Decision` rather than a two-value summary, and the distinction is the whole
+   * point of the column: a closure is the last word said to a customer about their
+   * money, and a thread closed after a partial refund recorded as `denied` is a
+   * record that contradicts the ledger sitting next to it.
+   */
+  readonly finalState: Decision;
 }
 
 interface ChatClosureRow {
@@ -21,7 +30,7 @@ interface ChatClosureRow {
   readonly request_id: string;
   readonly closed_at: string;
   readonly closed_by: string;
-  readonly final_state: 'approved' | 'denied';
+  readonly final_state: Decision;
 }
 
 export class ChatNotFinalizedError extends Error {
@@ -43,7 +52,28 @@ export function isChatClosed(db: Db, customerId: string, orderId: string | null)
   return chatClosureForThread(db, customerId, orderId) !== null;
 }
 
-/** Return the final request when the latest thread outcome is safe to close. */
+/**
+ * Return the final request when the latest thread outcome is safe to close.
+ *
+ * Closing a thread is the last thing that happens to a conversation, so each
+ * decision asks a different question about whether that time has come:
+ *
+ *  - Money decisions wait for the money. `approved` and `partial_refund` are both
+ *    `MONEY_DECISIONS`, and both hold a reservation in the ledger until a person
+ *    settles it, so neither is finished until that row is settled or released.
+ *    Treating a partial refund as anything other than an approval used to make it
+ *    permanently uncloseable.
+ *  - A denial waits for the appeal window, because a refusal the customer can still
+ *    contest is not the end of the conversation.
+ *  - `exchange` and `store_credit` resolve the request without moving money, but
+ *    they are not self-executing: the customer is told a member of the team will
+ *    confirm the details *in this thread*. So they finalise only once an agent
+ *    has actually handled the thread - a handoff on this order has been taken and
+ *    ended. That is what makes the confirmation possible before the conversation
+ *    ends, and it is why these outcomes are closable at all rather than stuck.
+ *  - `escalated` is never finalisable here. It is the one state that means a person
+ *    is still owed an answer.
+ */
 export function finalizedRequestId(db: Db, customerId: string, orderId: string | null): string | null {
   const latest = latestRequestForThread(db, customerId, orderId);
   if (latest === null) {
@@ -55,13 +85,35 @@ export function finalizedRequestId(db: Db, customerId: string, orderId: string |
     ).get(latest.id);
     return openAppeal === undefined ? latest.id : null;
   }
-  if (latest.decision !== 'approved') {
-    return null;
+  if (MONEY_DECISIONS.has(latest.decision)) {
+    const completedRefund = db.prepare(
+      "SELECT 1 AS present FROM refunds WHERE request_id = ? AND status IN ('settled', 'released') LIMIT 1",
+    ).get(latest.id);
+    return completedRefund === undefined ? null : latest.id;
   }
-  const completedRefund = db.prepare(
-    "SELECT 1 AS present FROM refunds WHERE request_id = ? AND status IN ('settled', 'released') LIMIT 1",
-  ).get(latest.id);
-  return completedRefund === undefined ? null : latest.id;
+  if (latest.decision === 'exchange' || latest.decision === 'store_credit') {
+    return agentHasHandledThread(db, latest.customerId, orderId) ? latest.id : null;
+  }
+  return null;
+}
+
+/**
+ * Whether a person has taken this thread and handed it back.
+ *
+ * The closing detail and the confirmation the customer was promised both have to
+ * have happened in the thread itself, so the signal is a handoff on this order
+ * that is finished - not one still running, and not one on a different order.
+ */
+function agentHasHandledThread(db: Db, customerId: string, orderId: string | null): boolean {
+  const handled = db
+    .prepare(
+      `SELECT 1 AS present
+         FROM handoffs
+        WHERE customer_id = ? AND order_id IS ? AND ended_at IS NOT NULL
+        LIMIT 1`,
+    )
+    .get(customerId, orderId);
+  return handled !== undefined;
 }
 
 export function closeFinalizedChat(
@@ -85,7 +137,7 @@ export function closeFinalizedChat(
     requestId,
     closedAt: input.now.toISOString(),
     closedBy: input.closedBy,
-    finalState: request.decision === 'approved' ? 'approved' : 'denied',
+    finalState: request.decision,
   };
 
   db.transaction(() => {

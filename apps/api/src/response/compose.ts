@@ -84,11 +84,29 @@ export function composeDeterministicResponse(
   const acknowledgement = acknowledgementFor(message);
   const prefix = acknowledgement.length === 0 ? '' : `${acknowledgement} `;
   const reference = order === null ? '' : ` for order ${order.id}`;
-  return prefix + decisionBody(decision, reference, prefix);
+  return prefix + decisionBody(decision, reference, prefix, order);
+}
+
+/**
+ * What to call the order in a sentence that already says "your order".
+ *
+ * Naming it twice reads as a mistake to the person reading it: "an exchange for
+ * your order for order ORD-1a2b" is what this produced. So the phrase drops
+ * "your" when the number is available, and falls back to the generic wording
+ * when there is no order to name - a request raised before an order was
+ * identified has to still be answerable.
+ */
+function orderSubject(order: OrderRecord | null): string {
+  return order === null ? 'your order' : `order ${order.id}`;
 }
 
 /** The decision's own words, without the acknowledgement prefix. */
-function decisionBody(decision: RefundDecision, reference: string, prefix: string): string {
+function decisionBody(
+  decision: RefundDecision,
+  reference: string,
+  prefix: string,
+  order: OrderRecord | null,
+): string {
   const excluded =
     decision.blockedItems.length === 0 || (decision.decision === 'denied' && refusedWholeOrder(decision))
       ? ''
@@ -115,13 +133,13 @@ function decisionBody(decision: RefundDecision, reference: string, prefix: strin
     case 'exchange':
       return (
         prefix +
-        `We have arranged an exchange for your order${reference}. A member of our team will ` +
+        `We have arranged an exchange for ${orderSubject(order)}. A member of our team will ` +
         'confirm the details with you here - you do not need to do anything else.'
       );
     case 'store_credit':
       return (
         prefix +
-        `We have added store credit to your account for your order${reference}. A member of our ` +
+        `We have added store credit to your account for ${orderSubject(order)}. A member of our ` +
         'team will confirm the details with you here - you do not need to do anything else.'
       );
     case 'denied':

@@ -1,5 +1,13 @@
 import type { ClaimExtraction } from '@refund/shared';
-import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type IntakeInput, type IntakeReply, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
+import {
+  type AIAnalyzer,
+  type AnalyzerOrder,
+  type IntakeInput,
+  type IntakeReply,
+  type AttemptObserver,
+  type ChatInput,
+  type ChatReply,
+} from './analyzer.js';
 import { scanForInjection } from '../security/injection.js';
 import { isNoComplaint, noComplaintQuestion } from '../response/noComplaint.js';
 import { clarifySparseDamage } from '../response/claimClarification.js';
@@ -139,7 +147,8 @@ const CURRENCY_PATTERNS: readonly RegExp[] = [
 ];
 
 const ORDER_REFERENCE = /\bORD-\d+\b/i;
-const EXPLICIT_DIRECTIVE = /\b(?:approve|authorise|authorize|grant|pay|issue|process)\b/i;
+/** "the whole order", "all of it", "everything" - a figure named in words. */
+const WHOLE_ORDER = /\b(?:whole order|entire order|all of (?:it|the order)|everything)\b/i;
 
 const LANGUAGE_MARKERS: readonly { code: string; pattern: RegExp }[] = [
   { code: 'fr', pattern: /\b(?:bonjour|merci|colis|remboursement|administrateur|politique|commande|arriv[ée])\b/i },
@@ -150,14 +159,6 @@ const LANGUAGE_MARKERS: readonly { code: string; pattern: RegExp }[] = [
 /** Words too generic to identify a product. */
 const STOPWORDS = new Set(['set', 'pair', 'box', 'pack', 'and', 'the', 'for', 'with', 'size', 'kit']);
 const MAX_EVIDENCE_LENGTH = 400;
-
-/** Reasons the local extractor is willing to sign off on without a human. */
-const AUTO_APPROVABLE: ReadonlySet<ClaimExtraction['reason']> = new Set([
-  'damaged',
-  'wrong_item',
-  'not_as_described',
-  'duplicate_charge',
-]);
 
 export function LocalAnalyzer(): AIAnalyzer {
   return {
@@ -174,7 +175,17 @@ export function LocalAnalyzer(): AIAnalyzer {
   };
 }
 
-function analyzeWithHeuristics(input: AnalyzerInput, observer: AttemptObserver): AgentReply {
+/**
+ * The heuristic reading, as an `IntakeReply`.
+ *
+ * A pattern matcher cannot hold a clarification loop open across turns, but it
+ * can honour the same contract a live model is held to: a message with nothing
+ * wrong in it is answered with a question rather than turned into a claim, and a
+ * bare "damaged" with no observed condition is asked about before it reaches the
+ * reason rules. That is why the scenario fixtures run against this class and not
+ * a second copy of the pattern set.
+ */
+function analyzeWithHeuristics(input: IntakeInput, observer: AttemptObserver): IntakeReply {
   observer({ model: MODEL, attempt: 1, ok: true, latencyMs: 0, promptTokens: null, completionTokens: null, error: null });
   if (isNoComplaint(input.message)) {
     return {
@@ -187,22 +198,14 @@ function analyzeWithHeuristics(input: AnalyzerInput, observer: AttemptObserver):
   if (damageQuestion !== null) {
     return { kind: 'question', question: damageQuestion, model: MODEL };
   }
-  const extraction = read(input);
   return {
-    kind: 'claim',
-    extraction,
-    proposal: {
-      suggestedDecision: suggestDecision(extraction.reason, input.message, extraction.policyOverrideAttempted),
-      suggestedAmountCents: extraction.claimedAmountCents ?? 0,
-      confidence: extraction.confidence,
-      reason: extraction.reason,
-      model: MODEL,
-    },
+    kind: 'complete',
+    extraction: read(input),
     model: MODEL,
   };
 }
 
-function read(input: AnalyzerInput): ClaimExtraction {
+function read(input: IntakeInput): ClaimExtraction {
   const message = input.message;
   const claim = readClaim(message);
   const claimed = claimedAmountCents(message);
@@ -214,7 +217,10 @@ function read(input: AnalyzerInput): ClaimExtraction {
     confidence: claim.confidence,
     orderRef: ORDER_REFERENCE.exec(message)?.[0] ?? null,
     // A customer asking for "the whole order" has named an amount: the total.
-    claimedAmountCents: claimed ?? input.order?.totalCents ?? 0,
+    // A customer who named no figure at all has named nothing, and saying
+    // otherwise would put a claim about their intentions in the audit trail
+    // that they never made.
+    claimedAmountCents: claimed ?? wholeOrderCents(message, input.order),
     items: mentionedItems(message, input.order?.items ?? []),
     evidenceQuotes: claim.quote === null ? [] : [claim.quote],
     language: detectLanguage(message),
@@ -301,6 +307,11 @@ function claimedAmountCents(message: string): number | null {
   return null;
 }
 
+/** The order total, but only when the message actually asked for all of it. */
+function wholeOrderCents(message: string, order: AnalyzerOrder | null): number | null {
+  return order !== null && WHOLE_ORDER.test(message) ? order.totalCents : null;
+}
+
 /** Item ids whose name is actually mentioned in the message. */
 function mentionedItems(message: string, items: readonly { id: string; name: string }[]): string[] {
   const haystack = message.toLowerCase();
@@ -309,62 +320,6 @@ function mentionedItems(message: string, items: readonly { id: string; name: str
       item.name.toLowerCase().split(/[^a-z0-9]+/u).some((word) => word.length >= 4 && !STOPWORDS.has(word) && haystack.includes(word)),
     )
     .map((item) => item.id);
-}
-
-/**
- * The local extractor's preference, recorded as data.
- *
- * It is optimistically pro-approval on damaged and wrong-item claims, and on
- * messages that both attempt an override and ask for money outright. That is
- * deliberate and it is not a weakness: a proposal the policy disagrees with is
- * the interesting case, because it exercises the clamp and shows up in the audit
- * trail. The disagreement is resolved by the resolver, and the resolver's answer
- * is what is stored, sent and paid.
- */
-function suggestDecision(
-  reason: ClaimExtraction['reason'],
-  message: string,
-  injectionDetected: boolean,
-): 'approved' | 'escalated' {
-  if (injectionDetected && EXPLICIT_DIRECTIVE.test(message)) {
-    return 'approved';
-  }
-  return AUTO_APPROVABLE.has(reason) ? 'approved' : 'escalated';
-}
-
-export { AiUnavailableError };
-export { createLocalIntakeAnalyzer };
-
-/**
- * The local intake analyzer (heuristic-based, no network calls).
- *
- * Used when `AI_PROVIDER=local` or as a fallback. Performs single-pass
- * extraction with no clarification loops — it's a pattern matcher, not a
- * language model. Suitable for testing and demos; never a safe substitute for
- * a model in production.
- */
-export function createLocalIntakeAnalyzer(): AIAnalyzer {
-  return {
-    label: 'local (heuristic)',
-    model: MODEL,
-    available: true,
-    unavailableReason: null,
-    analyze(input) {
-      return Promise.resolve(analyzeIntakeWithHeuristics(input));
-    },
-    chat(input, observer) {
-      return Promise.resolve(chatWithHeuristics(input, observer));
-    },
-  };
-}
-
-function analyzeIntakeWithHeuristics(input: IntakeInput): IntakeReply {
-  const extraction = read(input);
-  return {
-    kind: 'complete',
-    extraction,
-    model: MODEL,
-  };
 }
 
 /**

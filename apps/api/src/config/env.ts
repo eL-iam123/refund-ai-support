@@ -196,8 +196,39 @@ const EnvSchema = z.object({
    */
   DISCRETION_NEAR_MISS_QUOTE: z
     .enum(['true', 'false', '1', '0'])
-    .default('false')
+    .default('false'),
+
+  /**
+   * The item picker: asking the customer which line a claim is about, from inside
+   * the conversation, instead of requiring it before the conversation starts.
+   *
+   * On by default, unlike the discretion layer, because this can only ever
+   * *narrow* what is claimed - the customer picks, or picks nothing and the claim
+   * stays whole. It cannot widen a claim or move money on its own; the selection
+   * arrives as an ordinary `itemIds` on the next request. The floor below is what
+   * keeps it off small orders, where there is nothing worth choosing between.
+   */
+  AI_ITEM_PICKER_ENABLED: z
+    .enum(['true', 'false', '1', '0'])
+    .default('true')
     .transform((value) => value === 'true' || value === '1'),
+  /**
+   * The lowest whole-order eligible amount worth asking about.
+   *
+   * If every line on the order is worth a few dollars, the choice cannot change
+   * what is paid and asking is a form field in disguise. Above this, an unresolved
+   * scope is worth one question.
+   */
+  AI_ITEM_PICKER_MIN_CENTS: z.coerce.number().int().min(0).default(2500),
+  /**
+   * How many times one thread may be offered the picker.
+   *
+   * One, because the failure mode of an unanswered question is asking again: a
+   * picker that returns on every turn is how a chat assistant teaches people to
+   * abandon it. An order whose scope stays unresolved escalates, which is the
+   * correct destination for an ambiguity nobody will resolve.
+   */
+  AI_ITEM_PICKER_MAX_OFFERS_PER_THREAD: z.coerce.number().int().min(0).max(5).default(1),
 
   /**
    * Caps the customer's message. A refund request is a paragraph, not an upload;
@@ -463,16 +494,7 @@ export function readEnv(envFile?: string): Env {
 }
 
 function parseEnv(source: NodeJS.ProcessEnv): Env {
-  // A Vite development session sends a burst of ordinary API reads through one
-  // proxy/IP (and React StrictMode deliberately replays mount effects). Keep a
-  // real limiter in development, but give that local workflow a larger default;
-  // production and test retain the tighter 30/minute default. Explicit config
-  // always wins.
-  const withDevelopmentLimit =
-    source.RATE_LIMIT_MAX === undefined && (source.NODE_ENV ?? 'development') === 'development'
-      ? { ...source, RATE_LIMIT_MAX: '300' }
-      : source;
-  const parsed = EnvSchema.safeParse(withDevelopmentLimit);
+  const parsed = EnvSchema.safeParse(withDevelopmentRateLimit(source));
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
@@ -481,11 +503,32 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
   }
 
   const env = resolveProvider(parsed.data);
+  assertProductionCredentials(env);
+  assertProductionProvider(env);
+  assertModelIsReachable(env);
+  return env;
+}
 
-  // The compose file ships a placeholder and admin-login.txt ships a demo
-  // password, so `docker compose up` runs as a single command. A committed
-  // default is a way in, so it is only ever allowed to be the reason a local
-  // evaluation starts - never the reason a deployed one does.
+/**
+ * A Vite development session sends a burst of ordinary API reads through one
+ * proxy/IP (and React StrictMode deliberately replays mount effects). Keep a real
+ * limiter in development, but give that local workflow a larger default;
+ * production and test retain the tighter 30/minute default. Explicit config
+ * always wins.
+ */
+function withDevelopmentRateLimit(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return source.RATE_LIMIT_MAX === undefined && (source.NODE_ENV ?? 'development') === 'development'
+    ? { ...source, RATE_LIMIT_MAX: '300' }
+    : source;
+}
+
+/**
+ * The compose file ships a placeholder and admin-login.txt ships a demo password,
+ * so `docker compose up` runs as a single command. A committed default is a way
+ * in, so it is only ever allowed to be the reason a local evaluation starts -
+ * never the reason a deployed one does.
+ */
+function assertProductionCredentials(env: Env): void {
   if (env.NODE_ENV === 'production' && env.ADMIN_API_SECRET === PLACEHOLDER_SECRET) {
     throw new Error(
       'ADMIN_API_SECRET is still the bundled placeholder, which is published in the ' +
@@ -499,9 +542,13 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
         'openssl rand -base64 24',
     );
   }
+}
 
-  const preset = PRESETS[env.AI_PROVIDER];
-  if (env.NODE_ENV === 'production' && preset.kind === 'local') {
+function assertProductionProvider(env: Env): void {
+  if (env.NODE_ENV !== 'production') {
+    return;
+  }
+  if (PRESETS[env.AI_PROVIDER].kind === 'local') {
     throw new Error(
       'AI_PROVIDER=local runs a pattern matcher rather than a language model, so every ' +
         'request it reads is resolved by heuristics alone. Set a real provider before ' +
@@ -509,9 +556,6 @@ function parseEnv(source: NodeJS.ProcessEnv): Env {
         'because it escalates instead of guessing.',
     );
   }
-
-  assertModelIsReachable(env);
-  return env;
 }
 
 /**

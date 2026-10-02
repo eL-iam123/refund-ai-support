@@ -9,11 +9,11 @@ import { testEnv } from './helpers.js';
  * The OpenAI-compatible request shape.
  *
  * `messages` is a two-element array, and the order is the whole contract: the
- * system prompt states the schema and the two tools, while the user message
+ * system prompt states the schema and the two exits, while the user message
  * carries the conversation and the order. Swap them and the request still
  * compiles, still returns HTTP 200, and still burns a few hundred tokens - it
  * just arrives without the schema, so the model writes prose or invents its own
- * keys and every reply fails `AgentOutputSchema`.
+ * keys and every reply fails `IntakeOutputSchema`.
  *
  * That failure is invisible from the outside. The provider records `ok: true`,
  * because the HTTP call succeeded; the schema rejection lands on the next audit
@@ -48,8 +48,6 @@ const VALID_OUTPUT = {
   language: 'en',
   urgency: 'normal',
   policyOverrideAttempted: false,
-  suggestedDecision: 'approved',
-  suggestedAmountCents: 4200,
 };
 
 const noopObserver: AttemptObserver = () => undefined;
@@ -110,7 +108,7 @@ describe('the OpenAI-compatible extraction request', () => {
 
     expect(body.messages).toHaveLength(2);
     expect(body.messages[0]?.role).toBe('system');
-    expect(body.messages[0]?.content).toBe(EXTRACTION_SYSTEM);
+    expect(body.messages[0]?.content).toBe(INTAKE_SYSTEM);
     expect(body.messages[1]?.role).toBe('user');
 
     // The schema has to actually be in the prompt. Without it the model is
@@ -138,7 +136,7 @@ describe('the OpenAI-compatible extraction request', () => {
       throw new Error('no repair attempt was made');
     }
     const body = await bodyOf(retry);
-    expect(body.messages[0]?.content).toBe(EXTRACTION_SYSTEM);
+    expect(body.messages[0]?.content).toBe(INTAKE_SYSTEM);
     expect(body.messages[1]?.content).toContain('Your previous reply was rejected');
   });
 

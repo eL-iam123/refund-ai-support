@@ -1,4 +1,4 @@
-import { AiUnavailableError, type AgentReply, type AIAnalyzer, type AnalyzerInput, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
+import { AiUnavailableError, type AIAnalyzer, type IntakeInput, type IntakeReply, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
 
 /**
  * The analyzer used when no provider key is configured.
@@ -37,7 +37,7 @@ export function UnavailableAnalyzer(reason: string, missingKey: string): AIAnaly
     model,
     available: false,
     unavailableReason: reason,
-    analyze(_input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
+    analyze(_input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
       observer({
         model,
         attempt: 1,

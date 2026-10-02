@@ -56,10 +56,10 @@ its own code (`discretion_approve`, `discretion_partial_refund`,
 the policy outcome and the discretion that softened it. This is the same visibility
 a manual override has.
 
-**4. The model is not involved.** `recommendDiscretion` reads no model output. The
-model's proposal remains inert data, the resolver remains the sole writer of the
-decision, and precedence is untouched. ADR 0001 is preserved in full: the layer is
-a set of rules, not the model deciding.
+**4. The model is not involved.** `recommendDiscretion` reads no model output beyond
+the grounded claim it is given, and that claim carries no outcome. The resolver
+remains the sole writer of the decision, and precedence is untouched. ADR 0001 is
+preserved in full: the layer is a set of rules, not the model deciding.
 
 ### New decision outcomes
 

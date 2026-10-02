@@ -65,10 +65,13 @@ const VERB: Record<Decision, string> = {
 /**
  * The resolver is the only writer of a decision in this system.
  *
- * An AI proposal arrives here as *data*. It can be recorded, compared against
- * what the policy concluded, and reported in the audit trail - but it cannot
- * change the outcome. Precedence is DENY > ESCALATE > APPROVE, and when no rule
- * reaches a conclusion the safe default is to escalate, never to approve.
+ * What arrives here is *data*. The intake layer hands over a reading of what the
+ * customer said - a reason, a condition, the figure they asked for - and a
+ * `AiProposal` from any caller that has one, but nothing that could be read as a
+ * request to approve. Both can be recorded, compared against what the policy
+ * concluded, and reported in the audit trail; neither can change the outcome.
+ * Precedence is DENY > ESCALATE > APPROVE, and when no rule reaches a conclusion
+ * the safe default is to escalate, never to approve.
  */
 export function resolve(input: ResolveInput): RefundDecision {
   const evaluations = [
@@ -78,11 +81,18 @@ export function resolve(input: ResolveInput): RefundDecision {
   ];
   const winner = decidingRule(input, evaluations);
   const baseDecision = decisionFrom(winner);
-  const softened = applyDiscretion(baseDecision, winner, evaluations, input);
+  // The fold always returns a rule, even when every one of them passed, so the
+  // deciding rule and the *concluding* rule are not the same thing. Only the
+  // second may be named as the reason for a decision: naming the rule that merely
+  // sorted first would report an ordinary delivery complaint as settled under the
+  // policy-override clause, which is both self-contradictory ("under R-14: no
+  // policy-override signal") and alarming in the one field an auditor reads.
+  const concluded = concludingRule(winner);
+  const softened = applyDiscretion(baseDecision, concluded, evaluations, input);
   const decision = softened.decision;
   const amount = amountFor(decision, input, softened.partialAmountCents);
   const ceiling = ceilingOverride(input, amount);
-  const overrides = [...softened.overrides, ...reconcile(input, decision, amount), ...ceiling];
+  const overrides = [...softened.overrides, ...reconcile(input, decision, amount, evaluations), ...ceiling];
   assertAmountSane(amount, input.orderTotalCents);
 
   return {
@@ -90,8 +100,8 @@ export function resolve(input: ResolveInput): RefundDecision {
     refundAmountCents: amount,
     eligibleAmountCents: input.gateResult.eligibleAmountCents,
     currency: 'USD',
-    summary: summarise(decision, winner, input, amount, softened.applied),
-    policyRef: winner?.policyRef ?? 'REFUND_POLICY.md §9',
+    summary: summarise(decision, concluded, input, amount, softened.applied),
+    policyRef: concluded?.policyRef ?? 'REFUND_POLICY.md §9',
     trace: evaluations,
     overrides,
     eligibleItemIds: input.gateResult.eligibleItems.map((item) => item.id),
@@ -149,6 +159,17 @@ function outstandingFor(input: ResolveInput): Pick<
  * item rule, which is the correct answer for a basket that is entirely
  * ineligible.
  */
+/**
+ * The rule that actually reached a conclusion.
+ *
+ * `precedenceFold` returns the strongest evaluation, which on a clean request is
+ * the first rule that passed. That is the right input to the decision and the
+ * wrong input to the audit trail.
+ */
+function concludingRule(winner: RuleEvaluation | null): RuleEvaluation | null {
+  return winner === null || winner.outcome === 'pass' ? null : winner;
+}
+
 function decidingRule(
   input: ResolveInput,
   evaluations: readonly RuleEvaluation[],
@@ -251,18 +272,25 @@ function discretionDetail(
   winner: RuleEvaluation | null,
   input: ResolveInput,
 ): string {
-  const reason = winner === null ? 'no rule concluded' : `${winner.ruleId} (${winner.policyRef})`;
   const eligible = formatCents(input.gateResult.eligibleAmountCents);
+  // Two clauses rather than one interpolated phrase, because the second reads as
+  // nonsense when there is no rule to name - "no rule concluded had escalated"
+  // is a sentence nobody can act on, in the field that says why the money moved.
+  const because =
+    winner === null
+      ? 'no policy rule reached a conclusion, so the request escalated by default'
+      : `${winner.ruleId} (${winner.policyRef}) escalated it`;
+
   if (recommendation.kind === 'approve') {
-    return `discretion approved ${eligible} that ${reason} had escalated for review`;
+    return `discretion approved ${eligible} that ${because}`;
   }
   if (recommendation.kind === 'partial_refund') {
-    return `discretion approved ${formatCents(recommendation.amountCents)} of ${eligible} that ${reason} had escalated; the remainder needs a person`;
+    return `discretion approved ${formatCents(recommendation.amountCents)} of ${eligible} that ${because}; the remainder needs a person`;
   }
   if (recommendation.kind === 'exchange') {
-    return `discretion offered an exchange instead of a refund; ${reason} had escalated`;
+    return `discretion offered an exchange instead of a refund that ${because}`;
   }
-  return `discretion offered store credit instead of a refund; ${reason} had escalated`;
+  return `discretion offered store credit instead of a refund that ${because}`;
 }
 
 /**
@@ -321,6 +349,7 @@ function reconcile(
   input: ResolveInput,
   decision: Decision,
   amount: number,
+  evaluations: readonly RuleEvaluation[],
 ): OverrideRecord[] {
   const overrides: OverrideRecord[] = [];
   const proposal = input.aiProposal;
@@ -341,17 +370,82 @@ function reconcile(
     });
   }
 
-  if (decision === 'denied' && amount !== 0) {
-    overrides.push({
-      code: 'amount_zeroed_on_deny',
-      detail: 'refund amount forced to $0 by a denial',
-      aiProposal: proposal,
-    });
-  }
-
+  overrides.push(...claimAmountOverride(input, decision, amount));
+  overrides.push(...discardedClaimOverride(input, evaluations));
   overrides.push(...unpayableOverride(input, decision));
   overrides.push(...ungroundingOverrides(input, decision));
   return overrides;
+}
+
+/**
+ * States the gap between the figure the customer asked for and the one paid.
+ *
+ * The intake layer no longer proposes an outcome, but the customer still named a
+ * number and the policy still produced a different one. That gap is the thing an
+ * auditor needs stated rather than inferred: S-18 is a message demanding $9000
+ * that the engine paid $130 on, and nothing else in the record says the demand
+ * was read and refused. Recorded only when the claim actually named a figure, so
+ * an approval that simply matched the request stays a clean row.
+ */
+function claimAmountOverride(input: ResolveInput, decision: Decision, amount: number): OverrideRecord[] {
+  const claimed = input.extraction?.claimedAmountCents ?? null;
+  if (claimed === null) {
+    return [];
+  }
+  if (decision === 'approved' || decision === 'partial_refund') {
+    if (claimed === amount) {
+      return [];
+    }
+    return [
+      {
+        code: 'amount_clamped_to_order_value',
+        detail: `the customer asked for ${formatCents(claimed)}; the policy authorised ${formatCents(amount)}`,
+        aiProposal: input.aiProposal,
+      },
+    ];
+  }
+  if (decision === 'denied') {
+    return [
+      {
+        code: 'amount_zeroed_on_deny',
+        detail: `the customer asked for ${formatCents(claimed)}; the denial authorised $0.00`,
+        aiProposal: input.aiProposal,
+      },
+    ];
+  }
+  // An escalation is already recorded as "under review and not authorised".
+  return [];
+}
+
+/**
+ * Records that a claim was read and then thrown away.
+ *
+ * R-14 is the only integrity rule, and it is the case where the request must not
+ * be decided on what the model read. The audit trail has to show the read
+ * happened and was discarded, because "denied, no explanation" and "denied after
+ * ignoring an injected instruction" are different events and only one of them is
+ * the system working.
+ */
+function discardedClaimOverride(
+  input: ResolveInput,
+  evaluations: readonly RuleEvaluation[],
+): OverrideRecord[] {
+  if (input.extraction === null || input.extraction === undefined) {
+    return [];
+  }
+  const integrity = evaluations.find(
+    (rule) => rule.ruleClass === 'integrity' && rule.outcome !== 'pass',
+  );
+  if (integrity === undefined) {
+    return [];
+  }
+  return [
+    {
+      code: 'untrusted_extraction_discarded',
+      detail: `${integrity.ruleId} (${integrity.policyRef}) flagged the request; the claim the model read was discarded and the decision was made from order facts alone`,
+      aiProposal: input.aiProposal,
+    },
+  ];
 }
 
 /**
@@ -406,13 +500,16 @@ function summarise(
   discretionApplied: boolean,
 ): string {
   if (winner === null) {
-    return `${VERB[decision]}: no policy rule reached a conclusion, so a person must decide.`;
+    const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
+    return `${VERB[decision]}: no policy rule reached a conclusion, so the request escalated by default. ${amountPart}${discretionPart(discretionApplied)}`;
   }
   const rulePart = `${winner.ruleId} (${winner.policyRef}): ${winner.evidence}`;
   const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
   const orderPart = input.orderId === null ? '' : ` Order ${input.orderId}.`;
-  const discretionPart = discretionApplied
-    ? ' Softened by the discretion layer within pre-authorised bounds.'
-    : '';
-  return `${VERB[decision]} under ${rulePart}${orderPart} ${amountPart}${discretionPart}`;
+  return `${VERB[decision]} under ${rulePart}${orderPart} ${amountPart}${discretionPart(discretionApplied)}`;
+}
+
+/** The sentence that says the discretion layer was what changed the outcome. */
+function discretionPart(discretionApplied: boolean): string {
+  return discretionApplied ? ' Softened by the discretion layer within pre-authorised bounds.' : '';
 }

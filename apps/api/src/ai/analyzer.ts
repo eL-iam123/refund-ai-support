@@ -1,4 +1,4 @@
-import type { AiProposal, ClaimExtraction } from '@refund/shared';
+import type { ClaimExtraction } from '@refund/shared';
 
 /**
  * The one seam between the policy engine and a language model.
@@ -7,8 +7,14 @@ import type { AiProposal, ClaimExtraction } from '@refund/shared';
  * below it is "ask a model to talk to a customer". The interface is deliberately
  * narrow - one method, one job - because the security argument of this system
  * is that the model is a messenger, not a decision maker. Its entire influence
- * is one `AgentReply` that either asks the customer a question or hands the
+ * is one `IntakeReply` that either asks the customer a question or hands the
  * engine a `ClaimExtraction`, and the engine is free to overrule the claim.
+ *
+ * The reply carries no proposal and no amount: there is no field in it that
+ * could be read as a decision, so the resolver has nothing to reconcile and the
+ * policy engine is the only writer of an outcome. A `ClaimExtraction` is a
+ * reading of what the customer said; what happens next is computed from order
+ * facts.
  *
  * The production implementation is a real HTTP client. The test implementation
  * is a fake in `src/test/`. There is no "offline mode" and no simulated model
@@ -60,12 +66,6 @@ export interface IntakeInput {
   readonly history: readonly DialogueLine[];
 }
 
-/** One prior turn of the conversation, oldest first. */
-export interface DialogueLine {
-  readonly role: 'customer' | 'assistant';
-  readonly text: string;
-}
-
 /**
  * What the model returns during intake.
  *
@@ -82,29 +82,6 @@ export type IntakeReply =
   | {
       readonly kind: 'complete';
       readonly extraction: ClaimExtraction;
-      readonly model: string;
-    };
-
-/**
- * What the model is allowed to do back in the legacy flow (kept for chat mode).
- *
- * Two options, and nothing else. `question` is the messenger half of the job:
- * the model may ask the customer for the one detail it is missing. `claim` is
- * the engine half - a reading of the message, never a decision, that the
- * resolver compares against the policy and is free to overrule. Everything the
- * model says to a customer is a question; everything it decides is a suggestion.
- */
-export type AgentReply =
-  | {
-      readonly kind: 'question';
-      /** Exactly one question, written in the customer's own language. */
-      readonly question: string;
-      readonly model: string;
-    }
-  | {
-      readonly kind: 'claim';
-      readonly extraction: ClaimExtraction;
-      readonly proposal: AiProposal;
       readonly model: string;
     };
 

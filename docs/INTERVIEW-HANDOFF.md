@@ -170,7 +170,7 @@ merits. Obfuscation buys an attacker a queue ticket, not a payout.
 
 **Also worth knowing:** detection is deliberately *not* terminal. R-14 runs at intake
 and is folded in at resolve, so a hostile message still reaches the model and the trail
-can show the resolver clamping an untrusted proposal. Dropping it at intake would be
+can show the claim read from an untrusted message, and then discarded. Dropping it at intake would be
 safer in the narrow sense and un-auditable in the one that matters — a reviewer could
 not distinguish an attack that was caught from one that never happened.
 

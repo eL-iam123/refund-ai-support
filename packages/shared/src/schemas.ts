@@ -419,14 +419,27 @@ export const AdminStatsSchema = z.object({
   /** Which rules are actually deciding things. A rule that never fires is a rule to delete. */
   topRules: z.array(z.object({ ruleId: z.string(), fired: z.number().int() })),
 
-  /** Requests per day, oldest first, for the sparkline. */
-  daily: z.array(z.object({ day: z.string(), total: z.number().int(), approved: z.number().int(), denied: z.number().int(), escalated: z.number().int() })),
+  /**
+   * Requests per day, oldest first, for the sparkline.
+   *
+   * `byDecision` rather than one field per outcome: a fixed set of columns has to
+   * be edited every time a decision value is added, and the day it is forgotten
+   * the series stop summing to `total` - which reads as decisions going missing
+   * rather than as a column nobody added.
+   */
+  daily: z.array(z.object({ day: z.string(), total: z.number().int(), byDecision: z.record(z.enum(DECISIONS), z.number().int()) })),
 
-  /** What the model proposed versus what the policy decided. The disagreement count. */
+  /**
+   * Where the policy disagreed with what was asked for.
+   *
+   * `modelSaidYesPolicySaidNo` predates the removal of model proposals and keeps
+   * its name for continuity; what it now counts is the case that would still show
+   * a resolver bug as a payout - a claim naming a figure that came back denied.
+   */
   clampRate: z.object({
-    /** Requests where the resolver overruled the model's proposed decision or amount. */
+    /** Requests whose overrides record a clamped, zeroed or overruled amount. */
     clamped: z.number().int(),
-    /** Requests where the model suggested approving and the policy denied. */
+    /** Requests where money was asked for, the claim was read, and the policy paid nothing. */
     modelSaidYesPolicySaidNo: z.number().int(),
   }),
 });

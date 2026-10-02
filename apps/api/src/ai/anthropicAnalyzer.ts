@@ -1,15 +1,14 @@
 import { z } from 'zod';
+import { ClaimExtractionSchema } from '@refund/shared';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildAgentUser, CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM, INTAKE_SYSTEM } from './prompts.js';
-import { AgentOutputSchema, type AgentOutput } from './schemas.js';
+import { buildIntakeUser, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
+import { CompleteSchema, IntakeOutputSchema, type IntakeOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
-  type AgentReply,
   type AIAnalyzer,
-  type AnalyzerInput,
   type IntakeInput,
   type IntakeReply,
   type AttemptObserver,
@@ -107,79 +106,29 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     this.model = this.candidates[0] ?? 'unknown';
   }
 
-  /** Intake phase: multi-turn extraction with clarification loops. */
+  /**
+   * Intake: the model either asks one question or submits a complete claim.
+   *
+   * The repair pass reuses the first prompt verbatim and only varies the second
+   * turn, because Anthropic requires the assistant turn to come before a user
+   * one - the rejected extraction is the assistant's own prior reply.
+   */
   async analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const user = buildIntakeUser(input.message, input.order, input.history);
-
-    for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
-      const userContent =
-        repair === 0
-          ? user
-          : `${user}\n\nYour previous reply was rejected: ${complaints}. Reply with a valid tool call.`;
-
-      const completion = await this.completeIntake(INTAKE_SYSTEM, userContent, budget, observer);
-      const parsed = parseJson(completion.text);
-
-      if (!parsed) {
-        complaints = 'empty or non-JSON response';
-        continue;
-      }
-
-      if (parsed.action === 'ask') {
-        if (typeof parsed.question === 'string' && parsed.question.trim().length > 0) {
-          observer({
-            model: completion.model,
-            attempt: repair + 1,
-            ok: true,
-            latencyMs: 0,
-            promptTokens: completion.promptTokens,
-            completionTokens: completion.completionTokens,
-            error: null,
-          });
-          return { kind: 'question', question: parsed.question.trim(), model: completion.model };
-        }
-        complaints = 'question missing or empty';
-      } else if (parsed.action === 'decide') {
-        const extraction = parsed.extraction;
-        if (extraction && typeof extraction === 'object') {
-          observer({
-            model: completion.model,
-            attempt: repair + 1,
-            ok: true,
-            latencyMs: 0,
-            promptTokens: completion.promptTokens,
-            completionTokens: completion.completionTokens,
-            error: null,
-          });
-          return { kind: 'complete', extraction, model: completion.model };
-        }
-        complaints = 'extraction missing or invalid';
-      } else {
-        complaints = 'action must be "ask" or "decide"';
-      }
-    }
-
-    throw new AiUnavailableError(`intake failed after ${MAX_REPAIRS + 1} attempts`);
-  }
-
-  /** Legacy analyze method for backward compatibility with chat mode. */
-  async analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const base = buildAgentUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
+    const first = buildIntakeUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
     let complaints = 'no completion';
 
     for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
       const user =
         repair === 0
-          ? base
-          : `${base}\n\nYour previous reply was rejected: ${complaints}. Call a tool with a valid object.`;
+          ? first
+          : `${first}\n\nYour previous reply was rejected: ${complaints}. Call a tool with a valid object.`;
 
-      const completion = await this.complete(base, user, budget, observer);
-      const parsed = AgentOutputSchema.safeParse(parseJson(completion.text));
+      const completion = await this.complete(first, user, budget, observer);
+      const parsed = IntakeOutputSchema.safeParse(parseJson(completion.text));
 
       if (parsed.success) {
-        return toAgentReply(parsed.data, completion.model);
+        return toIntakeReply(parsed.data, completion.model);
       }
 
       complaints = formatIssues(parsed.error).slice(0, 300);
@@ -200,16 +149,11 @@ export class AnthropicAnalyzer implements AIAnalyzer {
 
     throw new AiUnavailableError(
       budget.aborted
-        ? `analysis time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
+        ? `intake time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
         : `model output failed schema validation: ${complaints}`,
     );
   }
 
-  /**
-   * The repair pass reuses the first prompt verbatim and only varies the second
-   * turn, because Anthropic requires the assistant turn to come before a user
-   * one - the original extraction is the assistant's own prior reply.
-   */
   private async complete(
     firstUserMessage: string,
     user: string,
@@ -221,7 +165,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     for (const model of this.candidates) {
       for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
         if (budget.aborted) {
-          throw new AiUnavailableError(`analysis time budget exhausted after ${failures.length} attempt(s)`);
+          throw new AiUnavailableError(`intake time budget exhausted after ${failures.length} attempt(s)`);
         }
 
         const outcome = await this.attempt(model, attempt, firstUserMessage, user, budget, observer);
@@ -243,39 +187,6 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     );
   }
 
-  /** Intake-specific completion: uses the intake system prompt and intake user message. */
-  private async completeIntake(
-    system: string,
-    user: string,
-    budget: AbortSignal,
-    observer: AttemptObserver,
-  ): Promise<Completion> {
-    const failures: string[] = [];
-
-    for (const model of this.candidates) {
-      for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
-        if (budget.aborted) {
-          throw new AiUnavailableError(`intake time budget exhausted after ${failures.length} attempt(s)`);
-        }
-
-        const outcome = await this.attempt(model, attempt, system, user, budget, observer);
-        if (outcome.ok) {
-          return outcome.completion;
-        }
-        failures.push(`${model}#${attempt} ${outcome.error}`);
-
-        if (attempt < this.env.AI_MAX_ATTEMPTS && outcome.retryable) {
-          await backoff(attempt, budget);
-        } else if (!outcome.retryable) {
-          break;
-        }
-      }
-    }
-
-    throw new AiUnavailableError(
-      cap(`all ${this.candidates.length} anthropic model(s) failed after ${failures.length} attempt(s): ${failures.join(' | ')}`),
-    );
-  }
 
   private async attempt(
     model: string,
@@ -470,7 +381,7 @@ function requestBody(
     // Low enough to keep the extraction reproducible. A claim that reads the
     // same message two different ways is a claim nobody can audit.
     temperature: 0,
-    system: EXTRACTION_SYSTEM,
+    system: INTAKE_SYSTEM,
     // `any` rather than the single-tool `tool` choice: the model must call one
     // of the two tools but gets to pick which - exactly the ask-or-decide
     // discriminator the engine is built around.
@@ -497,8 +408,8 @@ function askTool(): { name: string; description: string; input_schema: object } 
 function decideTool(): { name: string; description: string; input_schema: object } {
   return {
     name: DECIDE_TOOL,
-    description: 'Submit the structured refund claim read from the conversation to the decision engine.',
-    input_schema: z.toJSONSchema(AgentOutputSchema),
+    description: 'Submit the structured refund claim read from the conversation to the policy engine.',
+    input_schema: z.toJSONSchema(CompleteSchema),
   };
 }
 
@@ -628,23 +539,19 @@ async function backoff(attempt: number, budget: AbortSignal): Promise<void> {
   }
 }
 
-function toAgentReply(data: AgentOutput, model: string): AgentReply {
+/**
+ * The validated wire object as an `IntakeReply`.
+ *
+ * The claim is re-parsed through the extraction schema on the way in rather than
+ * spread out of the wire object, because that parse is what strips the `action`
+ * discriminator and anything else the model invented: what the engine receives is
+ * the extraction schema and nothing else.
+ */
+function toIntakeReply(data: IntakeOutput, model: string): IntakeReply {
   if (data.action === 'ask') {
     return { kind: 'question', question: data.question, model };
   }
-  const { suggestedDecision, suggestedAmountCents, ...extraction } = data;
-  return {
-    kind: 'claim',
-    extraction,
-    proposal: {
-      suggestedDecision,
-      suggestedAmountCents,
-      confidence: extraction.confidence,
-      reason: extraction.reason,
-      model,
-    },
-    model,
-  };
+  return { kind: 'complete', extraction: ClaimExtractionSchema.parse(data), model };
 }
 
 function formatIssues(error: z.ZodError): string {

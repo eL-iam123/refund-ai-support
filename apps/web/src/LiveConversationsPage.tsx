@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Bot, FileText, Headset, Inbox, MessageSquare, Send, User, Scale, ShieldAlert } from 'lucide-react';
-import { AWAITING_AGENT_ID, type RuleOutcome } from '@refund/shared';
+import { AWAITING_AGENT_ID, type Decision, type RuleOutcome } from '@refund/shared';
 import {
   api,
   describe,
@@ -782,10 +782,21 @@ interface QueueAnalytics {
   readonly openHandoffs: number;
   readonly escalatedAwaiting: number;
   readonly awaitingReviewCents: number;
-  readonly decisionsToday: { readonly approved: number; readonly denied: number; readonly escalated: number };
+  /** One count per decision value, including the ones only discretion produces. */
+  readonly decisionsToday: Record<Decision, number>;
   readonly averageTakeoverMinutes: number | null;
   readonly since: string;
 }
+
+/** The order the pills read in: what was paid, what was refused, what waits. */
+const DECISION_ORDER = [
+  'approved',
+  'partial_refund',
+  'exchange',
+  'store_credit',
+  'denied',
+  'escalated',
+] as const satisfies readonly Decision[];
 
 /**
  * The queue snapshot at the top of the page.
@@ -810,7 +821,10 @@ function AnalyticsStrip({
   }
   const { openHandoffs, escalatedAwaiting, awaitingReviewCents, decisionsToday, averageTakeoverMinutes, since } =
     analytics.data;
-  const total = decisionsToday.approved + decisionsToday.denied + decisionsToday.escalated;
+  // Summed over the enum rather than over a named list: the "decided today"
+  // figure must include every outcome the system can produce, or a day resolved
+  // by discretion reads as a day where nothing happened.
+  const total = DECISION_ORDER.reduce((sum, decision) => sum + decisionsToday[decision], 0);
   return (
     <aside className="live-analytics">
       <p className="queue-line">
@@ -825,9 +839,11 @@ function AnalyticsStrip({
         <span className="queue-item">
           <span className="queue-label">Decided today</span>
           <span className="queue-value">
-            <span className="pill pill-approved">{decisionsToday.approved} approved</span>
-            <span className="pill pill-denied">{decisionsToday.denied} denied</span>
-            <span className="pill pill-escalated">{decisionsToday.escalated} escalated</span>
+            {DECISION_ORDER.filter((decision) => decisionsToday[decision] > 0).map((decision) => (
+              <span key={decision} className={`pill pill-${decision}`}>
+                {decisionsToday[decision]} {decision.replace(/_/g, ' ')}
+              </span>
+            ))}
           </span>
         </span>
         <span className="queue-item">

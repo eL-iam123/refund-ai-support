@@ -29,8 +29,21 @@ attacker.
 
 `resolve()` in `apps/api/src/policy/resolver.ts` is the only function in the
 codebase that constructs a `RefundDecision`. Rules *evaluate*; they do not decide.
-An AI proposal arrives at the resolver as an inert value and is never read as a
+A model's output arrives at the resolver as an inert value and is never read as a
 decision, an amount, or an outcome.
+
+> **Amended.** The intake layer no longer produces a proposal at all. `IntakeReply`
+> is either one clarifying question or a `ClaimExtraction` — reason, condition,
+> confidence, quotes, and the figure the customer asked for — so there is no field
+> in the model contract that *could* hold an outcome. The decision below is
+> therefore enforced by the type of the seam rather than by comparing a proposal
+> after the fact. `ResolveInput.aiProposal` remains for any caller that has one
+> (`ai_proposal_rejected` and the two `ai_proposed_approve_clamped_to_*` codes
+> remain in `OVERRIDE_CODES`), and `reconcile()` now also records the two
+> disagreements that a claim can still produce: the figure the customer asked for
+> against the figure authorised (`amount_clamped_to_order_value`,
+> `amount_zeroed_on_deny`), and a claim discarded because an integrity rule fired
+> (`untrusted_extraction_discarded`).
 
 Four properties follow, and each is a separate mechanism rather than a convention:
 
@@ -56,12 +69,12 @@ integer no greater than the order total, so even a future bug above the resolver
 cannot emit a negative or over-total payout.
 
 **4. Disagreement is recorded, not resolved in the model's favour.**
-`reconcile()` compares the proposal against the outcome and writes an
-`OverrideRecord` whenever they differ — including the live case of a model
-proposing `$0.00` against a resolver-computed `$100.00`
-(`amount_clamped_to_order_value`). The audit trail therefore shows not just what was
-decided but what the model wanted, which is the only way a reviewer can tell a
-working system from a lucky one.
+`reconcile()` writes an `OverrideRecord` whenever what the model read differs from
+what the policy concluded — the figure the customer asked for against the figure
+authorised, a denial that authorises nothing, and a claim thrown away as untrusted.
+The audit trail therefore shows not just what was decided but what the model read
+and the policy thought of it, which is the only way a reviewer can tell a working
+system from a lucky one.
 
 Two supporting decisions belong to this ADR because they exist to protect it:
 

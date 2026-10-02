@@ -1,7 +1,7 @@
 import { apiKeyFor, presetFor, type Env } from '../config/env.js';
 import { OpenAiAnalyzer } from './openaiAnalyzer.js';
 import { AnthropicAnalyzer } from './anthropicAnalyzer.js';
-import { LocalAnalyzer, createLocalIntakeAnalyzer } from './localAnalyzer.js';
+import { LocalAnalyzer } from './localAnalyzer.js';
 import { UnavailableAnalyzer } from './unavailableAnalyzer.js';
 import type { AIAnalyzer } from './analyzer.js';
 
@@ -39,37 +39,14 @@ export function createAnalyzer(env: Env): AIAnalyzer {
     : new OpenAiAnalyzer(env, preset, apiKey);
 }
 
-/** Builds the intake analyzer (multi-turn extraction with clarification loops). */
-export function createIntakeAnalyzer(env: Env): AIAnalyzer {
-  const preset = presetFor(env.AI_PROVIDER);
-
-  if (preset.kind === 'local') {
-    return createLocalIntakeAnalyzer();
-  }
-
-  const apiKey = apiKeyFor(env);
-  if (apiKey === undefined) {
-    return UnavailableAnalyzer(
-      'AI_API_KEY is not set, so no claim can be extracted',
-      'AI_API_KEY',
-    );
-  }
-
-  return preset.kind === 'anthropic'
-    ? new AnthropicAnalyzer(env, preset, apiKey)
-    : new OpenAiAnalyzer(env, preset, apiKey);
-}
-
 export { OpenAiAnalyzer } from './openaiAnalyzer.js';
 export { AnthropicAnalyzer } from './anthropicAnalyzer.js';
-export { LocalAnalyzer, createLocalIntakeAnalyzer } from './localAnalyzer.js';
+export { LocalAnalyzer } from './localAnalyzer.js';
 export { UnavailableAnalyzer } from './unavailableAnalyzer.js';
 export { modelCandidates, toAnalyzerOrder } from './openaiAnalyzer.js';
 export {
   AiUnavailableError,
-  type AgentReply,
   type AIAnalyzer,
-  type AnalyzerInput,
   type IntakeInput,
   type IntakeReply,
   type AnalyzerItem,

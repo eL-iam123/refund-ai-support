@@ -16,7 +16,7 @@ import {
 } from '../../retrieval/duplicates.js';
 import { toRequestDto } from '../serialize.js';
 import { HttpError, badRequest } from '../errors.js';
-import { resolveShopSession, SESSION_COOKIE } from '../../shop/auth.js';
+import { resolveShopSession, SESSION_COOKIE, type ShopUser } from '../../shop/auth.js';
 import { ESCALATION_AGENT, recordAgentMessage, takeoverForEscalated, type ActiveHandoff, type AgentMessage } from '../../db/handoffs.js';
 import { isChatClosed } from '../../db/chatClosures.js';
 import type { LiveHub } from '../hub.js';
@@ -51,23 +51,8 @@ async function handleChatMessage(
   hub: LiveHub,
 ): Promise<HandoffBody | { question: string; dialogueId: string; itemIds: readonly string[] } | { request: RefundRequestDto }> {
   const body = parseChatBody(request, ctx);
-  const cookies = request.cookies as Record<string, string | undefined>;
-  const session = resolveShopSession(ctx.db, cookies[SESSION_COOKIE], ctx.now());
-  if (session === null) {
-    throw new HttpError(401, 'unauthorized', 'sign in to start a refund request');
-  }
-  const orderIsOwned = body.orderId !== null && findOrder(ctx.db, session.customerId, body.orderId, ctx.now()) !== null;
-  const latestTurn = !orderIsOwned || body.orderId === null
-    ? undefined
-    : conversationForOrder(ctx.db, session.customerId, body.orderId, ctx.now(), 1).at(-1);
-  const pendingScope = orderIsOwned && body.orderId !== null && latestTurn?.kind === 'dialogue'
-    ? pendingDialogueItemIds(ctx.db, session.customerId, body.orderId)
-    : [];
-  const resolved: CreateRefundRequest = {
-    ...body,
-    customerId: session.customerId,
-    itemIds: body.itemIds.length > 0 ? body.itemIds : [...pendingScope],
-  };
+  const session = signedInSession(ctx, request);
+  const resolved = withPendingItemScope(ctx, session.customerId, body);
   const now = ctx.now();
 
   assertThreadOpen(ctx, resolved, now);
@@ -83,9 +68,53 @@ async function handleChatMessage(
     return suppressedDuplicate(ctx.db, duplicate, now);
   }
 
+  return await decideOrAsk(ctx, reply, resolved, now);
+}
+
+/** The customer this message is from. Never the one in the body. */
+function signedInSession(ctx: AppContext, request: FastifyRequest): ShopUser {
+  const cookies = request.cookies as Record<string, string | undefined>;
+  const session = resolveShopSession(ctx.db, cookies[SESSION_COOKIE], ctx.now());
+  if (session === null) {
+    throw new HttpError(401, 'unauthorized', 'sign in to start a refund request');
+  }
+  return session;
+}
+
+/**
+ * Carries the item scope an unanswered question already holds.
+ *
+ * The storefront's picker is the customer's way of saying "the mug, not the
+ * rest", and it is not repeated on the answer - the answer to "what happened to
+ * it?" is "it's cracked", which names no item. So when the previous turn on this
+ * order was a question rather than a decision, its scope is adopted here. A
+ * caller-supplied `itemIds` always wins, and the scope is only adopted for an
+ * order the customer owns.
+ */
+function withPendingItemScope(
+  ctx: AppContext,
+  customerId: string,
+  body: CreateRefundRequest,
+): CreateRefundRequest {
+  if (body.itemIds.length > 0 || body.orderId === null) {
+    return { ...body, customerId };
+  }
+  if (findOrder(ctx.db, customerId, body.orderId, ctx.now()) === null) {
+    return { ...body, customerId };
+  }
+  const latestTurn = conversationForOrder(ctx.db, customerId, body.orderId, ctx.now(), 1).at(-1);
+  const itemIds = latestTurn?.kind === 'dialogue' ? pendingDialogueItemIds(ctx.db, customerId, body.orderId) : [];
+  return { ...body, customerId, itemIds: [...itemIds] };
+}
+
+async function decideOrAsk(
+  ctx: AppContext,
+  reply: FastifyReply,
+  resolved: CreateRefundRequest,
+  now: Date,
+): Promise<{ question: string; dialogueId: string; itemIds: readonly string[] } | { request: RefundRequestDto }> {
   const input = toProcessInput(resolved, now);
   const result = await processRefundRequest(ctx.db, ctx.pipeline, input);
-
   if (result.stage === 'asked') {
     const turn = recordDialogueTurn(ctx.db, {
       customerId: input.customerId,

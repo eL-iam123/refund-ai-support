@@ -4,6 +4,7 @@ import {
   ALLOWED_OUTCOMES,
   PRECEDENCE,
   SCENARIOS,
+  type ClaimExtraction,
   type InjectionCategory,
   type RuleEvaluation,
 } from '@refund/shared';
@@ -347,6 +348,20 @@ describe('resolver clamps', () => {
     decidingRuleId: null,
   };
 
+  const extraction = (claimedAmountCents: number | null): ClaimExtraction => ({
+    intent: 'refund',
+    reason: 'damaged',
+    condition: 'damaged',
+    confidence: 0.9,
+    orderRef: 'ORD-TEST',
+    claimedAmountCents,
+    items: ['I1'],
+    evidenceQuotes: ['it arrived cracked'],
+    language: 'en',
+    urgency: 'normal',
+    policyOverrideAttempted: true,
+  });
+
   it('ignores a model that wants to pay more than the order is worth', () => {
     const decision = resolve({
       intakeEvaluations: [],
@@ -363,9 +378,9 @@ describe('resolver clamps', () => {
         model: 'test',
       },
       disputeCeilingCents: null,
-    db: openMemoryDatabase(),
-    order: null,
-    orderTotalCents: 13000,
+      db: openMemoryDatabase(),
+      order: null,
+      orderTotalCents: 13000,
       orderId: 'ORD-TEST',
     });
 
@@ -388,15 +403,98 @@ describe('resolver clamps', () => {
         model: 'test',
       },
       disputeCeilingCents: null,
-    db: openMemoryDatabase(),
-    order: null,
-    orderTotalCents: 13000,
+      db: openMemoryDatabase(),
+      order: null,
+      orderTotalCents: 13000,
       orderId: 'ORD-TEST',
     });
 
     expect(decision.decision).toBe('denied');
     expect(decision.refundAmountCents).toBe(0);
     expect(decision.overrides.map((o) => o.code)).toContain('ai_proposed_approve_clamped_to_deny');
+  });
+
+  // The intake layer proposes no outcome any more, so the disagreement that
+  // remains is between the figure the customer asked for and the figure the
+  // policy authorised. Nothing else on the record says so, and S-18 depends on
+  // exactly this: $9000 demanded, $130 paid, and an auditor able to see it.
+  it('states the gap between the figure claimed and the figure authorised', () => {
+    const decision = resolve({
+      intakeEvaluations: [],
+      gateResult,
+      reasonEvaluations: [evaluation({ ruleId: 'R-04', ruleClass: 'eligibility', outcome: 'approve' })],
+      grounding: null,
+      aiProposal: null,
+      disputeCeilingCents: null,
+      db: openMemoryDatabase(),
+      order: null,
+      orderTotalCents: 13000,
+      orderId: 'ORD-TEST',
+      extraction: extraction(900000),
+    });
+
+    expect(decision.decision).toBe('approved');
+    expect(decision.refundAmountCents).toBe(13000);
+    const clamp = decision.overrides.find((override) => override.code === 'amount_clamped_to_order_value');
+    expect(clamp?.detail).toContain(formatCents(900000));
+    expect(clamp?.detail).toContain(formatCents(13000));
+  });
+
+  it('says nothing extra when the claim named no figure, or named the one it got', () => {
+    const forClaim = (claimed: number | null): readonly string[] =>
+      resolve({
+        intakeEvaluations: [],
+        gateResult,
+        reasonEvaluations: [evaluation({ ruleId: 'R-04', ruleClass: 'eligibility', outcome: 'approve' })],
+        grounding: null,
+        aiProposal: null,
+        disputeCeilingCents: null,
+        db: openMemoryDatabase(),
+        order: null,
+        orderTotalCents: 13000,
+        orderId: 'ORD-TEST',
+        extraction: extraction(claimed),
+      }).overrides.map((override) => override.code);
+
+    expect(forClaim(null)).not.toContain('amount_clamped_to_order_value');
+    expect(forClaim(13000)).not.toContain('amount_clamped_to_order_value');
+  });
+
+  it('records that a claim read from a hostile message was discarded', () => {
+    const decision = resolve({
+      intakeEvaluations: [evaluation({ ruleId: 'R-14', ruleClass: 'integrity', outcome: 'deny' })],
+      gateResult,
+      reasonEvaluations: [],
+      grounding: null,
+      aiProposal: null,
+      disputeCeilingCents: null,
+      db: openMemoryDatabase(),
+      order: null,
+      orderTotalCents: 13000,
+      orderId: 'ORD-TEST',
+      extraction: extraction(90000),
+    });
+
+    expect(decision.decision).toBe('denied');
+    const codes = decision.overrides.map((override) => override.code);
+    expect(codes).toContain('untrusted_extraction_discarded');
+    expect(codes).toContain('amount_zeroed_on_deny');
+    // A claim that was never read cannot be recorded as discarded, so the
+    // record only appears when the model actually produced one.
+    const withoutClaim = resolve({
+      intakeEvaluations: [evaluation({ ruleId: 'R-14', ruleClass: 'integrity', outcome: 'deny' })],
+      gateResult,
+      reasonEvaluations: [],
+      grounding: null,
+      aiProposal: null,
+      disputeCeilingCents: null,
+      db: openMemoryDatabase(),
+      order: null,
+      orderTotalCents: 13000,
+      orderId: 'ORD-TEST',
+      extraction: null,
+    });
+    expect(withoutClaim.overrides.map((override) => override.code)).not.toContain('untrusted_extraction_discarded');
   });
 });
 

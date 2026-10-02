@@ -8,7 +8,6 @@ import { createAnalyzer } from '../ai/index.js';
 import { readEnv, type Env } from '../config/env.js';
 import { fileURLToPath } from 'node:url';
 import { ClaimExtractionSchema } from '@refund/shared';
-import { ExtractionOutputSchema } from '../ai/schemas.js';
 import { verifyGrounding } from '../ai/grounding.js';
 import type { OrderRecord } from '../db/records.js';
 import type { AIAnalyzer, IntakeReply, ProviderAttempt } from '../ai/analyzer.js';
@@ -154,23 +153,25 @@ live('live provider', () => {
         return;
       }
       const { result, attempts } = analysed;
-      // A messenger may prefer to clarify, but for a message that already
-      // names the order and the reason a claim is the contract being tested.
-      if (result.kind !== 'claim') {
+      // An intake specialist may prefer to clarify, but for a message that
+      // already names the order and the reason a complete claim is the contract
+      // being tested.
+      if (result.kind !== 'complete') {
         ctx.skip();
         return;
       }
 
-// The intake flow returns a complete extraction. Validate its shape and grounding.
-        expect(ClaimExtractionSchema.safeParse(result.extraction).success).toBe(true);
+      // 1. It is schema-valid, which is the boundary the whole system rests on:
+      // nothing undeclared reaches the resolver.
+      expect(ClaimExtractionSchema.safeParse(result.extraction).success).toBe(true);
 
-        // 2. Every quote is the customer's own text, character for character. This
-        // is the invariant that makes grounding meaningful, and the one a real
-        // paraphrasing model breaks first.
-        const grounding = verifyGrounding(result.extraction, [testCase.message]);
-        expect(grounding?.rejectedQuotes ?? []).toEqual([]);
+      // 2. Every quote is the customer's own text, character for character. This
+      // is the invariant that makes grounding meaningful, and the one a real
+      // paraphrasing model breaks first.
+      const grounding = verifyGrounding(result.extraction, [testCase.message]);
+      expect(grounding?.rejectedQuotes ?? []).toEqual([]);
 
-      // 4. It fits the configured budget, which is the guarantee the operator has.
+      // 3. It fits the configured budget, which is the guarantee the operator has.
       expect(Date.now() - startedAt).toBeLessThanOrEqual(env.AI_TOTAL_BUDGET_MS);
       expect(attempts.length).toBeGreaterThan(0);
     }, LIVE_TIMEOUT_MS);
@@ -187,7 +188,7 @@ live('live provider', () => {
       ctx.skip();
       return;
     }
-    if (analysed.result.kind !== 'claim') {
+    if (analysed.result.kind !== 'complete') {
       ctx.skip();
       return;
     }

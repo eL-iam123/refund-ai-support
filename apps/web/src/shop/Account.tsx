@@ -157,6 +157,15 @@ function DemoAccounts({ error, setError, setBusy, onDone }: Omit<FormProps, 'bus
     };
   }, []);
 
+  // Nothing is rendered unless the server actually has demo shoppers to offer.
+  // A deployment deliberately seeds none - a fresh shop contains nothing a real
+  // person did not do - so showing the heading anyway would advertise a
+  // password-free sign-in that cannot happen, and an evaluator would be left
+  // staring at an empty card wondering what they are meant to click.
+  if (accounts !== null && accounts.length === 0) {
+    return <></>;
+  }
+
   return (
     <section className="card">
       <h2>Try a demo shopper</h2>

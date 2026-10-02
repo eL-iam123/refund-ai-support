@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAnalyzer } from '../ai/anthropicAnalyzer.js';
 import { presetFor } from '../config/env.js';
-import type { IntakeInput, IntakeReply, AttemptObserver } from '../ai/analyzer.js';
+import type { IntakeInput, AttemptObserver } from '../ai/analyzer.js';
 import { testEnv } from './helpers.js';
 
 /**
@@ -32,6 +32,13 @@ const INPUT: IntakeInput = {
   },
 };
 
+/**
+ * The `decide_claim` tool's input, verbatim.
+ *
+ * The tool's input schema *is* the extraction, so there is no wrapper object and
+ * no `action` key in it - the tool's name is the discriminator, which is the
+ * whole reason this adapter matches on `name` rather than on a prose mode field.
+ */
 const VALID_INPUT = {
   intent: 'refund',
   reason: 'damaged',
@@ -44,8 +51,6 @@ const VALID_INPUT = {
   language: 'en',
   urgency: 'normal',
   policyOverrideAttempted: false,
-  suggestedDecision: 'approved',
-  suggestedAmountCents: 4200,
 };
 
 const noopObserver: AttemptObserver = () => undefined;
@@ -79,7 +84,7 @@ afterEach(() => {
 
 describe('anthropic wire format', () => {
   it('sends a forced tool call to the native messages endpoint', async () => {
-    const { calls } = stubAnthropic({ content: [{ type: 'tool_use', name: 'decide_claim', input: { action: 'decide', ...VALID_INPUT } }] });
+    const { calls } = stubAnthropic({ content: [{ type: 'tool_use', name: 'decide_claim', input: VALID_INPUT }] });
 
     await buildAnalyzer().analyze(INPUT, noopObserver);
 
@@ -107,7 +112,7 @@ describe('anthropic wire format', () => {
     stubAnthropic({
       content: [
         { type: 'text', text: 'Let me check that order.' },
-        { type: 'tool_use', id: 'toolu_01ABC', name: 'decide_claim', input: { action: 'decide', ...VALID_INPUT } },
+        { type: 'tool_use', id: 'toolu_01ABC', name: 'decide_claim', input: VALID_INPUT },
       ],
       model: 'claude-haiku-4-5-20251001',
       usage: { input_tokens: 100, output_tokens: 40 },
@@ -126,7 +131,7 @@ describe('anthropic wire format', () => {
   it('ignores a block whose id matches the tool but whose name does not', async () => {
     // Guards against the bug returning: matching on `id` would accept this.
     stubAnthropic({
-      content: [{ type: 'tool_use', id: 'decide_claim', name: 'some_other_tool', input: { action: 'decide', ...VALID_INPUT } }],
+      content: [{ type: 'tool_use', id: 'decide_claim', name: 'some_other_tool', input: VALID_INPUT }],
     });
 
     // No usable tool call, so the adapter exhausts its retries and reports the

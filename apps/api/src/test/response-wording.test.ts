@@ -98,6 +98,62 @@ describe('the acknowledgement', () => {
   });
 });
 
+describe('the response names the order once, not twice', () => {
+  const order = {
+    id: 'ORD-1a2b3c',
+    customerId: 'CUST-1',
+    placedAt: new Date('2026-01-01T00:00:00.000Z'),
+    deliveredAt: new Date('2026-01-05T00:00:00.000Z'),
+    ageDays: 5,
+    status: 'delivered',
+    paymentState: 'settled',
+    refundedCents: 0,
+    totalCents: 2400,
+    isSubscription: false,
+    trackingStatus: 'delivered',
+    signedByCustomer: true,
+    conditionAtDelivery: null,
+    items: [],
+  } as unknown as OrderRecord;
+
+  function composed(outcome: 'exchange' | 'store_credit', forOrder: OrderRecord | null): string {
+    return composeDeterministicResponse(
+      {
+        decision: outcome,
+        refundAmountCents: 0,
+        eligibleAmountCents: 2400,
+        currency: 'USD',
+        summary: '',
+        policyRef: 'REFUND_POLICY.md §10',
+        trace: [],
+        overrides: [],
+        eligibleItemIds: [],
+        blockedItems: [],
+        refundId: null,
+        refundState: 'none',
+      } as unknown as Parameters<typeof composeDeterministicResponse>[0],
+      forOrder,
+      'My order was late and it is not what I expected.',
+    );
+  }
+
+  it('reads cleanly for an exchange and for store credit', () => {
+    // Both sentences already said "your order"; appending the reference on top of
+    // it produced "an exchange for your order for order ORD-1a2b3c", which is the
+    // first thing a customer reads when their request is resolved.
+    for (const outcome of ['exchange', 'store_credit'] as const) {
+      const text = composed(outcome, order);
+      expect(text, outcome).toContain('ORD-1a2b3c');
+      expect(text, outcome).not.toMatch(/order for order/);
+    }
+  });
+
+  it('falls back to "your order" when no order was identified', () => {
+    // A request raised before an order resolved still has to be answerable.
+    expect(composed('exchange', null)).toContain('an exchange for your order');
+  });
+});
+
 describe('through the real pipeline', () => {
   async function run(message: string): Promise<{ decision: string; amount: number; reply: string }> {
     const db = openMemoryDatabase();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildAgentUser, EXTRACTION_SYSTEM } from '../ai/prompts.js';
+import { buildIntakeUser, INTAKE_SYSTEM } from '../ai/prompts.js';
 import type { AnalyzerOrder } from '../ai/analyzer.js';
 
 /**
@@ -21,56 +21,56 @@ describe('the agent prompt', () => {
   };
 
   it('forbids asking for an order number once the order block is present', () => {
-    expect(EXTRACTION_SYSTEM).toContain('when an Order block is present above');
-    expect(EXTRACTION_SYSTEM).toContain('ask the customer for an order number');
-    expect(EXTRACTION_SYSTEM).toContain('Never repeat a question');
-    expect(EXTRACTION_SYSTEM).toContain('do not insist');
+    expect(INTAKE_SYSTEM).toContain('when an Order block is present above');
+    expect(INTAKE_SYSTEM).toContain('ask the customer for an order number');
+    expect(INTAKE_SYSTEM).toContain('Never repeat a question');
+    expect(INTAKE_SYSTEM).toContain('do not insist');
   });
 
   it('demands a warm, human voice and no canned greetings', () => {
-    expect(EXTRACTION_SYSTEM).toContain('Never open with a canned greeting');
-    expect(EXTRACTION_SYSTEM).toContain('"Hello! How can I help you today?"');
-    expect(EXTRACTION_SYSTEM).toContain('open by acknowledging it, in their own words');
-    expect(EXTRACTION_SYSTEM).toContain('warm, plain and short');
+    expect(INTAKE_SYSTEM).toContain('Never open with a canned greeting');
+    expect(INTAKE_SYSTEM).toContain('"Hello! How can I help you today?"');
+    expect(INTAKE_SYSTEM).toContain('open by acknowledging it, in their own words');
+    expect(INTAKE_SYSTEM).toContain('warm, plain and short');
   });
 
   it('requires the model to restate the complaint before asking', () => {
-    expect(EXTRACTION_SYSTEM).toContain('Restate their problem in your own words');
-    expect(EXTRACTION_SYSTEM).toContain("Just to be sure I've got it right");
-    expect(EXTRACTION_SYSTEM).toContain('turns it into a case a person can pick up and resolve');
+    expect(INTAKE_SYSTEM).toContain('Restate their problem in your own words');
+    expect(INTAKE_SYSTEM).toContain("Just to be sure I've got it right");
+    expect(INTAKE_SYSTEM).toContain('turns it into a case a person can pick up and resolve');
   });
 
   it('bounds the ask loop and guides the questions', () => {
-    expect(EXTRACTION_SYSTEM).toContain('Only ask when an answer would change the decision or make handing the case to a person clearer');
-    expect(EXTRACTION_SYSTEM).toContain('Ask one short question at a time');
-    expect(EXTRACTION_SYSTEM).toContain('Never ask "anything else?" filler');
-    expect(EXTRACTION_SYSTEM).toContain('do not keep asking for a perfect picture');
+    expect(INTAKE_SYSTEM).toContain('Only ask when the claim genuinely cannot be completed without a detail that is missing');
+    expect(INTAKE_SYSTEM).toContain('Ask one short question at a time');
+    expect(INTAKE_SYSTEM).toContain('Never ask "anything else?" filler');
+    expect(INTAKE_SYSTEM).toContain('do not keep asking for a perfect picture');
   });
 
   it('tells the model the order is already identified when one was resolved', () => {
-    const user = buildAgentUser('The mug is cracked, I want a refund.', ORDER, [], true);
+    const user = buildIntakeUser('The mug is cracked, I want a refund.', ORDER, [], true);
     expect(user).toContain('The order above has already been identified by the system.');
     expect(user).toContain('Do not ask the customer for it.');
   });
 
   it('does not claim an order is identified when none was resolved', () => {
-    const user = buildAgentUser('It arrived damaged.', null, [], true);
+    const user = buildIntakeUser('It arrived damaged.', null, [], true);
     expect(user).toContain('No order has been identified yet.');
     expect(user).not.toContain('has already been identified');
   });
 
   it('always shows the order total, even when the rest of the order is withheld', () => {
-    const user = buildAgentUser('The whole order is wrong.', ORDER, [], false);
+    const user = buildIntakeUser('The whole order is wrong.', ORDER, [], false);
     expect(user).toContain('ORD-1');
     expect(user).toContain('total $42.00');
     expect(user).toContain('Item details withheld at this stage.');
   });
 
   it('withholds item names and prices unless order facts are shared', () => {
-    const withheld = buildAgentUser('It is damaged.', ORDER, [], false);
+    const withheld = buildIntakeUser('It is damaged.', ORDER, [], false);
     expect(withheld).not.toContain('Ceramic mug');
 
-    const shared = buildAgentUser('It is damaged.', ORDER, [], true);
+    const shared = buildIntakeUser('It is damaged.', ORDER, [], true);
     expect(shared).toContain('Ceramic mug');
     expect(shared).toContain('total $42.00');
   });

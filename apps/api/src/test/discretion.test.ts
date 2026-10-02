@@ -310,3 +310,99 @@ describe('discretion never overrides a denial', () => {
     expect(result.kind).toBe('none');
   });
 });
+
+describe('a request that escalated for a person is never softened', () => {
+  /**
+   * The escalation reason is what the rules recorded, and risk and integrity are
+   * the classes that exist because the request must not be settled automatically.
+   * A small, well-evidenced claim on such an order is exactly the shape an
+   * abuser's claim takes, so paying it because the amount is small turns the risk
+   * rule off - which is what happened: an order with an open chargeback was
+   * approved and paid.
+   */
+  it.each(['R-07', 'R-08', 'R-09', 'R-14'])('offers nothing when %s escalated', (ruleId) => {
+    const personOnly = {
+      ruleId: ruleId as RuleEvaluation['ruleId'],
+      ruleClass: ruleId === 'R-14' ? ('integrity' as const) : ('risk' as const),
+      scope: 'order' as const,
+      outcome: 'escalate' as const,
+      evidence: `${ruleId} escalated`,
+      policyRef: 'REFUND_POLICY.md §6',
+      itemIds: [],
+    };
+
+    for (const bounds of [
+      {},
+      { allowPartial: true },
+      { allowExchange: true },
+      { allowStoreCredit: true },
+      { maxAmountCents: 1_000_000, loyaltyMaxAmountCents: 1_000_000 },
+    ]) {
+      const result = recommendDiscretion(
+        context({
+          trace: [personOnly],
+          winner: personOnly,
+          extraction: extraction({ reason: 'damaged' }),
+          grounding: GROUNDING_FAULT,
+          config: config(bounds),
+        }),
+      );
+      expect(result.kind, `${ruleId} ${JSON.stringify(bounds)}`).toBe('none');
+    }
+  });
+
+  it('still softens an escalation raised by the policy on a boundary question', () => {
+    // The contrast that makes the guard meaningful: an authority escalation is a
+    // rule drawing a line around money, which is what an operator can authorise
+    // discretion over. Only risk and integrity are excluded.
+    const authority = {
+      ruleId: 'R-03' as RuleEvaluation['ruleId'],
+      ruleClass: 'approval-authority' as const,
+      scope: 'order' as const,
+      outcome: 'escalate' as const,
+      evidence: 'order total above the review threshold',
+      policyRef: 'REFUND_POLICY.md §5.1',
+      itemIds: [],
+    };
+
+    expect(
+      recommendDiscretion(
+        context({
+          trace: [authority],
+          winner: authority,
+          extraction: extraction({ reason: 'damaged' }),
+          grounding: GROUNDING_FAULT,
+          config: config({}),
+        }),
+      ).kind,
+    ).toBe('approve');
+  });
+
+  it('does not turn a qualifying fault into an exchange because it was expensive', () => {
+    // The customer asked about a damaged item. The choices are a larger or smaller
+    // refund, not a different remedy, and an automatic exchange would resolve a
+    // genuine fault with something nobody asked for.
+    const authority = {
+      ruleId: 'R-03' as RuleEvaluation['ruleId'],
+      ruleClass: 'approval-authority' as const,
+      scope: 'order' as const,
+      outcome: 'escalate' as const,
+      evidence: 'order total above the review threshold',
+      policyRef: 'REFUND_POLICY.md §5.1',
+      itemIds: [],
+    };
+
+    const result = recommendDiscretion(
+      context({
+        trace: [authority],
+        winner: authority,
+        eligibleAmountCents: 400_000,
+        extraction: extraction({ reason: 'damaged' }),
+        grounding: GROUNDING_FAULT,
+        config: config({ allowExchange: true, allowPartial: false, maxAmountCents: 5_000 }),
+      }),
+    );
+
+    expect(result.kind).toBe('none');
+  });
+});

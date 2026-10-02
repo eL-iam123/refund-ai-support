@@ -258,7 +258,7 @@ export const SCENARIOS: readonly Scenario[] = [
   {
     id: 'S-07',
     name: 'Prompt injection, request otherwise eligible',
-    goal: 'R-14 denies a policy-override attempt. The model is still called so the resolver can demonstrably clamp a real proposal, and the untrusted extraction is discarded.',
+    goal: 'R-14 denies a policy-override attempt. The model is still called, so the audit trail can show that a claim was read from an injected message, that the $900 it asked for authorised nothing, and that the untrusted extraction was discarded before the decision was made from order facts alone.',
     customer: {
       key: 'CUST-GRANT',
       name: 'Oliver Grant',
@@ -275,7 +275,10 @@ export const SCENARIOS: readonly Scenario[] = [
     expectedAmountCents: 0,
     expectedRules: ['R-14'],
     expectsLlmCall: true,
-    expectsClamp: true,
+    // Nothing was clamped: the model proposes no outcome, so there is no
+    // approval to clamp. The record instead states that the $900 authorised
+    // nothing and that the claim was discarded as untrusted.
+    expectsClamp: false,
   },
   {
     id: 'S-08',

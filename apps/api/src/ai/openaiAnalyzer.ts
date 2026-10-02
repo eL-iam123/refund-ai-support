@@ -1,15 +1,14 @@
 import OpenAI, { APIConnectionError, APIError, APIUserAbortError } from 'openai';
 import type { z } from 'zod';
+import { ClaimExtractionSchema } from '@refund/shared';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildAgentUser, CHAT_SYSTEM_PROMPT, EXTRACTION_SYSTEM, INTAKE_SYSTEM } from './prompts.js';
-import { AgentOutputSchema, type AgentOutput } from './schemas.js';
+import { buildIntakeUser, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
+import { IntakeOutputSchema, type IntakeOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
-  type AgentReply,
   type AIAnalyzer,
-  type AnalyzerInput,
   type IntakeInput,
   type IntakeReply,
   type AnalyzerOrder,
@@ -168,66 +167,19 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     });
   }
 
-  /** Intake phase: multi-turn extraction with clarification loops. */
+  /**
+   * Intake: the model either asks one question or submits a complete claim.
+   *
+   * One repair attempt, not a retry storm. The failure this defends against is a
+   * model that returned prose or half a schema, and repeating a request that was
+   * structurally wrong usually produces the same shape of wrong - so the retry
+   * carries the specific complaint and hopes for a fix, while transport failures
+   * are handled by `complete` below, which is the layer that knows about
+   * candidates and backoff.
+   */
   async analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const user = buildIntakeUser(input.message, input.order, input.history);
-
-    for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
-      const userContent =
-        repair === 0
-          ? user
-          : `${user}\n\nYour previous reply was rejected: ${complaints}. Reply with valid JSON only.`;
-
-      const completion = await this.completeIntake(INTAKE_SYSTEM, userContent, budget, observer);
-      const parsed = parseJson(completion.text);
-
-      if (!parsed) {
-        complaints = 'empty or non-JSON response';
-        continue;
-      }
-
-      if (parsed.action === 'ask') {
-        if (typeof parsed.question === 'string' && parsed.question.trim().length > 0) {
-          observer({
-            model: completion.model,
-            attempt: repair + 1,
-            ok: true,
-            latencyMs: 0,
-            promptTokens: completion.promptTokens,
-            completionTokens: completion.completionTokens,
-            error: null,
-          });
-          return { kind: 'question', question: parsed.question.trim(), model: completion.model };
-        }
-        complaints = 'question missing or empty';
-      } else if (parsed.action === 'decide') {
-        const extraction = parsed.extraction;
-        if (extraction && typeof extraction === 'object') {
-          observer({
-            model: completion.model,
-            attempt: repair + 1,
-            ok: true,
-            latencyMs: 0,
-            promptTokens: completion.promptTokens,
-            completionTokens: completion.completionTokens,
-            error: null,
-          });
-          return { kind: 'complete', extraction, model: completion.model };
-        }
-        complaints = 'extraction missing or invalid';
-      } else {
-        complaints = 'action must be "ask" or "decide"';
-      }
-    }
-
-    throw new AiUnavailableError(`intake failed after ${MAX_REPAIRS + 1} attempts`);
-  }
-
-  /** Legacy analyze method for backward compatibility with chat mode. */
-  async analyze(input: AnalyzerInput, observer: AttemptObserver): Promise<AgentReply> {
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const base = buildAgentUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
+    const base = buildIntakeUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
     let complaints = 'no completion';
 
     for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
@@ -236,11 +188,11 @@ export class OpenAiAnalyzer implements AIAnalyzer {
           ? base
           : `${base}\n\nYour previous reply was rejected: ${complaints}. Reply with valid JSON only.`;
 
-      const completion = await this.complete(EXTRACTION_SYSTEM, user, budget, observer);
-      const parsed = AgentOutputSchema.safeParse(parseJson(completion.text));
+      const completion = await this.complete(INTAKE_SYSTEM, user, budget, observer);
+      const parsed = IntakeOutputSchema.safeParse(parseJson(completion.text));
 
       if (parsed.success) {
-        return toAgentReply(parsed.data, completion.model);
+        return toIntakeReply(parsed.data, completion.model);
       }
 
       complaints = formatIssues(parsed.error).slice(0, 300);
@@ -261,13 +213,13 @@ export class OpenAiAnalyzer implements AIAnalyzer {
 
     throw new AiUnavailableError(
       budget.aborted
-        ? `analysis time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
+        ? `intake time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
         : `model output failed schema validation: ${complaints}`,
     );
   }
 
   /** Tries each candidate model in turn, retrying each with a fixed backoff. */
-  private async completeIntake(
+  private async complete(
     system: string,
     user: string,
     budget: AbortSignal,
@@ -300,38 +252,6 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     );
   }
 
-  private async complete(
-    system: string,
-    user: string,
-    budget: AbortSignal,
-    observer: AttemptObserver,
-  ): Promise<Completion> {
-    const failures: string[] = [];
-
-    for (const model of this.candidates) {
-      for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
-        if (budget.aborted) {
-          throw new AiUnavailableError(`analysis time budget exhausted after ${failures.length} attempt(s)`);
-        }
-
-        const outcome = await this.attempt(model, attempt, system, user, budget, observer);
-        if (outcome.ok) {
-          return outcome.completion;
-        }
-        failures.push(`${model}#${attempt} ${outcome.error}`);
-
-        const canRetry = attempt < this.env.AI_MAX_ATTEMPTS && outcome.retryable;
-        if (!canRetry) {
-          break;
-        }
-        await backoff(attempt, budget);
-      }
-    }
-
-    throw new AiUnavailableError(
-      cap(`all ${this.candidates.length} model(s) failed after ${failures.length} attempt(s): ${failures.join(' | ')}`),
-    );
-  }
 
   private async attempt(
     model: string,
@@ -475,23 +395,19 @@ function chatAnswer(
   return text.trim().length === 0 ? null : { kind: 'text', text, model };
 }
 
-function toAgentReply(data: AgentOutput, model: string): AgentReply {
+/**
+ * The validated wire object as an `IntakeReply`.
+ *
+ * The claim is re-parsed through the extraction schema on the way in rather than
+ * spread out of the wire object, because that parse is what strips the `action`
+ * discriminator and anything else the model invented: what the engine receives is
+ * the extraction schema and nothing else.
+ */
+function toIntakeReply(data: IntakeOutput, model: string): IntakeReply {
   if (data.action === 'ask') {
     return { kind: 'question', question: data.question, model };
   }
-  const { suggestedDecision, suggestedAmountCents, ...extraction } = data;
-  return {
-    kind: 'claim',
-    extraction,
-    proposal: {
-      suggestedDecision,
-      suggestedAmountCents,
-      confidence: extraction.confidence,
-      reason: extraction.reason,
-      model,
-    },
-    model,
-  };
+  return { kind: 'complete', extraction: ClaimExtractionSchema.parse(data), model };
 }
 
 interface Completion {

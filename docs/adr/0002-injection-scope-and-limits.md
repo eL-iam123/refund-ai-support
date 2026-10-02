@@ -75,10 +75,15 @@ the order supports and ignoring the $9000 demanded.
 
 **Detection is deliberately not terminal.** R-14 runs at intake and its outcome is
 folded in at resolve, so a hostile message still reaches the model and the audit
-trail can show the resolver *clamping* an untrusted proposal. Dropping the request
+trail can show the claim read from it — the amount it asked for authorising nothing
+— and then discarded (`untrusted_extraction_discarded`). Dropping the request
 silently at intake would make the system safer in the narrow sense and un-auditable
 in the one that matters: a reviewer could not distinguish an attack that was caught
 from one that never happened.
+
+*Amended after ADR 0001: nothing is "clamped" here any more, because the model
+proposes no outcome. What the record shows is a claim that was read and thrown
+away.*
 
 ## Consequences
 

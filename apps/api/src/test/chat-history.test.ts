@@ -45,6 +45,19 @@ function itemIdsOf(turn: Turn | undefined): readonly string[] {
   return turn?.kind === 'request' || turn?.kind === 'dialogue' ? turn.itemIds : [];
 }
 
+/**
+ * Asserts a turn is a request carrying some text, without `expect.stringContaining`.
+ *
+ * The asymmetric matcher returns `any`, and handing an `any` to the assertion
+ * loses every type check inside it - including the one that would catch the
+ * thread returning a different kind of turn than the one being claimed. Reading
+ * the field off a narrowed turn keeps the assertion as strong as the type.
+ */
+function expectRequestSaying(turn: Turn | undefined, fragment: string): void {
+  expect(turn?.kind).toBe('request');
+  expect(turn?.kind === 'request' ? turn.message : '').toContain(fragment);
+}
+
 let harness: AppHarness | null = null;
 
 afterEach(() => {
@@ -187,9 +200,9 @@ describe('per-order chat history', () => {
 
     // Oldest first. A thread read newest-first puts the answer to the first
     // question below every question asked after it was already answered.
-    expect(first[0]).toMatchObject({ kind: 'request', message: expect.stringContaining('cracked shade') });
-    expect(first[1]).toMatchObject({ kind: 'request', message: expect.stringContaining('still cracked') });
-    expect(second[0]).toMatchObject({ kind: 'request', message: expect.stringContaining('zip') });
+    expectRequestSaying(first[0], 'cracked shade');
+    expectRequestSaying(first[1], 'still cracked');
+    expectRequestSaying(second[0], 'zip');
 
     // The part that actually matters: neither thread contains the other's turns.
     for (const turn of first) {

@@ -23,6 +23,10 @@ import type {
  * a typed result rather than an exception the UI has to guess at.
  */
 
+import { ApiError, request, post } from './httpClient';
+
+export { ApiError };
+
 export interface AuditEvent {
   readonly requestId: string;
   readonly at: string;
@@ -50,67 +54,11 @@ export interface RequestDetail {
   readonly llmCalls: readonly LlmCall[];
 }
 
-/** A failed call, carrying the API's own error code and field issues. */
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-    readonly issues: readonly string[] = [],
-  ) {
-    super(message);
-    this.name = 'ApiError';
-  }
-}
-
-interface ErrorEnvelope {
-  readonly error?: string;
-  readonly message?: string;
-  readonly issues?: readonly string[];
-}
-
 export interface RequestFilter {
   readonly decision?: string | undefined;
   readonly source?: string | undefined;
   readonly customerId?: string | undefined;
   readonly q?: string | undefined;
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    // The staff session cookie rides here on every call rather than at each call
-    // site, so a new protected endpoint cannot be added without a credential by
-    // mistake. It is httpOnly, so this is the only line in the client that has
-    // anything to do with being signed in.
-    credentials: 'include',
-    headers: { 'content-type': 'application/json', ...init?.headers },
-  });
-
-  if (!response.ok) {
-    throw await toApiError(response);
-  }
-  return (await response.json()) as T;
-}
-
-async function toApiError(response: Response): Promise<ApiError> {
-  let envelope: ErrorEnvelope = {};
-  try {
-    envelope = (await response.json()) as ErrorEnvelope;
-  } catch {
-    // A non-JSON error body (a proxy timeout, say) still has to surface as
-    // something the UI can render, so fall back to the status line.
-  }
-  return new ApiError(
-    response.status,
-    envelope.error ?? 'http_error',
-    envelope.message ?? `request failed with status ${response.status}`,
-    envelope.issues ?? [],
-  );
-}
-
-function post<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, { method: 'POST', body: JSON.stringify(body) });
 }
 
 /** Where a return's current status leads. Terminal states are absent by design. */
@@ -341,7 +289,7 @@ export const api = {
   staffCloseChat: (customerId: string, orderId: string | null): Promise<{ closure: { id: string; customerId: string; orderId: string | null; requestId: string; closedAt: string; closedBy: string; finalState: 'approved' | 'denied' } }> =>
     post(`/api/staff/conversations/${encodeURIComponent(customerId)}/close`, { orderId }),
 
-  staffAnalytics: (): Promise<{ analytics: { openHandoffs: number; escalatedAwaiting: number; awaitingReviewCents: number; decisionsToday: { approved: number; denied: number; escalated: number }; averageTakeoverMinutes: number | null; since: string } }> =>
+  staffAnalytics: (): Promise<{ analytics: { openHandoffs: number; escalatedAwaiting: number; awaitingReviewCents: number; decisionsToday: Record<Decision, number>; averageTakeoverMinutes: number | null; since: string } }> =>
     request('/api/staff/analytics'),
 };
 

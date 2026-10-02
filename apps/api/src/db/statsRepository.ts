@@ -14,13 +14,19 @@ import type { LlmCallRecord } from './records.js';
  * frontend, because the frontend would compute them differently each time and
  * the disagreement is the point:
  *
- * - `clampsFired` counts requests where the stored overrides include a clamp. It
- *   is the number that has to grow when the injection-resistance claims are
- *   honest, because a model that agreed with the policy every time would be
- *   indistinguishable from a model that was never consulted.
- * - `modelSaidYesPolicySaidNo` is the dangerous direction specifically: the model
- *   proposed money, the policy refused it. That is the case where a bug in the
- *   resolver shows up as a payout, so it is counted on its own.
+ * - `clampsFired` counts requests whose stored overrides record that the policy
+ *   paid something other than what was asked for - the figure clamped, the amount
+ *   zeroed, a model's proposal overruled. It is the number that has to grow when
+ *   the injection-resistance claims are honest, because a system that agreed with
+ *   every customer every time would be indistinguishable from one that was never
+ *   consulted. Matched on the override *codes* rather than on the JSON text: a
+ *   substring test also fires on a human-readable detail that happens to contain
+ *   the word, which is how a metric starts counting things it never measured.
+ * - `modelSaidYesPolicySaidNo` is the dangerous direction specifically: a claim
+ *   for money was read and the policy refused it. That is the case where a bug in
+ *   the resolver shows up as a payout, so it is counted on its own. The model no
+ *   longer proposes an outcome at all, so "said yes" now means what is recorded -
+ *   a claim naming a figure that came back denied.
  */
 
 interface CountRow {
@@ -63,9 +69,8 @@ interface TokenRow {
 interface DailyRow {
   readonly day: string;
   readonly total: number;
-  readonly approved: number;
-  readonly denied: number;
-  readonly escalated: number;
+  readonly decision: string;
+  readonly n: number;
 }
 
 function countOf(db: Db, sql: string, ...params: unknown[]): number {
@@ -108,7 +113,7 @@ function guardRailCounts(db: Db): {
   );
   let clampsFired = 0;
   let injectionAttempts = 0;
-  let modelSaidYesPolicySaidNo = 0;
+  let refusedClaim = 0;
   for (const row of rows) {
     if (containsClamp(row.overrides_json)) {
       clampsFired += 1;
@@ -116,11 +121,11 @@ function guardRailCounts(db: Db): {
     if (containsInjection(row.injection_json)) {
       injectionAttempts += 1;
     }
-    if (row.decision === 'denied' && modelProposedApproval(row.extraction_json)) {
-      modelSaidYesPolicySaidNo += 1;
+    if (row.decision === 'denied' && modelSaidYesPolicySaidNo(row.extraction_json)) {
+      refusedClaim += 1;
     }
   }
-  return { clampsFired, injectionAttempts, modelSaidYesPolicySaidNo };
+  return { clampsFired, injectionAttempts, modelSaidYesPolicySaidNo: refusedClaim };
 }
 
 /**
@@ -284,28 +289,88 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * database.
  */
 function dailyVolume(db: Db): AdminStatsDto['daily'] {
-  return queryAll<DailyRow>(
+  // One row per (day, decision) rather than one row per day with a fixed set of
+  // outcome columns: a fixed set cannot hold the outcomes the discretion layer
+  // added, and a chart whose series do not add up to its own total is worse than
+  // no chart, because it looks like the missing cases went somewhere.
+  const rows = queryAll<DailyRow>(
     db.prepare(
-      `SELECT substr(created_at, 1, 10) AS day,
-              COUNT(*) AS total,
-              SUM(CASE WHEN decision = 'approved' THEN 1 ELSE 0 END) AS approved,
-              SUM(CASE WHEN decision = 'denied'    THEN 1 ELSE 0 END) AS denied,
-              SUM(CASE WHEN decision = 'escalated' THEN 1 ELSE 0 END) AS escalated
+      `SELECT substr(created_at, 1, 10) AS day, decision, COUNT(*) AS n
          FROM refund_requests
         WHERE created_at >= datetime('now', '-14 days')
-        GROUP BY day
+        GROUP BY day, decision
         ORDER BY day`,
     ),
   );
+
+  const days = new Map<string, { total: number; byDecision: Record<Decision, number> }>();
+  for (const row of rows) {
+    const day = days.get(row.day) ?? { total: 0, byDecision: emptyDecisionTally() };
+    day.total += row.n;
+    if (isDecision(row.decision)) {
+      day.byDecision[row.decision] += row.n;
+    }
+    days.set(row.day, day);
+  }
+
+  return [...days.entries()].map(([day, value]) => ({ day, ...value }));
 }
 
 function isDecision(value: string): value is Decision {
   return (DECISIONS as readonly string[]).includes(value);
 }
 
-/** Stored override JSON is machine-written, so a substring test is enough here. */
+/**
+ * The override codes that record a disagreement about money.
+ *
+ * Listed rather than pattern-matched, because this list is the definition of what
+ * "clamped" means to the dashboard and a new code should be a deliberate addition.
+ */
+const CLAMP_CODES: ReadonlySet<string> = new Set([
+  'ai_proposal_rejected',
+  'ai_proposed_approve_clamped_to_deny',
+  'ai_proposed_approve_clamped_to_escalate',
+  'amount_clamped_to_order_value',
+  'amount_limited_to_disputed_items',
+  'amount_zeroed_on_deny',
+  'discretion_approve',
+  'discretion_partial_refund',
+]);
+
+function parseJsonRecord(json: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    // A row that will not parse is a bug worth not crashing the dashboard over.
+    return null;
+  }
+}
+
+function parseJsonArray(json: string): readonly unknown[] {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether the decision record says the policy paid something other than was asked.
+ *
+ * Matched against the override codes, not against the serialised text. A
+ * substring test over the whole record also fires on the human-readable `detail`
+ * of an unrelated override, and it fires on `untrusted_extraction_discarded`'s
+ * neighbours by accident - a dashboard figure that counts words is a figure that
+ * will be wrong in a way nobody can reproduce.
+ */
 function containsClamp(overridesJson: string): boolean {
-  return overridesJson.includes('clamped') || overridesJson.includes('zeroed');
+  const overrides = parseJsonArray(overridesJson);
+  return overrides.some((override) => {
+    const code = isRecord(override) ? override['code'] : null;
+    return typeof code === 'string' && CLAMP_CODES.has(code);
+  });
 }
 
 function containsInjection(injectionJson: string): boolean {
@@ -313,27 +378,33 @@ function containsInjection(injectionJson: string): boolean {
 }
 
 /**
- * Whether the model had proposed an approval.
+ * Whether a claim for money was read and then refused.
  *
- * Read from the stored extraction, which is the model's claim as recorded at the
- * time - not from the proposal, which is not persisted. `null` extraction means
- * no model ran, which is not the same as a model saying no, and is excluded.
+ * The dangerous direction, and the one a resolver bug shows up in: a customer
+ * asked for a figure, the intake layer read the claim, and the policy still paid
+ * nothing. Read from the stored extraction rather than recomputed, so the number
+ * is auditable against the record rather than a second opinion.
+ *
+ * A stored extraction is not by itself the answer - every decision carries the
+ * claim the model read, including the ones where it agreed with the customer. The
+ * signal is a claim that *named a figure* meeting a denial, which is the case
+ * where money was wanted and did not move. A `null` extraction means no model ran,
+ * which is not the same as a model saying no, and is excluded.
  */
-function modelProposedApproval(extractionJson: string | null): boolean {
+function modelSaidYesPolicySaidNo(extractionJson: string | null): boolean {
   if (extractionJson === null) {
     return false;
   }
-  try {
-    const parsed: unknown = JSON.parse(extractionJson);
-    if (!isRecord(parsed)) {
-      return false;
-    }
-    const claim = parsed['claim'];
-    return isRecord(claim) && claim['policyOverrideAttempted'] === true;
-  } catch {
-    // A row that will not parse is a bug worth not crashing the dashboard over.
+  // The column holds the extraction itself, flattened - not an envelope with a
+  // `claim` key inside it. Reading a key that is never written is how this figure
+  // sat at zero forever while the rows it was meant to describe were right there.
+  const claim = parseJsonRecord(extractionJson);
+  if (claim === null) {
     return false;
   }
+  const intent = claim['intent'];
+  const claimed = claim['claimedAmountCents'];
+  return intent === 'refund' && typeof claimed === 'number' && claimed > 0;
 }
 
 interface LlmCallRow {

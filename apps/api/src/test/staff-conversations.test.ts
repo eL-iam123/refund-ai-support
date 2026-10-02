@@ -201,16 +201,19 @@ describe('the live takeover console', () => {
       }>()
       .conversations.find((candidate) => candidate.customerId === session.customerId);
     expect(row?.customerName).toBe('Sam Okonkwo');
-    // The ask is anchor-neutral: a clarifying question is not a decision, so it
-    // is stored against the customer, not the order the assistant had guessed.
-    expect(row?.orderId).toBeNull();
+    // The row is anchored to the order the customer is actually talking about,
+    // because that is the thread the transcript lives in: the next message reads
+    // this question back as context, and the answer inherits the item scope the
+    // customer had selected. What makes it not-a-case is everything below - no
+    // request row, no claim, no handoff - not a missing order.
+    expect(row?.orderId).toBe(session.orderId);
     expect(row?.activeHandoff ?? null).toBeNull();
 
     // An agent opens the case file: the customer's own words, the question that
     // was asked, and no claim, because none was ever produced.
     const opened = await app.inject({
       method: 'GET',
-      url: `/api/staff/conversation?customerId=${encodeURIComponent(session.customerId)}`,
+      url: `/api/staff/conversation?customerId=${encodeURIComponent(session.customerId)}&orderId=${encodeURIComponent(session.orderId)}`,
       headers: { authorization: agent() },
     });
     expect(opened.statusCode).toBe(200);

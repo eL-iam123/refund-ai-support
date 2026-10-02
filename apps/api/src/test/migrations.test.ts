@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { openDatabase, openMemoryDatabase, SCHEMA_VERSION } from '../db/connection.js';
+import { seedDatabase } from '../db/seed.js';
+import { insertRequest } from '../db/requestRepository.js';
 import { LATEST_VERSION, migrate } from '../db/migrations.js';
 
 /**
@@ -186,6 +188,129 @@ describe('migrations', () => {
       .prepare('SELECT COUNT(*) AS n FROM refund_requests WHERE eligible_amount_cents IS NULL')
       .get() as { n: number };
     expect(nulls.n).toBe(0);
+    db.close();
+  });
+
+  /**
+   * A database at version 16: `chat_closures` present, carrying the CHECK that
+   * named only the base policy's two outcomes.
+   *
+   * Written by hand rather than reached by migrating, because the failure this
+   * guards against is precisely a *rebuild* losing something: closure rows a
+   * deployment already has must survive the table being replaced, the replacement
+   * must accept the outcomes the discretion layer produces, and the
+   * one-closure-per-thread index must come back - because SQLite cannot alter a
+   * CHECK in place and a rebuild silently drops every index on the old table.
+   */
+  function version16Closures(): { db: Database.Database; customerId: string; requestId: string } {
+    const db = openMemoryDatabase();
+    seedDatabase(db, new Date('2026-03-14T12:00:00.000Z'));
+    const customer = db.prepare('SELECT id FROM customers ORDER BY id LIMIT 1').get() as { id: string };
+    const requestId = 'REQ-MIGRATION';
+    insertRequest(db, {
+      id: requestId,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      customerId: customer.id,
+      customerName: 'Migration Probe',
+      orderId: null,
+      message: 'probe',
+      messageSha256: '0'.repeat(64),
+      messageFingerprint: '0'.repeat(64),
+      decision: 'denied',
+      refundAmountCents: 0,
+      eligibleAmountCents: 0,
+      summary: 'probe',
+      policyRef: 'REFUND_POLICY.md §3.2',
+      traceJson: '[]',
+      overridesJson: '[]',
+      eligibleItemIdsJson: '[]',
+      blockedItemsJson: '[]',
+      responseText: 'probe',
+      extractionJson: null,
+      groundingJson: null,
+      injectionJson: '{"detected":false,"signals":[],"obfuscationNoted":false}',
+      aiMode: 'fake',
+      llmCalled: false,
+      timingsJson: '[]',
+      scenarioId: null,
+    });
+
+    // Swap the current table for the shape version 16 had, keeping the existing
+    // closure row, so the migration has something real to migrate.
+    db.exec(`
+      CREATE TABLE chat_closures_v16 (
+        id          TEXT PRIMARY KEY,
+        customer_id TEXT NOT NULL REFERENCES customers(id),
+        order_id    TEXT,
+        request_id  TEXT NOT NULL REFERENCES refund_requests(id),
+        closed_at   TEXT NOT NULL,
+        closed_by   TEXT NOT NULL,
+        final_state TEXT NOT NULL CHECK (final_state IN ('approved', 'denied'))
+      );
+      INSERT INTO chat_closures_v16
+        SELECT 'CLOSE-LEGACY', '${customer.id}', NULL, '${requestId}',
+               '2026-01-01T00:00:00.000Z', 'agent@example.com', 'approved';
+      DROP TABLE chat_closures;
+      ALTER TABLE chat_closures_v16 RENAME TO chat_closures;
+    `);
+    db.pragma('user_version = 16');
+    return { db, customerId: customer.id, requestId };
+  }
+
+  /** A closure on its own order, so it is a different thread from the legacy row. */
+  function insertClosure(
+    db: Database.Database,
+    values: { customerId: string; requestId: string; id: string; finalState: string },
+  ): void {
+    const order = db.prepare('SELECT id FROM orders ORDER BY id LIMIT 1').get() as { id: string };
+    db.prepare(
+      `INSERT INTO chat_closures
+         (id, customer_id, order_id, request_id, closed_at, closed_by, final_state)
+       VALUES (?, ?, ?, ?, '2026-01-02T00:00:00.000Z', 'agent@example.com', ?)`,
+    ).run(values.id, values.customerId, order.id, values.requestId, values.finalState);
+  }
+
+  it('widens the chat-closure CHECK without losing an existing closure', () => {
+    const { db, customerId, requestId } = version16Closures();
+
+    // The old constraint refuses the outcome an exchange produces, which is what
+    // forced the writer to record it as a denial.
+    expect(() => insertClosure(db, { customerId, requestId, id: 'CLOSE-X', finalState: 'exchange' })).toThrow(
+      /CHECK constraint failed/,
+    );
+
+    const reached = migrate(db);
+
+    expect(reached).toBe(LATEST_VERSION);
+    const kept = db.prepare('SELECT final_state FROM chat_closures WHERE id = ?').get('CLOSE-LEGACY') as {
+      final_state: string;
+    };
+    expect(kept.final_state).toBe('approved');
+    expect(() => insertClosure(db, { customerId, requestId, id: 'CLOSE-X', finalState: 'exchange' })).not.toThrow();
+    db.close();
+  });
+
+  it('keeps the one-closure-per-thread index after rebuilding the table', () => {
+    const { db, customerId, requestId } = version16Closures();
+    migrate(db);
+
+    // A rebuild drops the index along with the old table, and the constraint it
+    // enforced - one closure per conversation - is the thing that stops a closed
+    // thread being closed twice with a different decision.
+    insertClosure(db, { customerId, requestId, id: 'CLOSE-FIRST', finalState: 'approved' });
+
+    // A second closure for the same (customer, order) thread, which is what the
+    // index exists to refuse.
+    const order = db.prepare('SELECT id FROM orders ORDER BY id LIMIT 1').get() as { id: string };
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO chat_closures
+             (id, customer_id, order_id, request_id, closed_at, closed_by, final_state)
+           VALUES ('CLOSE-DUP', ?, ?, ?, '2026-01-03T00:00:00.000Z', 'agent@example.com', 'denied')`,
+        )
+        .run(customerId, order.id, requestId),
+    ).toThrow(/UNIQUE constraint failed/);
     db.close();
   });
 

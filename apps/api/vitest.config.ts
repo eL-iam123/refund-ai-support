@@ -10,6 +10,7 @@ export default defineConfig({
     // contention and flakes the 5s integration-test timeout; cap concurrency at
     // the available host-sized baseline rather than multiplying processes.
     maxWorkers: 4,
+    testTimeout: 10000,
     // No `test.env` here on purpose. Setting provider variables in this file
     // would outrank the real `.env` inside the test process, so the opt-in live
     // suite would silently call the wrong provider with a placeholder key.

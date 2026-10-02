@@ -329,7 +329,7 @@ describe('POST /api/chat/messages', () => {
     expect(written.every((row) => row.customer_id === sam.customer.key)).toBe(true);
   });
 
-  it('survives a policy override attempt in the message', async () => {
+    it('survives a policy override attempt in the message', async () => {
     // S-07 asks for a full refund in a hostile way; the endpoint must still
     // return a decision rather than an error.
     const fixture = scenario('S-07');
@@ -343,6 +343,15 @@ describe('POST /api/chat/messages', () => {
     expect(response.statusCode).toBe(201);
     expect(request.injection.detected).toBe(true);
     expect(request.decision.overrides.length).toBeGreaterThan(0);
+
+    // The record has to say what happened, not merely that something did. These
+    // two are the whole audit argument for letting a hostile message reach the
+    // model at all: the $900 it demanded authorised nothing, and the claim read
+    // out of it was thrown away rather than obeyed.
+    const codes = request.decision.overrides.map((override) => override.code);
+    expect(codes).toContain('untrusted_extraction_discarded');
+    expect(codes).toContain('amount_zeroed_on_deny');
+    expect(request.decision.overrides.map((override) => override.detail).join(' ')).toContain('$900.00');
   });
 });
 

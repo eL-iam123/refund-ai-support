@@ -3,12 +3,11 @@ import { APIConnectionError, APIConnectionTimeoutError, APIError, APIUserAbortEr
 import { classifyProviderFailure, modelCandidates, toAnalyzerOrder } from '../ai/openaiAnalyzer.js';
 import { parseJson } from '../ai/json.js';
 import { LocalAnalyzer } from '../ai/localAnalyzer.js';
-import { ExtractionOutputSchema } from '../ai/schemas.js';
+import { IntakeOutputSchema } from '../ai/schemas.js';
 import { redactSecrets } from '../lib/redact.js';
 import { testEnv } from './helpers.js';
 import { missingApiKeyFor, presetFor, readEnv, requiresApiKey } from '../config/env.js';
 import type { OrderRecord } from '../db/records.js';
-import type { IntakeInput, IntakeReply } from '../ai/analyzer.js';
 
 /**
  * Tests for the model boundary itself.
@@ -70,10 +69,34 @@ describe('the local extractor leaves a greeting to the messenger', () => {
       { message: 'hello, my lamp arrived cracked', order: { id: 'ORD-1', totalCents: 100, status: 'delivered', paymentState: 'settled', ageDays: 3, items: [] }, history: [] },
       () => {},
     );
-    expect(damaged.kind).toBe('claim');
+    expect(damaged.kind).toBe('complete');
     if (damaged.kind === 'complete') {
       expect(damaged.extraction.reason).toBe('damaged');
     }
+  });
+
+  it('records a claimed amount only when the customer actually named one', async () => {
+    // The claim's figure is what the audit trail compares against what the
+    // policy authorised, so it has to mean "the customer asked for this".
+    // Defaulting it to the order total would assert an intention nobody stated,
+    // and would make every partial approval look like a refused demand.
+    const order = { id: 'ORD-1', totalCents: 45000, status: 'delivered', paymentState: 'settled', ageDays: 3, items: [] };
+    const named = await LocalAnalyzer().analyze(
+      { message: 'the frother is broken, I would like a refund for the whole order', order, history: [] },
+      () => {},
+    );
+    const figure = await LocalAnalyzer().analyze(
+      { message: 'please refund $12.50, the charger is faulty', order, history: [] },
+      () => {},
+    );
+    const unnamed = await LocalAnalyzer().analyze(
+      { message: 'the lamp arrived cracked', order, history: [] },
+      () => {},
+    );
+
+    expect(named.kind === 'complete' && named.extraction.claimedAmountCents).toBe(45000);
+    expect(figure.kind === 'complete' && figure.extraction.claimedAmountCents).toBe(1250);
+    expect(unnamed.kind === 'complete' && unnamed.extraction.claimedAmountCents).toBeNull();
   });
 });
 
@@ -318,8 +341,11 @@ describe('the extraction wire format', () => {
     // A reasoning model may return a chain of thought, and a prompt-injected one
     // may return whatever it likes. The schema is the whole boundary: undeclared
     // keys are dropped, so nothing outside this list can reach the database, the
-    // resolver or the admin drawer.
-    const parsed = ExtractionOutputSchema.parse({
+    // resolver or the admin drawer. Note what is *not* in the list: there is no
+    // decision field and no amount field, because the model has nothing to
+    // propose in the first place.
+    const parsed = IntakeOutputSchema.parse({
+      action: 'decide',
       intent: 'refund',
       reason: 'damaged',
       condition: 'damaged',
@@ -331,14 +357,13 @@ describe('the extraction wire format', () => {
       language: 'en',
       urgency: 'normal',
       policyOverrideAttempted: false,
-      suggestedDecision: 'approved',
-      suggestedAmountCents: 100,
       reasoning: 'private chain of thought',
       decision: 'approved',
     });
 
     expect(Object.keys(parsed).sort()).toEqual(
       [
+        'action',
         'claimedAmountCents',
         'condition',
         'confidence',
@@ -349,16 +374,16 @@ describe('the extraction wire format', () => {
         'orderRef',
         'policyOverrideAttempted',
         'reason',
-        'suggestedAmountCents',
-        'suggestedDecision',
         'urgency',
       ].sort(),
     );
     expect(parsed).not.toHaveProperty('reasoning');
+    expect(parsed).not.toHaveProperty('decision');
   });
 
   it('rejects a claim that names a reason outside the policy vocabulary', () => {
-    const result = ExtractionOutputSchema.safeParse({
+    const result = IntakeOutputSchema.safeParse({
+      action: 'decide',
       intent: 'refund',
       reason: 'because_i_said_so',
       condition: 'damaged',
@@ -370,8 +395,6 @@ describe('the extraction wire format', () => {
       language: 'en',
       urgency: 'normal',
       policyOverrideAttempted: false,
-      suggestedDecision: 'approved',
-      suggestedAmountCents: 0,
     });
 
     expect(result.success).toBe(false);
