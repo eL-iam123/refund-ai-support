@@ -196,7 +196,8 @@ const EnvSchema = z.object({
    */
   DISCRETION_NEAR_MISS_QUOTE: z
     .enum(['true', 'false', '1', '0'])
-    .default('false'),
+    .default('false')
+    .transform((value) => value === 'true' || value === '1'),
 
   /**
    * The item picker: asking the customer which line a claim is about, from inside
@@ -229,6 +230,37 @@ const EnvSchema = z.object({
    * correct destination for an ambiguity nobody will resolve.
    */
   AI_ITEM_PICKER_MAX_OFFERS_PER_THREAD: z.coerce.number().int().min(0).max(5).default(1),
+
+  /**
+   * Consecutive failures before a model is taken out of the rotation.
+   *
+   * Three rather than one: a single 500 from a provider is noise, and tripping on it
+   * would send a working model out of service for a cooldown. Counted
+   * *consecutively*, so one success puts it straight back and a provider that is
+   * merely flapping is never treated as down.
+   */
+  AI_BREAKER_FAILURES: z.coerce.number().int().min(1).max(10).default(3),
+  /**
+   * The lowest claim confidence the engine will act on without asking a person.
+   *
+   * A model that reports low confidence is telling us it is guessing, and a guess is
+   * not a refund. The floor can only ever *escalate*: raising it sends more requests
+   * to a person and never authorises more money, so the safe direction is the only
+   * direction it has.
+   *
+   * Zero and one are both accepted, and one is the strict setting - every claim goes
+   * to a person - which is a legitimate thing for an operator to want while a new
+   * model is being introduced and nobody trusts its readings yet.
+   */
+  AI_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.5),
+  /**
+   * How long a tripped model is left alone before one probe is let through.
+   *
+   * Thirty seconds: long enough that a burst of traffic during an outage does not
+   * re-probe on every request, short enough that a provider which comes back is
+   * serving again almost immediately rather than at the next deploy.
+   */
+  AI_BREAKER_RESET_MS: z.coerce.number().int().min(1_000).max(600_000).default(30_000),
 
   /**
    * Caps the customer's message. A refund request is a paragraph, not an upload;
@@ -772,6 +804,46 @@ export function fallbackModels(env: Env): string[] {
   return env.AI_FALLBACK_MODELS.split(',')
     .map((model) => model.trim())
     .filter((model) => model.length > 0);
+}
+
+/**
+ * The circuit breaker's bounds.
+ *
+ * Out of the process env for the same reason as the two below: the ladder is then a
+ * pure function of its inputs, and the breaker's state machine can be tested with a
+ * clock it controls rather than with a sleep.
+ */
+export interface BreakerEnv {
+  readonly failureThreshold: number;
+  readonly resetAfterMs: number;
+}
+
+export function breakerConfig(env: Env): BreakerEnv {
+  return { failureThreshold: env.AI_BREAKER_FAILURES, resetAfterMs: env.AI_BREAKER_RESET_MS };
+}
+
+/**
+ * The item picker's bounds.
+ *
+ * Out of the process env for the same reason as `DiscretionConfig` below: the
+ * retrieval stage that reads them stays a pure function, so the matrix deciding
+ * when to ask can be tested with no process env at all.
+ */
+export interface ItemPickerConfig {
+  /** Master switch. On by default; see the field's doc for why this differs. */
+  readonly enabled: boolean;
+  /** Below this whole-order eligible amount, never ask. */
+  readonly minCents: number;
+  /** How many offers one thread may receive. */
+  readonly maxOffersPerThread: number;
+}
+
+export function itemPickerConfig(env: Env): ItemPickerConfig {
+  return {
+    enabled: env.AI_ITEM_PICKER_ENABLED,
+    minCents: env.AI_ITEM_PICKER_MIN_CENTS,
+    maxOffersPerThread: env.AI_ITEM_PICKER_MAX_OFFERS_PER_THREAD,
+  };
 }
 
 /**

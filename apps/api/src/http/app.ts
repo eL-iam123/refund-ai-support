@@ -9,6 +9,7 @@ import { createLogger, type Logger } from '../lib/logger.js';
 import type { Db } from '../db/connection.js';
 import { aiModeLabel, buildContext } from './context.js';
 import type { PipelineDeps } from '../orchestrator.js';
+import type { AIAnalyzer } from '../ai/analyzer.js';
 import { registerChatRoutes } from './routes/chat.js';
 import { registerRequestRoutes } from './routes/requests.js';
 import { registerCatalogRoutes } from './routes/catalog.js';
@@ -75,6 +76,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerAuth(app);
 
   const hub = registerWebSockets(app, ctx, options.observeHub);
+  // Late-bound because the pipeline was built with the context, above: the ladder
+  // needs somewhere to announce "trying once more" and the hub did not exist then.
+  ctx.customerEvents.notify = (customerId: string): void => {
+    hub.notifyCustomer(customerId, { type: 'assistant.retrying', customerId });
+  };
 
   // The plugin's global mode only instruments routes present when its onRoute
   // hook is installed. Routes are registered below, so we use its explicit
@@ -113,6 +119,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     // operator account is configured is a fact about a demo, not a secret, and
     // the staff routes themselves still answer 404 without a credential.
     adminEnabled: adminEnabled(options.env),
+    ...modelHealth(ctx.pipeline.analyzer),
   }));
 
   registerChatRoutes(app, ctx, hub);
@@ -130,6 +137,32 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
   registerNotFound(app, options.staticDir);
   return app;
+}
+
+/**
+ * What the models are doing, without asking them.
+ *
+ * A live probe on every request would double the latency and the cost of the request
+ * it was meant to protect, and it would answer the wrong question: not "is this
+ * model reachable right now" but "is this model reachable from the health checker".
+ * The circuit breaker already knows what the models have been doing, so publishing
+ * its state is both free and more truthful - it reports what actually happened
+ * rather than what one probe happened to see.
+ *
+ * `aiAvailable` therefore goes false while every candidate is tripping, which is what
+ * makes an outage legible on the storefront instead of looking like a model that has
+ * quietly stopped answering.
+ */
+function modelHealth(analyzer: AIAnalyzer): {
+  aiAvailable: boolean;
+  aiUnavailableReason: string | null;
+  models: ReturnType<NonNullable<AIAnalyzer['breakerState']>>;
+} {
+  return {
+    aiAvailable: analyzer.available,
+    aiUnavailableReason: analyzer.unavailableReason,
+    models: analyzer.breakerState?.() ?? [],
+  };
 }
 
 function isDevelopmentLoopback(nodeEnv: Env['NODE_ENV'], ip: string): boolean {

@@ -4,6 +4,22 @@ import { authHeader } from './helpers.js';
 import { cookiesOf, shopHarness, signIn, type SignedIn } from './shop-helpers.js';
 
 /**
+ * The order's thread as the composer sees it.
+ *
+ * `awaitingPerson` is read here rather than inferred from the turns, because the
+ * question it answers - "is somebody holding this and have they replied?" - needs
+ * both the handoff and the agent's messages, and only the server has both.
+ */
+async function historyFor(harness: AppHarness, session: SignedIn): Promise<{ awaitingPerson: boolean }> {
+  const response = await harness.app.inject({
+    method: 'GET',
+    url: `/api/shop/chat/history?orderId=${encodeURIComponent(session.orderId)}`,
+    headers: { cookie: cookiesOf(session) },
+  });
+  return response.json<{ awaitingPerson: boolean }>();
+}
+
+/**
  * One thread per order.
  *
  * The property being tested is not "history is returned" - it is that history is
@@ -89,7 +105,15 @@ describe('a greeting is not a request', () => {
     expect([200, 201]).toContain(sent.statusCode);
     const reply = sent.json<{ question?: string; duplicate: unknown }>();
     expect(reply.question).toBeDefined();
-    expect(reply.question).toContain('what happened');
+    // A greeting has told us nothing, so the question has to ask for the thing that is
+    // missing - the reason - rather than repeat "tell me more". The old assertion
+    // pinned the wording "what happened", which is precisely the vagueness this
+    // replaced, so it is now a property: the question exists and it is one sentence.
+    // Exactly one question, and it asks rather than tells. The examples after it are
+    // deliberate - "something broken, something different, a delivery problem" tells a
+    // customer what counts as an answer, which is what stops the next turn being a
+    // paragraph.
+    expect(reply.question?.split('?').length).toBe(2);
 
     // An ask is visible in the order's persisted thread, but it is not a
     // decision the pipeline can pay out and no person is paged for a greeting.
@@ -115,7 +139,7 @@ describe('a greeting is not a request', () => {
     expect([200, 201]).toContain(sent.statusCode);
     const reply = sent.json<{ question?: string }>();
     expect(reply.question).toBeDefined();
-    expect(reply.question).toContain('what happened');
+    expect(reply.question).not.toMatch(/how can i help|welcome/i);
     expect(harness.analyzerCalls()).toBe(0);
   });
 
@@ -129,7 +153,9 @@ describe('a greeting is not a request', () => {
       headers: { cookie: cookiesOf(session) },
       payload: { customerId: session.customerId, orderId: session.orderId, message: 'hello' },
     });
-    expect(hello.json<{ question?: string }>().question).toMatch(/what's going on|what happened/i);
+    // Whatever the greeting floor asks, it must not be the generic opener the model
+    // was trained on: that is the sentence a customer learns to ignore.
+    expect(hello.json<{ question?: string }>().question).not.toMatch(/how can i help|welcome/i);
 
     const damage = await harness.app.inject({
       method: 'POST',
@@ -359,10 +385,13 @@ describe('per-order chat history', () => {
     expect(second.handedOver).toBe(false);
     expect(second.decision).toBe('denied');
 
-    // The escalation still holds on the order it belongs to.
+    // And the escalation still holds on the order it belongs to: the follow-up there
+    // is answered by the pipeline rather than diverted. The takeover on it is
+    // unattended, so there is no person to speak over - and diverting left the
+    // customer with silence, which is the bug this reversal fixes.
     const stillEscalated = await session.send(session.orderId, 'Still nothing, this is the third time I have asked');
-    expect(stillEscalated.handedOver).toBe(true);
-    expect(stillEscalated.decision).toBeNull();
+    expect(stillEscalated.handedOver).toBe(false);
+    expect(stillEscalated.decision).toBe('escalated');
   });
 
   it('returns the same thread after a reload, and still declines a repeat', async () => {
@@ -425,15 +454,25 @@ describe('per-order chat history', () => {
   });
 
   it('counts what the customer said while an agent was on the line', async () => {
-    // The badge is a claim about whether this customer has been heard from. If
-    // it stops counting once a person takes the thread - the moment the
-    // customer's messages stop being refund_requests rows - it reads "1" beside
-    // a conversation the customer can plainly see three messages in, and the
-    // storefront contradicts itself about the same thread.
+    // The badge is a claim about whether this customer has been heard from. If it
+    // stops counting once a person takes the thread - the moment the customer's
+    // messages stop being refund_requests rows - it reads "1" beside a conversation
+    // the customer can plainly see three messages in, and the storefront contradicts
+    // itself about the same thread.
     harness = await shopHarness();
     const session = await signIn(harness, 'sam@shop.demo');
     const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
     expect(escalated.decision).toBe('escalated');
+
+    // An agent takes the thread, which is what makes this test about a *staffed*
+    // handoff: the message is theirs and is not a refund_requests row.
+    const claimed = await harness.app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${encodeURIComponent(session.customerId)}/take-over`,
+      headers: { authorization: authHeader('agent') },
+      payload: { orderId: session.orderId },
+    });
+    expect(claimed.statusCode).toBe(200);
 
     const duringTakeover = await session.send(session.orderId, 'Any update on this?');
     expect(duringTakeover.handedOver).toBe(true);
@@ -445,6 +484,41 @@ describe('per-order chat history', () => {
     });
     const counts = response.json<{ counts: readonly { orderId: string; count: number }[] }>().counts;
     expect(counts.find((row) => row.orderId === session.orderId)?.count).toBe(2);
+  });
+
+  it('closes the composer while a person is holding the thread, and reopens it on their reply', async () => {
+    // The customer is typing into a conversation a person is about to answer, and
+    // every word they write in the meantime is collected by nobody. The box waits,
+    // and opens again the moment the person replies - which is the cue that it is
+    // the customer's turn.
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+    const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
+    expect(escalated.decision).toBe('escalated');
+
+    const beforeClaim = await historyFor(harness, session);
+    // Unattended: nobody is answering, so the box stays open.
+    expect(beforeClaim.awaitingPerson).toBe(false);
+
+    const claimed = await harness.app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${encodeURIComponent(session.customerId)}/take-over`,
+      headers: { authorization: authHeader('agent') },
+      payload: { orderId: session.orderId },
+    });
+    expect(claimed.statusCode).toBe(200);
+
+    expect((await historyFor(harness, session)).awaitingPerson).toBe(true);
+
+    const replied = await harness.app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${encodeURIComponent(session.customerId)}/message`,
+      headers: { authorization: authHeader('agent') },
+      payload: { orderId: session.orderId, body: 'I have looked at this and I am on it.' },
+    });
+    expect(replied.statusCode).toBe(200);
+
+    expect((await historyFor(harness, session)).awaitingPerson).toBe(false);
   });
 
   it('requires a session, and takes no customer id from the caller', async () => {

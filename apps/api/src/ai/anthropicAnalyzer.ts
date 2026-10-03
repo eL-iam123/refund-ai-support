@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { ClaimExtractionSchema } from '@refund/shared';
-import { setTimeout as sleep } from 'node:timers/promises';
+import { breakerConfig } from '../config/env.js';
+import { ModelCircuitBreaker, runCandidates, unavailableFrom, type AttemptOutcome } from './breaker.js';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
 import { buildIntakeUser, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
-import { CompleteSchema, IntakeOutputSchema, type IntakeOutput } from './schemas.js';
+import { AskItemsSchema, CompleteSchema, IntakeOutputSchema, type IntakeOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
@@ -47,7 +48,6 @@ import {
  */
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 529]);
-const BACKOFF_MS = [400, 1200] as const;
 const MAX_REPAIRS = 1;
 const MAX_ERROR_LENGTH = 500;
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -61,6 +61,7 @@ const ANTHROPIC_VERSION = '2023-06-01';
  */
 const ASK_TOOL = 'ask_question';
 const DECIDE_TOOL = 'decide_claim';
+const ASK_ITEMS_TOOL = 'ask_which_items';
 const REMIND_TOOL = 'remind_admin';
 
 interface MessageResponse {
@@ -93,6 +94,8 @@ export class AnthropicAnalyzer implements AIAnalyzer {
   readonly unavailableReason = null;
 
   private readonly candidates: readonly string[];
+  /** Per-instance, so a test cannot inherit another test's view of a provider. */
+  private readonly breaker: ModelCircuitBreaker;
   private readonly baseUrl: string;
 
   constructor(
@@ -103,6 +106,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     this.label = preset.label;
     this.baseUrl = (this.env.AI_BASE_URL ?? preset.baseUrl).replace(/\/+$/, '');
     this.candidates = anthropicCandidates(this.env, preset.defaultModel);
+    this.breaker = new ModelCircuitBreaker(breakerConfig(this.env));
     this.model = this.candidates[0] ?? 'unknown';
   }
 
@@ -160,31 +164,21 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     budget: AbortSignal,
     observer: AttemptObserver,
   ): Promise<Completion> {
-    const failures: string[] = [];
-
-    for (const model of this.candidates) {
-      for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
-        if (budget.aborted) {
-          throw new AiUnavailableError(`intake time budget exhausted after ${failures.length} attempt(s)`);
-        }
-
+    const result = await runCandidates<Completion>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'intake',
+      attempt: async (model, attempt) => {
         const outcome = await this.attempt(model, attempt, firstUserMessage, user, budget, observer);
-        if (outcome.ok) {
-          return outcome.completion;
-        }
-        failures.push(`${model}#${attempt} ${outcome.error}`);
-
-        if (attempt < this.env.AI_MAX_ATTEMPTS && outcome.retryable) {
-          await backoff(attempt, budget);
-        } else if (!outcome.retryable) {
-          break;
-        }
-      }
+        return outcome.ok ? { ok: true, value: outcome.completion } : outcome;
+      },
+    });
+    if (!result.ok) {
+      throw unavailableFrom(result);
     }
-
-    throw new AiUnavailableError(
-      cap(`all ${this.candidates.length} anthropic model(s) failed after ${failures.length} attempt(s): ${failures.join(' | ')}`),
-    );
+    return result.value;
   }
 
 
@@ -256,33 +250,34 @@ export class AnthropicAnalyzer implements AIAnalyzer {
   async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
     const body = chatRequestBody(this.candidates[0] ?? 'unknown', input);
-
-    for (const model of this.candidates) {
-      for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
-        if (budget.aborted) {
-          throw new AiUnavailableError('chat time budget exhausted');
-        }
-
-        const outcome = await this.chatAttempt(model, attempt, { ...body, model }, budget, observer);
-        if (outcome !== null) {
-          return outcome;
-        }
-        if (attempt < this.env.AI_MAX_ATTEMPTS) {
-          await backoff(attempt, budget);
-        }
-      }
+    const result = await runCandidates<ChatReply>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'chat',
+      attempt: (model, attempt) => this.chatAttempt(model, attempt, { ...body, model }, budget, observer),
+    });
+    if (!result.ok) {
+      throw unavailableFrom(result);
     }
-
-    throw new AiUnavailableError(`all ${this.candidates.length} model(s) failed for chat`);
+    return result.value;
   }
 
+  /**
+   * One chat call, reported as an outcome.
+   *
+   * It used to retry internally *and* let the ladder above retry it again, which
+   * meant a single chat turn could cost four attempts per candidate. Retrying is the
+   * ladder's job now; this returns what happened and lets it decide.
+   */
   private async chatAttempt(
     model: string,
     attempt: number,
     body: Record<string, unknown>,
     budget: AbortSignal,
     observer: AttemptObserver,
-  ): Promise<ChatReply | null> {
+  ): Promise<AttemptOutcome<ChatReply>> {
     const startedAt = Date.now();
     try {
       const response = await fetch(`${this.baseUrl}/messages`, {
@@ -303,20 +298,21 @@ export class AnthropicAnalyzer implements AIAnalyzer {
 
       const data = (await response.json()) as MessageResponse;
       const answer = chatAnswer(data, model);
-      if (answer === null) {
-        return null;
-      }
-
       observer({
         model,
         attempt,
-        ok: true,
+        ok: answer !== null,
         latencyMs: Date.now() - startedAt,
         promptTokens: data.usage?.input_tokens ?? null,
         completionTokens: data.usage?.output_tokens ?? null,
-        error: null,
+        error: answer === null ? 'chat reply carried neither text nor a tool call' : null,
       });
-      return answer;
+      // A reply with no text and no tool call is the empty-completion case again, in
+      // chat clothing, and it is not retryable: the model answered, and its answer
+      // was nothing.
+      return answer === null
+        ? { ok: false, error: 'chat reply carried neither text nor a tool call', retryable: false }
+        : { ok: true, value: answer };
     } catch (error: unknown) {
       const failure = classify(error);
       observer({
@@ -328,11 +324,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
         completionTokens: null,
         error: failure.error,
       });
-      if (!failure.retryable) {
-        return null;
-      }
-      await backoff(attempt, budget);
-      return null;
+      return { ok: false, ...failure };
     }
   }
 }
@@ -382,10 +374,10 @@ function requestBody(
     // same message two different ways is a claim nobody can audit.
     temperature: 0,
     system: INTAKE_SYSTEM,
-    // `any` rather than the single-tool `tool` choice: the model must call one
-    // of the two tools but gets to pick which - exactly the ask-or-decide
-    // discriminator the engine is built around.
-    tools: [askTool(), decideTool()],
+    // `any` rather than the single-tool `tool` choice: the model must call one of
+    // the tools but gets to pick which - exactly the ask-or-decide discriminator
+    // the engine is built around, now with a third exit for the item picker.
+    tools: [askTool(), askItemsTool(), decideTool()],
     tool_choice: { type: 'any' },
     messages: repairTurn
       ? [
@@ -402,6 +394,25 @@ function askTool(): { name: string; description: string; input_schema: object } 
     name: ASK_TOOL,
     description: 'Ask the customer exactly one clarifying question for the one missing detail.',
     input_schema: z.toJSONSchema(z.object({ question: z.string().min(1).max(400) })),
+  };
+}
+
+/**
+ * The picker's tool.
+ *
+ * Carries ids and nothing else - no question text, because the answer is a set of
+ * buttons and a caption would be a second interface competing with the first.
+ * The ids are a hint; `retrieval/itemPicker.ts` re-checks them against the order
+ * and the server decides whether to ask at all.
+ */
+function askItemsTool(): { name: string; description: string; input_schema: object } {
+  return {
+    name: ASK_ITEMS_TOOL,
+    description:
+      'Ask the customer which line of the order their problem is about. Use only when they ' +
+      'have described a problem but have not said which item it concerns. Names the item ids ' +
+      'you could not tell apart, or none if you could not narrow it down.',
+    input_schema: z.toJSONSchema(AskItemsSchema),
   };
 }
 
@@ -465,20 +476,44 @@ function chatAnswer(payload: MessageResponse, model: string): ChatReply | null {
   return text.trim().length === 0 ? null : { kind: 'text', text, model };
 }
 
-/** The tool call, normalised to the union shape, or null when none was made. */
+/**
+ * The tool call, normalised to the union shape, or null when none was made.
+ *
+ * Each tool's input is bare - `{question}`, `{candidates}`, or the extraction
+ * itself - so the discriminator the engine validates is put back on here. That
+ * keeps the downstream path "text in, Zod out" exactly as it is for the OpenAI
+ * adapter, and keeps one schema the authority on what a reply may contain rather
+ * than two shapes that can drift apart.
+ *
+ * Matched on the block's `name`, never its `id`: a real `tool_use` block has a
+ * generated `id`, and matching on it would accept any tool whose id happened to
+ * look like one of ours.
+ */
 function toolInputText(payload: MessageResponse): string | null {
   for (const block of payload.content ?? []) {
-    const input = typeof block.input === 'object' && block.input !== null ? block.input : {};
-    if (block.type === 'tool_use' && block.name === ASK_TOOL) {
-      // The ask tool's input is bare `{question}`; normalise it back onto the
-      // union the engine validates, so the downstream path stays "text in, Zod
-      // out" exactly like the OpenAI adapter.
-      const { question } = input as { question?: unknown };
-      return JSON.stringify({ action: 'ask', question });
+    if (block.type !== 'tool_use') {
+      continue;
     }
-    if (block.type === 'tool_use' && block.name === DECIDE_TOOL) {
-      return JSON.stringify({ action: 'decide', ...input });
+    const normalised = normaliseToolInput(String(block.name), block.input);
+    if (normalised !== null) {
+      return normalised;
     }
+  }
+  return null;
+}
+
+function normaliseToolInput(name: string, raw: unknown): string | null {
+  const input = typeof raw === 'object' && raw !== null ? raw : {};
+  if (name === ASK_ITEMS_TOOL) {
+    const { candidates } = input as { candidates?: unknown };
+    return JSON.stringify({ action: 'ask_items', candidates });
+  }
+  if (name === ASK_TOOL) {
+    const { question } = input as { question?: unknown };
+    return JSON.stringify({ action: 'ask', question });
+  }
+  if (name === DECIDE_TOOL) {
+    return JSON.stringify({ action: 'decide', ...input });
   }
   return null;
 }
@@ -526,19 +561,6 @@ function classify(error: unknown): Failure {
   };
 }
 
-async function backoff(attempt: number, budget: AbortSignal): Promise<void> {
-  const last = BACKOFF_MS.length - 1;
-  const wait = BACKOFF_MS[Math.min(attempt - 1, last)] ?? BACKOFF_MS[last];
-  try {
-    await sleep(wait, undefined, { signal: budget });
-  } catch (error: unknown) {
-    if (budget.aborted) {
-      throw new AiUnavailableError('analysis time budget exhausted while backing off');
-    }
-    throw error;
-  }
-}
-
 /**
  * The validated wire object as an `IntakeReply`.
  *
@@ -548,6 +570,9 @@ async function backoff(attempt: number, budget: AbortSignal): Promise<void> {
  * the extraction schema and nothing else.
  */
 function toIntakeReply(data: IntakeOutput, model: string): IntakeReply {
+  if (data.action === 'ask_items') {
+    return { kind: 'ask_items', candidates: data.candidates, model };
+  }
   if (data.action === 'ask') {
     return { kind: 'question', question: data.question, model };
   }

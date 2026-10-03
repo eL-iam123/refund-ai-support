@@ -89,10 +89,11 @@ export function acknowledgementFor(message: string): string {
     );
   }
   if (isFrustrated(message)) {
-    return (
-      'That sounds like this has dragged on, and I am sorry about that. ' +
-      'Your message has been read and it is with a person, not sitting in a queue.'
-    );
+    // No promise about a person here any more. An acknowledgement is also used
+    // when the reply is a question, and "it is with a person" would contradict the
+    // question the customer is looking at. Where a person really has it, the decision
+    // text says so and says why.
+    return 'That sounds like this has dragged on, and I am sorry about that.';
   }
   return '';
 }

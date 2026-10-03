@@ -59,6 +59,7 @@ export const OVERRIDE_LABEL: Record<OverrideCode, string> = {
   risk_rule_deny_rejected: 'Risk-rule deny rejected',
   ungrounded_reason_escalated: 'Ungrounded reason escalated',
   untrusted_extraction_discarded: 'Untrusted claim discarded',
+  low_confidence_claim_escalated: 'Low-confidence claim escalated',
   discretion_approve: 'Discretion approved',
   discretion_partial_refund: 'Discretion partial refund',
   discretion_exchange: 'Discretion offered exchange',

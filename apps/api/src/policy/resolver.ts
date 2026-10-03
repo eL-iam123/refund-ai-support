@@ -51,7 +51,23 @@ export interface ResolveInput {
   readonly customer?: CustomerRecord | null;
   /** The operator's pre-authorised discretion bounds. Defaults to off. */
   readonly discretion?: DiscretionConfig;
+  /**
+   * The lowest claim confidence the engine will act on without asking a person.
+   *
+   * Undefined means the `AI_MIN_CONFIDENCE` default. Read only by the confidence
+   * guard, and only ever to stop a *paid* decision.
+   */
+  readonly minConfidence?: number | undefined;
 }
+
+/**
+ * The claim confidence below which a request goes to a person.
+ *
+ * Defaulted here as well as in the environment schema, so a caller that builds a
+ * `ResolveInput` by hand - which is most of the tests - gets the production behaviour
+ * rather than an accidental exemption from it.
+ */
+const DEFAULT_MIN_CONFIDENCE = 0.5;
 
 const VERB: Record<Decision, string> = {
   approved: 'Approved',
@@ -88,11 +104,21 @@ export function resolve(input: ResolveInput): RefundDecision {
   // policy-override clause, which is both self-contradictory ("under R-14: no
   // policy-override signal") and alarming in the one field an auditor reads.
   const concluded = concludingRule(winner);
-  const softened = applyDiscretion(baseDecision, concluded, evaluations, input);
+  // The floor is a precondition for money, whoever is proposing the money - and the
+  // discretion layer proposes money. Gating only the base decision would leave the
+  // obvious hole: an escalation that the layer would have softened into a partial
+  // refund, on a claim the model does not stand behind.
+  const gated = confidenceGate(baseDecision, concluded, input);
+  const softened = applyDiscretion(gated.decision, gated.winner, evaluations, input);
   const decision = softened.decision;
   const amount = amountFor(decision, input, softened.partialAmountCents);
   const ceiling = ceilingOverride(input, amount);
-  const overrides = [...softened.overrides, ...reconcile(input, decision, amount, evaluations), ...ceiling];
+  const overrides = [
+    ...softened.overrides,
+    ...gated.overrides,
+    ...reconcile(input, decision, amount, evaluations),
+    ...ceiling,
+  ];
   assertAmountSane(amount, input.orderTotalCents);
 
   return {
@@ -100,7 +126,7 @@ export function resolve(input: ResolveInput): RefundDecision {
     refundAmountCents: amount,
     eligibleAmountCents: input.gateResult.eligibleAmountCents,
     currency: 'USD',
-    summary: summarise(decision, concluded, input, amount, softened.applied),
+    summary: summarise(decision, gated.winner, input, amount, softened.applied),
     policyRef: concluded?.policyRef ?? 'REFUND_POLICY.md §9',
     trace: evaluations,
     overrides,
@@ -221,6 +247,10 @@ function applyDiscretion(
   evaluations: readonly RuleEvaluation[],
   input: ResolveInput,
 ): Softened {
+  // Asked what the layer *would* have done before being told not to. A floor that
+  // cannot say whether it stopped anything is indistinguishable from a floor that
+  // did not fire: the request looks the same whether the escalation was always going
+  // to stand or whether the reading was what stopped the money.
   const recommendation = recommendDiscretion({
     baseDecision,
     winner,
@@ -234,8 +264,22 @@ function applyDiscretion(
     config: input.discretion ?? DEFAULT_DISCRETION,
   });
 
+  // Nothing to soften is nothing to block. Checked before the floor, because a
+  // refusal that the layer would not have touched has to stay refused: the floor
+  // decides whether money may move, and it must never be a way to reopen one.
   if (recommendation.kind === 'none') {
     return { decision: baseDecision, partialAmountCents: null, applied: false, overrides: [] };
+  }
+
+  if (!confidenceAllowsPayment(input)) {
+    // The layer would have paid, and the floor is what stops it. Recorded, because a
+    // stopped softening is worth more to an operator than a silent one.
+    return {
+      decision: 'escalated',
+      partialAmountCents: null,
+      applied: false,
+      overrides: [lowConfidenceRecord(input, input.extraction?.confidence ?? 0, input.minConfidence ?? DEFAULT_MIN_CONFIDENCE)],
+    };
   }
 
   const decision = decisionFromRecommendation(recommendation.kind);
@@ -375,6 +419,76 @@ function reconcile(
   overrides.push(...unpayableOverride(input, decision));
   overrides.push(...ungroundingOverrides(input, decision));
   return overrides;
+}
+
+/**
+ * Whether a claim confident enough may move money, by anyone.
+ *
+ * The single question, asked once, because the answer has to hold for the base
+ * policy *and* for the discretion layer: two thresholds that could disagree would
+ * mean the floor is only as good as the path that checked it last.
+ */
+function confidenceAllowsPayment(input: ResolveInput): boolean {
+  const confidence = input.extraction?.confidence ?? null;
+  return confidence === null || confidence >= (input.minConfidence ?? DEFAULT_MIN_CONFIDENCE);
+}
+
+/**
+ * A claim the model does not stand behind is not a claim.
+ *
+ * `confidence` is self-reported, which is exactly why it is used this way: the engine
+ * does not *trust* the number, it refuses to let a low one authorise money. A model
+ * saying "I am guessing" is not evidence of anything, and paying out on a guess is the
+ * one failure this system is built to make impossible - so a low reading sends the
+ * request to a person and says so.
+ *
+ * Two properties keep it safe to have at all:
+ *
+ *  - **It can only escalate.** `paid` below is deliberately narrow: a claim that
+ *    would be *denied* stays denied, because a refusal needs no confidence and this
+ *    must never be a way to unlock an approval.
+ *  - **It is a floor on the decision, not a filter on the evidence.** The claim is
+ *    still recorded, still grounded the same way, and still visible in the audit; it
+ *    simply does not get to end the conversation by itself.
+ *
+ * It also runs *before* discretion, so a low-confidence claim cannot be softened into
+ * a partial refund or an exchange either. The layer's own floor is a separate number
+ * for a separate reason and neither can raise the other's ceiling.
+ */
+function confidenceGate(
+  baseDecision: Decision,
+  winner: RuleEvaluation | null,
+  input: ResolveInput,
+): { decision: Decision; winner: RuleEvaluation | null; overrides: readonly OverrideRecord[] } {
+  const floor = input.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
+  const confidence = input.extraction?.confidence ?? null;
+  const paid = baseDecision === 'approved' || baseDecision === 'partial_refund';
+
+  if (confidence === null || !paid || confidence >= floor) {
+    return { decision: baseDecision, winner, overrides: [] };
+  }
+
+  return { decision: 'escalated', winner, overrides: [lowConfidenceRecord(input, confidence, floor)] };
+}
+
+/**
+ * The audit line for a claim held back on confidence.
+ *
+ * Written even when the outcome was already an escalation, because the two are
+ * different events: "the policy would have paid this but nobody stood behind the
+ * reading" is not the same as "the policy refused this anyway", and only one of them
+ * says the model needs a better prompt.
+ */
+function lowConfidenceRecord(
+  input: ResolveInput,
+  confidence: number,
+  floor: number,
+): OverrideRecord {
+  return {
+    code: 'low_confidence_claim_escalated',
+    detail: `the model read this claim at ${confidence.toFixed(2)} confidence, below the ${floor.toFixed(2)} floor; a person decides instead`,
+    aiProposal: input.aiProposal,
+  };
 }
 
 /**

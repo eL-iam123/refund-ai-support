@@ -1,4 +1,5 @@
 import type { ClaimExtraction } from '@refund/shared';
+import type { BreakerState } from './breaker.js';
 
 /**
  * The one seam between the policy engine and a language model.
@@ -67,12 +68,34 @@ export interface IntakeInput {
 }
 
 /**
+ * The model's request to ask the customer which line their claim is about.
+ *
+ * Advisory in both directions. It cannot set the scope - that arrives as the
+ * customer's own `itemIds` on the next request - and the server may decline it
+ * outright when its own conditions for asking are not met, because a model that
+ * asks on every turn must not produce a picker on every turn.
+ *
+ * The candidate ids are a hint about which lines the model could not tell apart.
+ * They are re-checked against the resolved order before they are shown, so an id
+ * from another order is dropped rather than offered.
+ */
+export interface AskItemsReply {
+  readonly kind: 'ask_items';
+  readonly candidates: readonly string[];
+  readonly model: string;
+}
+
+/**
  * What the model returns during intake.
  *
- * Two options: ask a clarifying question, or submit a complete claim extraction.
- * The model is an intake specialist, NOT a decision maker.
+ * Three options, none of them an outcome: ask the customer which item is at
+ * issue, ask them one clarifying question, or submit a complete claim
+ * extraction. The model is an intake specialist, NOT a decision maker - and note
+ * that the first of the three is answered by clicking, which is what keeps the
+ * item scope a statement the customer made rather than one the model inferred.
  */
 export type IntakeReply =
+  | AskItemsReply
   | {
       readonly kind: 'question';
       /** Exactly one question, written in the customer's own language. */
@@ -162,6 +185,19 @@ export interface AIAnalyzer {
    * different problems with different fixes.
    */
   readonly unavailableReason: string | null;
+  /**
+   * The circuit breaker's view of each candidate model, for `/api/health`.
+   *
+   * Optional because not every analyzer has candidates: the local matcher and the
+   * unavailable placeholder have nothing to trip. Declared here rather than probed
+   * for at the call site, so "which analyzers can report this" is a contract rather
+   * than a guess.
+   */
+  readonly breakerState?: () => readonly {
+    readonly model: string;
+    readonly state: BreakerState;
+    readonly consecutiveFailures: number;
+  }[];
   /**
    * Intake phase: model extracts structured claim with clarification loops.
    *

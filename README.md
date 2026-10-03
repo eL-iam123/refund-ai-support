@@ -69,6 +69,14 @@ policy engine owns the decision, and a person only reviews or overrides it.
 
 ## Quick start
 
+> **Running both at once?** `docker compose up` and `pnpm dev` both bind **4000**, so
+> the second one to start fails with `EADDRINUSE`. Stop the container
+> (`docker compose stop api`) or give the dev process its own port (`API_PORT=4001`) —
+> and note they read *different databases*: the container uses `/data/refund.sqlite`,
+> a local run uses `DATABASE_PATH` from `.env`. The API now says this itself when the
+> port is taken, rather than only printing a stack trace.
+
+
 ### One command, with Docker
 
 ```bash
@@ -294,6 +302,51 @@ decision.
 | Resolver | **the only writer of a decision and of the amount** |
 | Response | deterministic text; the model never writes the reply |
 
+### When the provider is down
+
+A model that is not answering is the most likely failure this system has and the
+one it is best insulated from: every rule has already run on order facts by the time
+the model is consulted, so an outage costs a request its evidence and nothing else.
+What it must never do is leave a customer watching a spinner.
+
+So a failed intake walks a ladder, and says what it is doing at each step: the
+customer is told before anything else happens, one soft retry follows with its own
+time budget, and failing that the request escalates *and says so* — the customer can
+tell "nobody could read this, a person will" apart from an ordinary policy escalation.
+
+There is deliberately no fallback reader. A pattern matcher was tried here and
+removed: it is a second, untested reader of a document that decides money, and the
+difference between "the model read this and the policy approved it" and "a regex read
+this and the policy approved it" is not a wording difference. `AI_PROVIDER=local`
+still runs the matcher, but that is a choice made in config by someone who wants it,
+not something that happens to a deployment during an outage.
+
+Behind it sits a circuit breaker per model, so an outage is paid for once rather
+than once per customer. Measured against a dead provider: the first request walks the
+candidate list and trips every breaker, and the next answers in 0.03s having made no
+provider call at all. `/api/health` publishes that state rather than probing, because
+a probe on every request would double the latency of the request it was meant to
+protect and would only prove that the *checker* can reach the model.
+
+### Asking which item, from inside the conversation
+
+A refund claim can be perfectly readable and still be about one line of a five-line
+basket. The storefront used to settle that *before* the conversation: the composer
+refused to send until a line was ticked, so it read as a form field rather than a
+question. It is now something the assistant asks. Intake has a third exit,
+`ask_which_items`, and the server decides whether to act on it — it is withheld when
+the scope is already resolved, when the order has one line, when the basket is too
+small for the choice to matter, when the thread was already asked once, or when the
+message carries an injection signal.
+
+The scope is still the customer's, and that is the part that matters. Order lines
+are not a display detail: `disputeCeiling()` builds the refund ceiling from them, so
+whoever picks the lines caps the money. The model may nominate the ids it could not
+tell apart, and they are re-checked against the resolved order — but no part of the
+scope that reaches the ledger comes from the model. The customer's tap is an
+ordinary `itemIds` on their next message, indistinguishable from a hand tick. See
+`docs/adr/0004-agent-invoked-item-picker.md`.
+
 ### Discretion, and why it is off
 
 `REFUND_POLICY.md` §10 adds a deterministic layer that resolves an escalation a
@@ -310,7 +363,7 @@ deployment can widen one of them without opening the layer wholesale.
 
 ### Why the model cannot decide
 
-Five separate mechanisms, not one convention:
+Six separate mechanisms, not one convention:
 
 1. **Total precedence** — `deny (3) > escalate (2) > approve (1) > pass (0)`. The
    highest non-pass outcome in the trace wins. A denial anywhere outranks an approval
@@ -325,7 +378,12 @@ Five separate mechanisms, not one convention:
    `ClaimExtraction`, and an extraction carries a reason, a condition, quotes and
    the figure the customer asked for. There is no field that could be read as a
    decision, so this is enforced by the seam rather than by checking afterwards.
-5. **Disagreement is recorded** — `reconcile()` writes an `OverrideRecord` whenever
+5. **A low-confidence claim cannot move money** — the model reports its own confidence
+   in its reading, and the engine treats it as a brake rather than as evidence: below
+   `AI_MIN_CONFIDENCE` the request goes to a person. It can only ever escalate, and it
+   runs before the discretion layer, so neither a base approval nor a softened
+   partial refund can route around it.
+6. **Disagreement is recorded** — `reconcile()` writes an `OverrideRecord` whenever
    what the model read differs from what the policy concluded: the figure claimed
    against the figure authorised, a denial that authorises nothing, and a claim
    discarded because an integrity rule fired. You can always see what was read
@@ -766,11 +824,13 @@ failed request.
 ## Testing
 
 ```
-489 passed · 8 skipped · 0 network required
+648 API passed · 8 API skipped · 8 storefront passed
 ```
 
-The 8 skipped are the opt-in live provider suite, which stays dark unless
-`LIVE_AI_TESTS=1`.
+The 8 API skips are the opt-in live provider suite, which stays dark unless
+`LIVE_AI_TESTS=1`. The storefront suite runs in jsdom - the browser is part of what it
+tests, because "the request succeeded and the screen shows nothing" is a bug no backend
+assertion can see.
 
 `src/test/refund-ledger.test.ts` is the money suite worth reading first: it covers
 the reservation/settlement split, double-reservation, double-settlement, the
@@ -782,6 +842,17 @@ project hit rather than a hypothetical one.
 - **18 conformance scenarios** drive the full pipeline through the production code
   path with a deterministic fake analyzer. Each asserts decision, amount, and the
   specific rule that decided it.
+- **A generated corpus** (`wild.test.ts`) covers the space rather than the samples,
+  because a hand-written list only tests the attacks somebody thought of. ~650 attacks
+  are *composed* — an attack core, carried a particular way, perturbed a particular way,
+  in a particular language — plus ~90 degenerate inputs: zero-width characters inside
+  keywords, leetspeak, base64 padding, RTL text, null bytes, reversed strings, messages
+  at the length ceiling. Twelve more feed it replies the schema could never produce: a
+  quote nobody typed, confidence of `42`, a demand for a million dollars, a picker
+  naming another order's items. A compromised provider is as wild as a hostile customer.
+  Since the inputs cannot be enumerated, every one of them is held to the same
+  invariants: it answers, money is arithmetic, a flagged injection never pays, nobody
+  else's order is read, and the ledger never exceeds the order.
 - **Grounding tests** — invented quotes are rejected; verified ones survive.
 - **Injection tests** — all four categories detected, honest refund requests *not*
   flagged, and S-18 confirmed undetected.
@@ -795,6 +866,21 @@ project hit rather than a hypothetical one.
 - **Shop tests** — registration, login, demo login, session binding, checkout,
   stock, order isolation, and that a shop session overrides a forged body
   `customerId`.
+- **Notice-scope tests** — one escalation must not greet a customer on every other
+  order they have, and the unattended notice must not claim the assistant has stopped
+  replying while it is still answering. Both were live bugs: a takeover is one per
+  customer, so reading it without the order put the banner on every thread.
+- **Customer journey tests** (`customer-journey.test.ts`) — one shopper, start to
+  finish, over the real HTTP stack: buy two lines, then send a plain complaint, an
+  emoji, four languages, and a prompt injection, and check what the *shopper* got back
+  each time. Plus a reload, where the turn is written by one serializer and read by
+  another and a field that only exists in the reply comes back empty.
+- **Storefront tests** (`apps/web/src/test/storefront.test.tsx`) — the same journey in
+  the browser, on jsdom: type into the composer, submit, and assert on what is *drawn*.
+  Emoji byte-for-byte, the injection refusal on screen rather than an empty thread, the
+  composer cleared and usable afterwards, and the composer closed while a person holds
+  the thread. The fetch stub is the route contract written out by hand, so a shape that
+  moves breaks a test instead of a customer.
 - **Item-scope tests** — a product named only to be ruled out is excluded from the
   refund ceiling, and the exclusion does not narrow order identification.
 - **Migration tests** — a legacy database without the newer columns is upgraded in

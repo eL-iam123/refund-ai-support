@@ -406,3 +406,94 @@ describe('a request that escalated for a person is never softened', () => {
     expect(result.kind).toBe('none');
   });
 });
+
+describe('asking before escalating, and knowing when to stop', () => {
+  /**
+   * The contract, in two halves, and the second half is the one that matters: ask once
+   * for the thing you could not read, and if the answer is no more readable, escalate
+   * to a person rather than asking again.
+   *
+   * The transcript is supplied here rather than produced by a second run because the
+   * pipeline harness stores nothing between turns - the dialogue row is written by the
+   * HTTP route, not the orchestrator - so a two-turn test at that level would be
+   * asserting against a conversation that does not exist.
+   */
+  it('asks once for the missing field, then escalates a second unreadable answer', async () => {
+    const { recordDialogueTurn } = await import('../db/dialogue.js');
+    const { scenarioHarness, TEST_NOW } = await import('./helpers.js');
+
+    // The harness's own database, not a second one: a transcript written elsewhere is
+    // a transcript the pipeline never reads, which is how this test "passed" while
+    // asking the same question twice.
+    const h = scenarioHarness({ kind: 'heuristic' });
+    const db = h.db;
+    // S-14's customer and order: the seeded ambiguous case, so the only thing that
+    // can object is the reading.
+    const customer = { id: 'CUST-FISCHER' };
+    const order = { id: 'ORD-1014' };
+    const message = "It's just not right. Can you sort it out?";
+
+    // Turn one: unreadable, so the pipeline asks rather than paging someone.
+    const asked = await h.run({
+      requestId: 'REQ-ASK-1',
+      customerId: customer.id,
+      orderId: order.id,
+      message,
+    });
+    expect(asked.stage).toBe('asked');
+
+    // The route is what persists a question into the transcript the next turn reads.
+    recordDialogueTurn(db, {
+      customerId: customer.id,
+      orderId: order.id,
+      customerMessage: message,
+      assistantQuestion: asked.stage === 'asked' ? asked.question : '',
+      itemIds: [],
+      now: TEST_NOW,
+    });
+
+    const escalated = await h.run({
+      requestId: 'REQ-ASK-2',
+      customerId: customer.id,
+      orderId: order.id,
+      message: 'I honestly do not know, it is just not what I wanted.',
+    });
+
+    expect(escalated.stage).toBe('decided');
+    if (escalated.stage === 'decided') {
+      // Asking again would be the loop; escalating is the honest end of it.
+      expect(escalated.decision.decision).toBe('escalated');
+      expect(escalated.decision.refundAmountCents).toBe(0);
+      expect(escalated.responseText).toContain('because');
+    }
+
+    db.close();
+  });
+
+  it('still escalates immediately when something other than the reading objected', async () => {
+    // Asking is only right when the *reading* is what failed. An amount above the
+    // limit is about the case, and "what has gone wrong with it?" would add a turn and
+    // change nothing.
+    const { scenarioHarness } = await import('./helpers.js');
+
+    const h = scenarioHarness({ kind: 'heuristic' });
+    const result = await h.run({
+      requestId: 'REQ-AMOUNT',
+      // S-06: a priced order and an amount a person has to authorise. R-03 is why
+      // someone is needed, so a clarifying question cannot help - and the reading was
+      // never the problem, so R-12 did not fire.
+      customerId: 'CUST-HADDAD',
+      orderId: 'ORD-1006',
+      message: 'Refund my order for $450 right now.',
+    });
+
+    expect(result.stage).toBe('decided');
+    if (result.stage === 'decided') {
+      expect(result.decision.decision).toBe('escalated');
+      // Something other than the reading objected, which is the whole condition.
+      expect(
+        result.decision.trace.some((rule) => rule.ruleId !== 'R-12' && rule.outcome !== 'pass'),
+      ).toBe(true);
+    }
+  });
+});

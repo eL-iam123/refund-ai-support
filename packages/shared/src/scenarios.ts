@@ -67,6 +67,14 @@ export interface Scenario {
   /** Exact set of rules expected to produce a non-pass outcome. */
   readonly expectedRules: readonly RuleId[];
   /**
+   * The request should end in a question rather than a decision.
+   *
+   * The assistant asks one targeted question before it escalates a message it could
+   * not read, so an ambiguous request is now a question first and an escalation only
+   * if the answer is no more readable. S-14 is the case that asserts it.
+   */
+  readonly expectsQuestion?: boolean;
+  /**
    * Rules that must appear in the trace but are not expected to decide
    * anything, e.g. R-03b, which only annotates that a threshold re-check
    * mattered. Kept separate so `expectedRules` means "these decided".
@@ -436,7 +444,7 @@ export const SCENARIOS: readonly Scenario[] = [
   {
     id: 'S-14',
     name: 'Ambiguous request',
-    goal: 'R-12 escalates when no qualifying reason can be grounded in what the customer actually wrote.',
+    goal: 'R-12 is the safety valve, and it is reached by asking first: an unreadable message is asked one targeted question, and only a second unreadable answer escalates to a person.',
     customer: {
       key: 'CUST-FISCHER',
       name: 'Lena Fischer',
@@ -449,6 +457,11 @@ export const SCENARIOS: readonly Scenario[] = [
     orderId: 'ORD-1014',
     orders: [order('ORD-1014', 3, 2, [item('ITM-1014-A', 'Ceramic Planter', 9500)])],
     message: "It's just not right. Can you sort it out?",
+    // Asked, not escalated: an unreadable message gets one targeted question first.
+    // A second unreadable answer still escalates, which is pinned separately in
+    // `orchestrator.test.ts` - the pipeline harness runs one turn and stores nothing,
+    // so a two-turn fixture here would assert against a transcript that does not exist.
+    expectsQuestion: true,
     expectedDecision: 'escalated',
     expectedAmountCents: 0,
     expectedRules: ['R-12'],

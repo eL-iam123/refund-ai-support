@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAnalyzer } from '../ai/anthropicAnalyzer.js';
 import { presetFor } from '../config/env.js';
-import type { IntakeInput, AttemptObserver } from '../ai/analyzer.js';
+import type { IntakeInput, IntakeReply, AttemptObserver } from '../ai/analyzer.js';
 import { testEnv } from './helpers.js';
 
 /**
@@ -61,6 +61,17 @@ function buildAnalyzer() {
 }
 
 /** Answers every call with the given payload, and records what was sent. */
+/** Names what the model actually did, so a failing assertion says which exit it took. */
+function describeReply(result: IntakeReply): string {
+  if (result.kind === 'question') {
+    return result.question;
+  }
+  if (result.kind === 'ask_items') {
+    return `ask_items(${result.candidates.join(', ')})`;
+  }
+  return 'decide_claim';
+}
+
 function stubAnthropic(payload: unknown): { calls: Request[] } {
   const calls: Request[] = [];
   vi.stubGlobal(
@@ -121,7 +132,7 @@ describe('anthropic wire format', () => {
     const result = await buildAnalyzer().analyze(INPUT, noopObserver);
 
     if (result.kind !== 'complete') {
-      throw new Error(`expected a complete extraction but the model asked: ${result.question}`);
+      throw new Error(`expected a complete extraction but the model asked: ${describeReply(result)}`);
     }
     expect(result.extraction.reason).toBe('damaged');
     expect(result.extraction.items).toEqual(['MUG']);

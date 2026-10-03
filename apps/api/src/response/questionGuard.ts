@@ -22,6 +22,8 @@
 import type { DialogueLine } from '../ai/analyzer.js';
 
 /** Phrases that open a call-centre loop rather than engage with a complaint. */
+import { alreadyAsked, nextMissingField, questionForField, type NextQuestionInput } from './nextQuestion.js';
+
 const CUSTOMER_FACING_QUEUE_STARTERS =
   /(how can i help you today|how (?:may|can) i (?:help|assist)|welcome|what can i do for you|is there (?:anything|something) (?:else )?i can help you with)/i;
 
@@ -39,6 +41,13 @@ export interface QuestionGuardContext {
    * practice, and the cost of a rare collision is a safe escalation.
    */
   readonly priorAssistantText: readonly string[];
+  /**
+   * The thread's facts, so a vague question can be replaced with a specific one.
+   *
+   * Optional so a caller that has nothing but strings can still use the guard; the
+   * generic restatement is then what it falls back to, which is what it did always.
+   */
+  readonly next?: NextQuestionInput;
 }
 
 export type RefinedQuestion =
@@ -46,18 +55,61 @@ export type RefinedQuestion =
   | { readonly kind: 'replace'; readonly question: string }
   | { readonly kind: 'escalate' };
 
+/**
+ * The gate on everything the customer is asked.
+ *
+ * The logic is an inversion, and it has to be: publish a model's question only when it
+ * asks for the field the thread is actually missing. The earlier version did the
+ * opposite - replace a list of known-bad questions - and it did not work, because the
+ * list is a list of phrasings somebody guessed. "What's the problem with the item?" is
+ * not on it, "Tell me a little about what happened" is not on it, and both are exactly
+ * the vague question the onion exists to replace. Matching on phrasing can only ever
+ * catch the phrasings already thought of.
+ *
+ * So the question is compared against the *field* instead. If the thread is missing the
+ * reason and the model's question does not ask for the reason, the question is replaced
+ * by one that does - whether or not it was on any list.
+ */
 export function refineQuestion(raw: string, ctx: QuestionGuardContext): RefinedQuestion {
   const normalized = normalize(raw);
 
   if (priorQuestions(ctx.priorAssistantText).some((earlier) => normalize(earlier) === normalized)) {
     return { kind: 'escalate' };
   }
+
+  const targeted = targetedQuestion(ctx.next);
+  // `alreadyAsked` is a similarity test, which is what "does this question ask for the
+  // thing we are missing" needs: it is true when the model's words and the targeted
+  // question are about the same field, so a specific question survives untouched.
+  if (targeted !== null && !alreadyAsked(targeted, [raw])) {
+    return { kind: 'replace', question: targeted };
+  }
+
   if (isCanned(raw) || (ctx.orderResolved && demandsOrderNumber(raw))) {
-    return { kind: 'replace', question: warmRestatement(ctx.orderResolved) };
+    return { kind: 'replace', question: targeted ?? warmRestatement(ctx.orderResolved) };
   }
   return { kind: 'publish', question: raw };
 }
 
+/**
+ * The question for whatever the thread is still missing, or null when it cannot be
+ * named - no order, nothing the customer has said, or a question already asked.
+ */
+function targetedQuestion(next: NextQuestionInput | undefined): string | null {
+  if (next === undefined) {
+    return null;
+  }
+  const field = nextMissingField(next);
+  return field === null ? null : questionForField(field, next);
+}
+
+/**
+ * The fallback when the thread's missing field cannot be named.
+ *
+ * Kept as a last resort rather than the default, and deliberately vaguer than the
+ * targeted questions: reaching it means the thread is in a state this file cannot
+ * describe, and saying less is the honest response to that.
+ */
 function warmRestatement(orderResolved: boolean): string {
   if (!orderResolved) {
     return (

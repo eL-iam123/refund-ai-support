@@ -151,15 +151,6 @@ function OrderCard({
   const navigate = useNavigate();
   const [reporting, setReporting] = useState(false);
 
-  /**
-   * Only lines that still map to a catalogue product are refilled. A product
-   * that has since been delisted keeps its history but cannot be re-bought, and
-   * saying so is better than silently re-ordering something else.
-   *
-   * The filter is what narrows the type too, so the `as string` below is
-   * narrowing a type the compiler has already been told is safe rather than
-   * asserting past a null it has not checked.
-   */
   const buyable = order.items.filter((item) => item.productId !== null);
   const gone = order.items.length - buyable.length;
 
@@ -185,16 +176,13 @@ function OrderCard({
 
       <OrderLines items={order.items} />
 
-      <div className="row">
-        <button type="button" className="btn-secondary" disabled={buyable.length === 0} onClick={refill}>
-          <RefreshCw size={16} /> Buy again
-        </button>
-        <button type="button" className="btn-primary" onClick={() => setReporting(true)}>
-          <AlertCircle size={16} /> Report an issue
-        </button>
-      </div>
-      {messageCount > 0 ? <p className="muted small">Latest update in this order thread.</p> : null}
-      {gone > 0 ? <p className="muted small">{gone} item(s) no longer in the catalogue.</p> : null}
+      <OrderActions
+        gone={gone}
+        buyableCount={buyable.length}
+        messageCount={messageCount}
+        onRefill={refill}
+        onReport={() => setReporting(true)}
+      />
 
       {reporting ? (
         <IssuePicker
@@ -207,6 +195,35 @@ function OrderCard({
         />
       ) : null}
     </article>
+  );
+}
+
+function OrderActions({
+  gone,
+  buyableCount,
+  messageCount,
+  onRefill,
+  onReport,
+}: {
+  gone: number;
+  buyableCount: number;
+  messageCount: number;
+  onRefill: () => void;
+  onReport: () => void;
+}): ReactNode {
+  return (
+    <>
+      <div className="row">
+        <button type="button" className="btn-secondary" disabled={buyableCount === 0} onClick={onRefill}>
+          <RefreshCw size={16} /> Buy again
+        </button>
+        <button type="button" className="btn-primary" onClick={onReport}>
+          <AlertCircle size={16} /> Report an issue
+        </button>
+      </div>
+      {messageCount > 0 ? <p className="muted small">Latest update in this order thread.</p> : null}
+      {gone > 0 ? <p className="muted small">{gone} item(s) no longer in the catalogue.</p> : null}
+    </>
   );
 }
 

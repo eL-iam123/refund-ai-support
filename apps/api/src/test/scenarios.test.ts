@@ -21,10 +21,18 @@ async function run(scenario: Scenario) {
     orderId: scenario.orderId,
     message: scenario.message,
   });
+
+  // A scenario may now *expect* the question - asking before escalating is the point -
+  // and one that asks when it should have decided is still a softer failure than the
+  // assertions below, so it is reported here with its own wording visible.
+  if (scenario.expectsQuestion) {
+    if (result.stage !== 'asked') {
+      throw new Error(`${scenario.id} should have asked, but decided ${result.decision.decision}`);
+    }
+    return { ...result, extractionCalls: h.analyzerCalls() };
+  }
+
   if (result.stage === 'asked') {
-    // A conformance case must end in a decision; an assistant that answered
-    // with a question instead is a softer failure than the assertions below
-    // would report, and it is reported here so its own wording is visible.
     throw new Error(`${scenario.id} did not decide: ${result.question}`);
   }
   return { ...result, extractionCalls: h.analyzerCalls() };
@@ -47,29 +55,50 @@ describe.each(SCENARIOS.map((scenario) => [scenario.id, scenario] as const))(
     it(`${scenario.goal}`, async () => {
       const result = await run(scenario);
 
+      const decided = result.stage === 'decided' ? result : null;
+
+      if (scenario.expectsQuestion) {
+        // The contract for these is the question itself: it must exist, it must be
+        // the targeted one rather than a vague opener, and it must not have decided.
+        // What happens after the answer is covered in `discretion.test.ts`, which can
+        // supply the transcript this single-turn harness cannot.
+        expect(result.stage, `${scenario.id} should have asked`).toBe('asked');
+        if (result.stage === 'asked') {
+          expect(result.question).toMatch(/what has gone wrong|which item|which order|condition/i);
+          expect(result.question).not.toMatch(/tell me (a little )?more|anything else/i);
+        }
+        return;
+      }
+
+      if (decided === null) {
+        const askedQuestion = result.stage === 'asked' ? result.question : '';
+        throw new Error(`${scenario.id} asked instead of deciding: ${askedQuestion}`);
+      }
+
       expect(
-        `${result.decision.decision} ${formatCents(result.decision.refundAmountCents)}`,
+        `${decided.decision.decision} ${formatCents(decided.decision.refundAmountCents)}`,
       ).toBe(`${scenario.expectedDecision} ${formatCents(scenario.expectedAmountCents)}`);
 
-      expect(decidedRules(result.decision.trace)).toEqual([...scenario.expectedRules].sort());
+      expect(decidedRules(decided.decision.trace)).toEqual([...scenario.expectedRules].sort());
 
       for (const supporting of scenario.expectedSupportingRules ?? []) {
-        expect(result.decision.trace.map((rule) => rule.ruleId)).toContain(supporting);
+        expect(decided.decision.trace.map((rule) => rule.ruleId)).toContain(supporting);
       }
 
       // The core claim: a fact-gate decision never involves a model.
       expect(result.llmCalled).toBe(scenario.expectsLlmCall);
       expect(result.extractionCalls).toBe(scenario.expectsLlmCall ? 1 : 0);
 
-      expect(clamped(result.decision.overrides.map((override) => override.code))).toBe(
+      expect(clamped(decided.decision.overrides.map((override) => override.code))).toBe(
         scenario.expectsClamp,
       );
 
       // Every decision must cite policy and carry a usable customer reply.
-      expect(result.decision.policyRef).toMatch(/REFUND_POLICY\.md/);
-      expect(result.responseText.length).toBeGreaterThan(20);
+      expect(decided.decision.policyRef).toMatch(/REFUND_POLICY\.md/);
+      const reply = decided.stage === 'decided' ? decided.responseText : '';
+      expect(reply.length).toBeGreaterThan(20);
       if (scenario.expectedDecision === 'denied') {
-        expect(result.decision.refundAmountCents).toBe(0);
+        expect(decided.decision.refundAmountCents).toBe(0);
       }
       expect(id).toBe(scenario.id);
     });
@@ -87,14 +116,19 @@ describe('scenario suite as a whole', () => {
     expect(stages).toContain('resolve');
     expect(stages).toContain('respond');
 
-    const decided = new Set(results.flatMap((result) => decidedRules(result.decision.trace)));
+    // Asked scenarios have no decision to read, and pretending they do is what makes
+    // a suite lie about its own coverage.
+    const decided = new Set(
+      results.flatMap((result) => (result.stage === 'decided' ? decidedRules(result.decision.trace) : [])),
+    );
     expect(decided.size).toBeGreaterThanOrEqual(12);
   });
 
   it('never lets the model raise an amount above the order total', async () => {
     for (const scenario of SCENARIOS) {
       const result = await run(scenario);
-      if (result.order !== null) {
+      // A question pays nothing, so the bound only applies where there is a decision.
+      if (result.stage === 'decided' && result.order !== null) {
         expect(result.decision.refundAmountCents).toBeLessThanOrEqual(result.order.totalCents);
       }
     }

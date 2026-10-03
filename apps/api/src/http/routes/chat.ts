@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { CreateRefundRequestSchema, type CreateRefundRequest, type RefundRequestDto } from '@refund/shared';
 import type { AppContext } from '../context.js';
 import { processRefundRequest, type ProcessResult } from '../../orchestrator.js';
+import type { ItemPickerOffer } from '../../retrieval/itemPicker.js';
 import { findRequestById } from '../../db/requestRepository.js';
 import type { PersistedRequest } from '../../db/records.js';
 import { persistDecision } from '../../db/persistDecision.js';
@@ -49,7 +50,17 @@ async function handleChatMessage(
   reply: FastifyReply,
   ctx: AppContext,
   hub: LiveHub,
-): Promise<HandoffBody | { question: string; dialogueId: string; itemIds: readonly string[] } | { request: RefundRequestDto }> {
+): Promise<
+  | HandoffBody
+  | {
+      question: string;
+      picker: ItemPickerOffer | null;
+      notice: string | null;
+      dialogueId: string;
+      itemIds: readonly string[];
+    }
+  | { request: RefundRequestDto }
+> {
   const body = parseChatBody(request, ctx);
   const session = signedInSession(ctx, request);
   const resolved = withPendingItemScope(ctx, session.customerId, body);
@@ -58,7 +69,20 @@ async function handleChatMessage(
   assertThreadOpen(ctx, resolved, now);
 
   const takeover = takeoverForEscalated(ctx.db, session.customerId, resolved.orderId, now);
-  if (takeover !== null) {
+  // Only a handoff a person has actually picked up takes the thread away from the
+  // pipeline.
+  //
+  // An unattended escalation - which is what every request becomes when no model
+  // is configured, and the single most common state a fresh deployment is in - used
+  // to divert here as well, and that is a trap: the customer's message was filed on
+  // the handoff thread and the pipeline was skipped, so `aiResponse` came back null
+  // and nothing else ever would. With nobody on the console, a thread went silent
+  // the moment its first request escalated, and stayed silent however many times
+  // the customer wrote in.
+  //
+  // So the person is still told, and the customer still gets an answer. Escalation
+  // is meant to *add* a person to a conversation that the assistant is still having.
+  if (takeover !== null && takeover.agentId !== ESCALATION_AGENT) {
     reply.code(201);
     return chatDuringHandoff(ctx, hub, takeover, body.message, now);
   }
@@ -112,8 +136,24 @@ async function decideOrAsk(
   reply: FastifyReply,
   resolved: CreateRefundRequest,
   now: Date,
-): Promise<{ question: string; dialogueId: string; itemIds: readonly string[] } | { request: RefundRequestDto }> {
-  const input = toProcessInput(resolved, now);
+): Promise<
+  | {
+      question: string;
+      picker: ItemPickerOffer | null;
+      notice: string | null;
+      dialogueId: string;
+      itemIds: readonly string[];
+    }
+  | { request: RefundRequestDto }
+> {
+  const input: ProcessInputFields = {
+    requestId: randomUUID(),
+    customerId: resolved.customerId,
+    orderId: resolved.orderId,
+    message: resolved.message,
+    itemIds: resolved.itemIds ?? [],
+    now,
+  };
   const result = await processRefundRequest(ctx.db, ctx.pipeline, input);
   if (result.stage === 'asked') {
     const turn = recordDialogueTurn(ctx.db, {
@@ -121,11 +161,18 @@ async function decideOrAsk(
       orderId: result.resolvedOrderId,
       customerMessage: input.message,
       assistantQuestion: result.question,
+      ...(result.picker === null ? {} : { offer: result.picker }),
       itemIds: result.itemIds,
       now: ctx.now(),
     });
     ctx.log.info({ requestId: input.requestId, question: result.question }, 'chat.asked');
-    return { question: result.question, dialogueId: turn.id, itemIds: turn.itemIds };
+    return {
+      question: result.question,
+      picker: result.picker,
+      notice: result.notice,
+      dialogueId: turn.id,
+      itemIds: turn.itemIds,
+    };
   }
 
   const stored = storeDecided(ctx, input, result);
@@ -138,7 +185,10 @@ async function decideOrAsk(
     takeoverForEscalated(ctx.db, stored.customerId, stored.orderId, ctx.now());
   }
   reply.code(201);
-  return { request: toRequestDto(stored) };
+  // `notice` rides beside the decision rather than inside it: it is what the ladder
+  // had to do, not part of the refund, and the client shows it as a line under the
+  // answer so an operator reading the thread can see it too.
+  return { request: toRequestDto(stored), notice: result.notice };
 }
 
 function parseChatBody(
@@ -218,6 +268,14 @@ function duplicateForSubmission(
  * never answers in a human's place: while awaiting a person the customer gets
  * no repeated boilerplate, and after a person claims it only that person may
  * reply. The customer message is durably recorded and announced to staff.
+ */
+/**
+ * A message on a thread a person has taken over.
+ *
+ * The customer's words go to them, and the assistant stays out of the way - someone
+ * is already answering, and two replies is worse than one. The message is also kept
+ * on the takeover thread, so the conversation the agent reads is the conversation
+ * the customer had.
  */
 function chatDuringHandoff(
   ctx: AppContext,
@@ -342,16 +400,5 @@ function suppressedDuplicate(db: Db, duplicate: DuplicateReport, now: Date): {
       firstReportedAt: duplicate.original.createdAt,
       firstDecision: stored.decision,
     },
-  };
-}
-
-function toProcessInput(data: CreateRefundRequest, now: Date): ProcessInputFields {
-  return {
-    requestId: randomUUID(),
-    customerId: data.customerId,
-    orderId: data.orderId,
-    message: data.message,
-    itemIds: data.itemIds ?? [],
-    now,
   };
 }

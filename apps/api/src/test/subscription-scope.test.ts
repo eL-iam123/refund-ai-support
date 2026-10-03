@@ -125,11 +125,25 @@ describe('a mixed basket is not refused for its subscription line', () => {
       TEST_NOW,
     );
 
+    // A whole-basket claim on a two-line order is ambiguous, and ambiguity is now a
+    // question rather than an escalation: the assistant asks which line, naming both
+    // and their prices. Answering it the way the storefront's picker does - the
+    // customer's own `itemIds` - is the second half of this test, and the part that
+    // proves a subscription line does not poison the order.
+    const asked = await h.run({
+      customerId: user.customerId,
+      orderId: placed.id,
+      message: 'the coffee subscription is on this order and I would like a refund',
+    });
+    expect(asked.stage).toBe('asked');
+
+    const mugItemId = placed.items.find((item) => item.name !== 'Coffee Subscription (monthly)')?.itemId ?? '';
     const result = decided(
       await h.run({
         customerId: user.customerId,
         orderId: placed.id,
-        message: 'the coffee subscription is on this order and I would like a refund',
+        itemIds: [mugItemId],
+        message: 'It is about the mug.',
       }),
     );
 

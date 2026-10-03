@@ -40,7 +40,19 @@ export type ShopSocketEvent =
   | { readonly type: 'agent.connected'; readonly customerId: string; readonly agentId: string; readonly since: string }
   | { readonly type: 'agent.message'; readonly customerId: string; readonly message: AgentMessage }
   | { readonly type: 'agent.left'; readonly customerId: string; readonly orderId: string | null }
-  | { readonly type: 'chat.closed'; readonly customerId: string; readonly orderId: string | null };
+  | { readonly type: 'chat.closed'; readonly customerId: string; readonly orderId: string | null }
+  | {
+      /**
+       * The assistant could not read the message and is trying once more.
+       *
+       * Published so the customer can be told *while it is still happening*. The
+       * alternative - explaining it only in the final reply - leaves the composer
+       * spinning through the whole retry ladder with nothing on screen, which is the
+       * silence this exists to remove.
+       */
+      readonly type: 'assistant.retrying';
+      readonly customerId: string;
+    };
 
 export type StaffSocketEvent =
   | {

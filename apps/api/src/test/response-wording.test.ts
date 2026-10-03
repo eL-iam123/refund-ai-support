@@ -155,10 +155,17 @@ describe('the response names the order once, not twice', () => {
 });
 
 describe('through the real pipeline', () => {
-  async function run(message: string): Promise<{ decision: string; amount: number; reply: string }> {
+  /**
+   * One turn, as the pipeline produced it.
+   *
+   * A turn can now end in a question - asking before escalating is the point - so the
+   * helper reports which it was rather than insisting on a decision, and callers
+   * assert what they care about.
+   */
+  async function run(message: string): Promise<{ decision: string | null; amount: number; reply: string }> {
     const db = openMemoryDatabase();
     seedDatabase(db, TEST_NOW);
-    const result = decided(await processRefundRequest(db, {
+    const outcome = await processRefundRequest(db, {
       analyzer: FakeAnalyzer({ kind: 'heuristic' }),
       recordAttempt: createAttemptRecorder(db),
       injectionAction: 'deny',
@@ -169,29 +176,36 @@ describe('through the real pipeline', () => {
       message,
       itemIds: [],
       now: TEST_NOW,
-    }));
+    });
+    if (outcome.stage === 'asked') {
+      return { decision: null, amount: 0, reply: outcome.question };
+    }
     return {
-      decision: result.decision.decision,
-      amount: result.decision.refundAmountCents,
-      reply: result.responseText,
+      decision: outcome.decision.decision,
+      amount: outcome.decision.refundAmountCents,
+      reply: outcome.responseText,
     };
   }
 
   it('tells an attachment-only customer what is actually needed, and pays nothing', async () => {
+    // A bare link is unreadable, which is now a question rather than an escalation:
+    // one question gets the words, and only an unreadable *second* message pages
+    // someone. The acknowledgement comes first, because "what is wrong with it?" on
+    // its own would read as though we had not understood the photo at all.
     const result = await run(LINK_ONLY);
 
     expect(result.reply).toContain('cannot open image attachments');
+    expect(result.reply).toMatch(/what has gone wrong/i);
     // No claim was made, so nothing may be paid, whatever the reply says.
-    expect(result.decision).toBe('escalated');
     expect(result.amount).toBe(0);
   });
 
   it('acknowledges an angry customer and still pays nothing without a claim', async () => {
     const result = await run(ANGRY);
 
+    // Anger is not evidence. If this approved, a customer could simply be rude - so
+    // the reply acknowledges and then asks for the fact we are actually missing.
     expect(result.reply).toContain('sorry');
-    // Anger is not evidence. If this approved, a customer could simply be rude.
-    expect(result.decision).toBe('escalated');
     expect(result.amount).toBe(0);
   });
 

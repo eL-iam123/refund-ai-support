@@ -21,6 +21,8 @@ import { followUpFor } from '../../response/followUp.js';
 import { AppealAlreadyPendingError, fileAppeal, openAppealForRequest } from '../../db/appeals.js';
 import { FULLY_REFUNDED } from '../../policy/constants.js';
 import { isChatClosed } from '../../db/chatClosures.js';
+import { activeHandoffForCustomer, ESCALATION_AGENT } from '../../db/handoffs.js';
+import type { Db } from '../../db/connection.js';
 
 /**
  * Storefront endpoints, mounted under `/api/shop`.
@@ -330,6 +332,32 @@ function handleAssistantStatus(ctx: AppContext): { aiMode: string; aiAvailable: 
   };
 }
 
+/**
+ * Whether a person is holding this thread and has not answered yet.
+ *
+ * True only for a handoff a *named* agent owns - an unattended escalation is not a
+ * person, and the assistant keeps answering through it - and only until that agent
+ * sends something. Both halves matter: waiting for an agent who has already replied
+ * would leave a customer staring at a disabled box after being answered, and waiting
+ * on the unattended slot would disable the composer in exactly the deployments where
+ * nobody is ever going to reply.
+ */
+function awaitingPersonReply(db: Db, customerId: string): boolean {
+  const active = activeHandoffForCustomer(db, customerId);
+  if (active === null || active.agentId === ESCALATION_AGENT) {
+    return false;
+  }
+  const answer = db
+    .prepare(
+      `SELECT 1 AS present
+         FROM agent_messages m JOIN handoffs h ON h.id = m.handoff_id
+        WHERE h.id = ? AND m.sender = 'agent'
+        LIMIT 1`,
+    )
+    .get(active.id);
+  return answer === undefined;
+}
+
 function handleOrders(request: FastifyRequest, ctx: AppContext): { user: ShopUser | null; orders: readonly ShopOrder[] } {
   const user = currentUser(request, ctx);
   if (user === null) {
@@ -396,6 +424,11 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext): void 
     return {
       orderId: query.data.orderId,
       closed: isChatClosed(ctx.db, user.customerId, query.data.orderId),
+      // A person is holding the thread and has not answered yet: the composer waits
+      // for them rather than collecting messages nobody is reading, and reopens the
+      // moment they reply. Derived server-side, because only the server knows which
+      // agent messages are *after* the customer started typing to one.
+      awaitingPerson: awaitingPersonReply(ctx.db, user.customerId),
       turns: conversationForOrder(ctx.db, user.customerId, query.data.orderId, ctx.now(), query.data.limit),
     };
   });

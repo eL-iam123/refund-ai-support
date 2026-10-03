@@ -83,7 +83,11 @@ describe('identifying which order a request is about', () => {
   }
 
   it('resolves from the product the customer named, with no order id given', async () => {
-    const request = await submit({ message: 'The floor lamp I bought fell over and broke.' });
+    // "fell over and broke" is not a phrase the reason table can read, so this used to
+    // end as an escalation - which says nothing about order identification, the thing
+    // this test is about. Said as a customer who also named the fault, so the case
+    // exercises the resolution and not the intake vocabulary.
+    const request = await submit({ message: 'The floor lamp I bought fell over and is broken.' });
 
     expect(request.orderId).toBe(LAMP_ORDER);
   });

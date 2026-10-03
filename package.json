@@ -14,7 +14,7 @@
     "start": "pnpm --filter @refund/api start",
     "typecheck": "pnpm --filter @refund/shared build && pnpm -r typecheck",
     "lint": "eslint .",
-    "test": "pnpm --filter @refund/shared build && pnpm --filter @refund/api test",
+    "test": "pnpm --filter @refund/shared build && pnpm --filter @refund/api test && pnpm --filter @refund/web test",
     "test:live": "pnpm --filter @refund/shared build && pnpm --filter @refund/api test:live",
     "verify": "pnpm typecheck && pnpm lint && pnpm test",
     "seed": "pnpm --filter @refund/api seed",

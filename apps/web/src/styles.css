@@ -147,6 +147,11 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .item-choice { width: 100%; min-height: 46px; justify-content: space-between; color: var(--ink); background: #fff; border-color: var(--line-strong); text-align: left; }
 .item-choice:hover:not(:disabled) { color: var(--brand-deep); background: var(--brand-soft); border-color: var(--brand); }
 .item-choice:disabled { color: var(--ink-faint); background: #f5f5f5; }
+/* The line they tapped: still legible while it waits for the answer, because a
+   disabled-and-greyed tap reads as a rejected one. */
+.item-choice.chosen, .item-choice.chosen:disabled { color: var(--brand-deep); background: var(--brand-soft); border-color: var(--brand); }
+/* A keyboard user arriving at the offer has to be able to see where they are. */
+.item-choice:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .orders { display: grid; gap: 16px; }
 .issue-picker, .override-form { display: grid; gap: 12px; margin-top: 16px; padding: 16px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; }
 .issue-list { display: grid; gap: 7px; }

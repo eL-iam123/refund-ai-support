@@ -25,6 +25,10 @@ import { LocalAnalyzer } from '../ai/localAnalyzer.js';
  * - `fixed(...)` returns a hand-written claim, for tests about one rule.
  * - `ask(question, then)` returns a clarifying question on a cold turn and a
  *   claim on the following turn, for the interactive loop.
+ * - `askItems(candidates, then)` does the same for the item picker: the model
+ *   nominates lines it could not tell apart, then decides once the customer has
+ *   answered. Separate from `ask` because the picker and a question are different
+ *   exits, and a test that wants one must not get the other.
  * - `unavailable()` rejects, for the fail-soft path.
  */
 
@@ -36,6 +40,8 @@ export function FakeAnalyzer(behaviour: Behaviour = { kind: 'heuristic' }): AIAn
       return fixedAnalyzer(behaviour);
     case 'ask':
       return askAnalyzer(behaviour);
+    case 'askItems':
+      return askItemsAnalyzer(behaviour);
     case 'unavailable':
       return unavailableAnalyzer(behaviour.message);
   }
@@ -48,6 +54,14 @@ export type Behaviour =
       readonly kind: 'ask';
       readonly question: string;
       /** The claim once the customer has answered the question. */
+      readonly then: Partial<ClaimExtraction>;
+    }
+  | {
+      /** The model asking which line a claim is about, before submitting one. */
+      readonly kind: 'askItems';
+      /** The item ids the model could not tell apart. */
+      readonly candidates: readonly string[];
+      /** The claim once the customer has chosen. */
       readonly then: Partial<ClaimExtraction>;
     }
   | { readonly kind: 'unavailable'; readonly message: string };
@@ -88,6 +102,50 @@ function fixedAnalyzer(behaviour: { readonly extraction: Partial<ClaimExtraction
         error: null,
       });
       return Promise.resolve({ kind: 'text', text: "I'm here to help while your agent reviews your case.", model: 'fake-fixed-v1' });
+    },
+  };
+}
+
+/**
+ * The picker's double: a request for the picker, then a decided claim.
+ *
+ * Shaped like the `ask` double on purpose - a cold turn asks, and the turn after
+ * the customer has chosen decides - because that is the arc the feature supports.
+ * The candidates are passed through unvalidated, which is the point: the test that
+ * matters is the one where they are bogus and the server declines.
+ */
+function askItemsAnalyzer(behaviour: {
+  readonly candidates: readonly string[];
+  readonly then: Partial<ClaimExtraction>;
+}): AIAnalyzer {
+  const extraction = { ...BASE_EXTRACTION, ...behaviour.then };
+  return {
+    label: 'fake (test)',
+    model: 'fake-ask-items-v1',
+    available: true,
+    unavailableReason: null,
+    analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
+      recordOk(observer, 'fake-ask-items-v1');
+      if (input.history.length === 0) {
+        return Promise.resolve({
+          kind: 'ask_items',
+          candidates: behaviour.candidates,
+          model: 'fake-ask-items-v1',
+        });
+      }
+      return Promise.resolve(completeReply(extraction, 'fake-ask-items-v1'));
+    },
+    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
+      observer({
+        model: 'fake-ask-items-v1',
+        attempt: 1,
+        ok: true,
+        latencyMs: 0,
+        promptTokens: null,
+        completionTokens: null,
+        error: null,
+      });
+      return Promise.resolve({ kind: 'text', text: "I'm here to help while your agent reviews your case.", model: 'fake-ask-items-v1' });
     },
   };
 }

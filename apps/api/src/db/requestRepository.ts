@@ -390,11 +390,11 @@ export function assertDecisionCoherent(decision: Decision, amountCents: number):
   }
   if (MONEY_DECISIONS.has(decision)) {
     if (amountCents <= 0) {
-      throw new IncoherentDecisionError(
+      const msg =
         amountCents === 0
           ? 'nothing on this order is eligible for refund, so it cannot be approved. Check the blocked items in the decision trace.'
-          : `a ${decision} request must carry a positive amount`,
-      );
+          : `a ${decision} request must carry a positive amount`;
+      throw new IncoherentDecisionError(msg);
     }
     return;
   }

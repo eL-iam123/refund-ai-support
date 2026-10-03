@@ -1,4 +1,4 @@
-import { readEnv, isAiRequired, missingApiKeyFor } from './config/env.js';
+import { readEnv, isAiRequired, missingApiKeyFor, type Env } from './config/env.js';
 import { openDatabase } from './db/connection.js';
 import { createLogger } from './lib/logger.js';
 import { buildApp } from './http/app.js';
@@ -63,8 +63,38 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  await app.listen({ port: env.API_PORT, host: env.API_HOST });
+  try {
+    await app.listen({ port: env.API_PORT, host: env.API_HOST });
+  } catch (error: unknown) {
+    throw portInUseError(error, env);
+  }
   log.info({ port: env.API_PORT, ai: `${env.AI_PROVIDER}` }, 'server.listening');
+}
+
+/**
+ * A `listen` failure, said in words the reader can act on.
+ *
+ * `EADDRINUSE` arrives as a bare stack trace, and the usual cause here is not a
+ * stray process: it is `docker compose up` already holding the port, because the
+ * README offers two ways to run the same app and they collide silently. Saying which
+ * is running turns a two-minute mystery into one command.
+ *
+ * The original error is kept as the cause, so nothing is lost.
+ */
+function portInUseError(error: unknown, env: Env): unknown {
+  const code = (error as { code?: string } | null)?.code ?? '';
+  if (code !== 'EADDRINUSE') {
+    return error;
+  }
+  const log = createLogger(env.LOG_LEVEL);
+  log.error(
+    { port: env.API_PORT },
+    `port ${env.API_PORT} is already in use. If you started the app with docker compose, ` +
+      'stop it first (docker compose stop api) or give this process a different port ' +
+      '(API_PORT=4001). Note that the two read different databases: the container uses ' +
+      '/data/refund.sqlite and a local run uses the path in .env.',
+  );
+  return error;
 }
 
 /**

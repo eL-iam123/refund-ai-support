@@ -966,6 +966,15 @@ describe('HTTP reproduces every scenario outcome', () => {
         message: fixture.message,
       });
 
+      // A scenario that expects a question now gets one over HTTP too: an
+      // unreadable message is asked about rather than escalated, which is a 200
+      // with a question rather than a 201 with a decision.
+      if (fixture.expectsQuestion) {
+        expect(response.statusCode, `${fixture.id} should have asked`).toBe(200);
+        expect(response.json<{ question?: string }>().question).toMatch(/what has gone wrong|which item|condition/i);
+        return;
+      }
+
       expect(response.statusCode).toBe(201);
       const { request } = response.json<CreatedResponse>();
 

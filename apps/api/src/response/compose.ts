@@ -151,10 +151,62 @@ function decisionBody(
         'If you believe we have the details wrong, reply to this message and a person will review it.'
       );
     default:
-      return (
-        prefix +
-        'A person is reviewing your request and will reply within one business day.' +
-        ' Nothing further is needed from you.'
-      );
+      return prefix + escalationReason(decision);
   }
+}
+
+/**
+ * Why this went to a person, in the customer's language.
+ *
+ * "A person is reviewing your request" tells a customer nothing they can act on, and an
+ * escalation they cannot explain is one they take to someone else. So the deciding rule
+ * is spoken in plain words - never by its number, never with a policy citation - and the
+ * sentence stays safe to send verbatim while still telling the person what to expect.
+ */
+function escalationReason(decision: RefundDecision): string {
+  return (
+    `A person is reviewing your request and will reply within one business day, because ${reasonFor(decision)} ` +
+    'Nothing further is needed from you.'
+  );
+}
+
+/**
+ * The rule-to-sentence table, as data.
+ *
+ * A `switch` over sixteen rules reads as logic and lints as complexity; this is what it
+ * actually is - one sentence per rule, saying the decision rather than citing the
+ * policy. A rule with no sentence falls through to the honest default rather than
+ * leaking an id into a customer's inbox.
+ */
+const REASON_BY_RULE: Readonly<Record<string, string>> = {
+  'R-01': 'it falls outside the window we can decide on our own.',
+  'R-01b': 'it falls outside the window we can decide on our own.',
+  'R-02': 'the item cannot be refunded automatically.',
+  'R-03': 'the amount is above what we can approve without a person checking it.',
+  'R-03b': 'the amount needs someone to look at the detail.',
+  'R-04': 'the reason needs someone to look at the detail.',
+  'R-05': 'the item cannot be refunded automatically.',
+  'R-06': 'the payment needs checking against this order.',
+  'R-06b': 'the payment needs checking against this order.',
+  'R-07': 'we need to check the history of this order before refunding it.',
+  'R-08': 'we need to check the history of this order before refunding it.',
+  'R-09': 'what you have told us does not match what we already have on file.',
+  'R-10': 'the item cannot be refunded automatically.',
+  'R-11': 'there is already a request open for this order.',
+  'R-12': 'we could not read the detail of your message well enough to decide it ourselves.',
+  'R-13': 'we could not work out which order this is about.',
+  'R-14': 'the message asked us to change our policy, which we cannot do.',
+};
+
+/**
+ * The sentence for whichever rule reached a conclusion.
+ *
+ * "Whichever reached a conclusion" rather than "the first": on a clean request no rule
+ * concluded anything, which is the ordinary "nothing objected, but nothing concluded"
+ * escalation. Saying so is the truth, and a vague reassurance would be a small lie.
+ */
+function reasonFor(decision: RefundDecision): string {
+  const deciding = decision.trace.find((rule) => rule.outcome !== 'pass');
+  const sentence = deciding === undefined ? undefined : REASON_BY_RULE[deciding.ruleId];
+  return sentence ?? 'it needs a person to decide rather than a rule.';
 }

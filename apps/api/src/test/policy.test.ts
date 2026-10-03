@@ -13,6 +13,7 @@ import { formatCents, parseAmountToCents, toCents } from '../lib/money.js';
 import { precedenceFold, nonPassRules } from '../policy/engine.js';
 import { POLICY_RULES } from '../policy/rules/index.js';
 import { resolve } from '../policy/resolver.js';
+import { DEFAULT_DISCRETION } from '../policy/discretion.js';
 import { runFactGates } from '../policy/gates.js';
 import { verifyGrounding } from '../ai/grounding.js';
 import { parseJson } from '../ai/json.js';
@@ -59,6 +60,12 @@ describe('rule-class authority', () => {
 
   it('produced no denials from any risk-class rule across all 18 scenarios', async () => {
     for (const scenario of SCENARIOS) {
+      // Scenarios that end in a question have no decision to inspect. Asking before
+      // escalating is the intended behaviour for them, and manufacturing a decision
+      // here would test the old contract instead of the new one.
+      if (scenario.expectsQuestion) {
+        continue;
+      }
       const h = scenarioHarness();
       const result = decided(await h.run({
         requestId: `REQ-${scenario.id}`,
@@ -282,12 +289,18 @@ describe('INJECTION_ACTION', () => {
     // The invariant, stated once so a future change cannot quietly reintroduce a
     // payable amount on a non-approval: only `approved` may carry one.
     for (const scenario of SCENARIOS) {
-      const result = decided(await scenarioHarness({ kind: 'heuristic' }).run({
+      const run = await scenarioHarness({ kind: 'heuristic' }).run({
         customerId: scenario.customer.key,
         orderId: scenario.orderId,
         message: scenario.message,
-      }));
-      const { decision, refundAmountCents } = result.decision;
+      });
+      // A question authorises nothing by definition, which is the invariant this
+      // sweep exists to protect - so it is asserted rather than skipped.
+      if (run.stage === 'asked') {
+        expect(scenario.expectsQuestion, `${scenario.id} asked unexpectedly`).toBe(true);
+        continue;
+      }
+      const { decision, refundAmountCents } = run.decision;
 
       if (decision !== 'approved') {
         expect(
@@ -361,6 +374,103 @@ describe('resolver clamps', () => {
     urgency: 'normal',
     policyOverrideAttempted: true,
   });
+
+describe('a claim the model does not stand behind goes to a person', () => {
+/**
+ * `confidence` is the model's own number about its own reading, which is precisely
+ * why it is used this way: not as evidence, but as a brake. A model reporting that
+ * it is guessing must not be able to end a refund conversation by itself.
+ */
+const grounding = { grounded: true, verifiedQuotes: ['it arrived cracked'], rejectedQuotes: [] };
+const claim = (confidence: number): ClaimExtraction => ({
+  ...extraction(900000),
+  confidence,
+});
+
+function decide(confidence: number, minConfidence?: number) {
+  return resolve({
+    intakeEvaluations: [],
+    gateResult,
+    reasonEvaluations: [evaluation({ ruleId: 'R-04', ruleClass: 'eligibility', outcome: 'approve' })],
+    grounding,
+    aiProposal: null,
+    disputeCeilingCents: null,
+    db: openMemoryDatabase(),
+    order: null,
+    orderTotalCents: 13000,
+    orderId: 'ORD-TEST',
+    extraction: claim(confidence),
+    minConfidence,
+  });
+}
+
+it('escalates a paid decision it is not confident about, and records why', () => {
+  const decision = decide(0.3);
+  expect(decision.decision).toBe('escalated');
+  expect(decision.refundAmountCents).toBe(0);
+  const record = decision.overrides.find((override) => override.code === 'low_confidence_claim_escalated');
+  expect(record?.detail).toContain('0.30');
+  expect(record?.detail).toContain('a person decides');
+});
+
+it('pays a claim it is confident about', () => {
+  expect(decide(0.9).decision).toBe('approved');
+  // Exactly at the floor is not below it.
+  expect(decide(0.5).decision).toBe('approved');
+});
+
+it('never lets the floor unlock a refusal', () => {
+  // The floor decides whether money may move, nothing else. A rule that denies on
+  // evidence needs no confidence, and a guard that could turn a denial into a
+  // review would be a way to authorise money by weakening it.
+  const denied = resolve({
+    intakeEvaluations: [],
+    gateResult,
+    reasonEvaluations: [evaluation({ ruleId: 'R-02', ruleClass: 'eligibility', outcome: 'deny' })],
+    grounding,
+    aiProposal: null,
+    disputeCeilingCents: null,
+    db: openMemoryDatabase(),
+    order: null,
+    orderTotalCents: 13000,
+    orderId: 'ORD-TEST',
+    extraction: claim(0.05),
+    minConfidence: 1,
+  });
+  expect(denied.decision).toBe('denied');
+});
+
+it('cannot be softened afterwards: it runs before the discretion layer', () => {
+  // A low-confidence claim must not reach the layer that turns an escalation into
+  // a partial refund or an exchange. The layer's own floor is a separate number,
+  // and neither raises the other's ceiling.
+  const softened = resolve({
+    intakeEvaluations: [],
+    gateResult,
+    reasonEvaluations: [evaluation({ ruleId: 'R-03', ruleClass: 'approval-authority', outcome: 'escalate' })],
+    grounding,
+    aiProposal: null,
+    disputeCeilingCents: null,
+    db: openMemoryDatabase(),
+    // A real order, because the layer reads nothing and does nothing without one -
+    // with `order: null` this test would pass without ever reaching it.
+    order,
+    orderTotalCents: order.totalCents,
+    orderId: order.id,
+    extraction: claim(0.2),
+    minConfidence: 0.5,
+    customer: { id: 'C', name: 'Pat', email: 'pat@example.com', tier: 'standard', accountCreatedAt: new Date('2020-01-01T00:00:00.000Z'), accountAgeDays: 2000, priorRefundCount: 0, refundRequestsLast30Days: 0 },
+    discretion: { ...DEFAULT_DISCRETION, enabled: true, allowPartial: true },
+  });
+  expect(softened.decision).toBe('escalated');
+  expect(softened.overrides.map((override) => override.code)).toContain('low_confidence_claim_escalated');
+});
+
+it('applies the default floor when the caller states no opinion', () => {
+  expect(decide(0.3, undefined).decision).toBe('escalated');
+  expect(decide(0.95, undefined).decision).toBe('approved');
+});
+});
 
   it('ignores a model that wants to pay more than the order is worth', () => {
     const decision = resolve({

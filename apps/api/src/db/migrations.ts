@@ -678,6 +678,23 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 18,
+    name: 'shop_dialogue.assistant_offer_json',
+    up: (db) => {
+      if (!hasTable(db, 'shop_dialogue') || hasColumn(db, 'shop_dialogue', 'assistant_offer_json')) {
+        return;
+      }
+      // The item picker offered inside the conversation, stored as it was offered.
+      //
+      // Nullable, and deliberately not a text question: a picker is not a sentence,
+      // and replaying one as prose on a reload would leave a customer reading
+      // "which item is this about?" with no way to answer it. Storing the lines as
+      // they were offered also freezes the prices shown at the moment of asking,
+      // so a replayed thread cannot disagree with what the customer was shown.
+      db.exec('ALTER TABLE shop_dialogue ADD COLUMN assistant_offer_json TEXT');
+    },
+  },
 ];
 
 /**

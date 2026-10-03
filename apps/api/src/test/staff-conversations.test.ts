@@ -375,13 +375,23 @@ describe('the live takeover console', () => {
     expect(brief.handoffReason).toContain('stepped aside');
   });
 
-  it('leaves an unattended takeover to a person: the assistant does not answer in their place', async () => {
-    // An escalation raises a takeover owned by the awaiting-agent slot, not by a
-    // named agent. The customer can keep talking, and what they write has to reach
-    // staff - but the model must not answer them. A reply written while nobody has
-    // claimed the thread is the business speaking over a person who is on their
-    // way, and once an agent claims it their message would contradict what the
-    // customer was just told.
+  it('answers an unattended takeover, and stops answering once an agent claims it', async () => {
+    // This test used to assert the opposite, and the reason it was written is still
+    // right: a reply written while nobody has claimed the thread is the business
+    // speaking over a person who is on their way, and once an agent claims it their
+    // message would contradict what the customer was just told.
+    //
+    // It assumed a person always arrives. In a deployment with nobody on the console
+    // - and in *every* deployment with no model key, where every request escalates -
+    // nobody ever does. So the rule silenced the assistant permanently: the customer
+    // wrote in, the message was filed for an agent who was not there, and
+    // `aiResponse` came back null. Every message after the first escalation got
+    // nothing at all, which is the bug this reversal fixes.
+    //
+    // The invariant is now scoped to where it holds. While the takeover is unattended
+    // the assistant answers, because the alternative is silence, and it decides
+    // nothing new: the order is already escalated, so a follow-up escalates too. The
+    // moment an agent claims the thread the assistant stops answering again.
     harness = await appHarness();
     seedShop(harness.db, TEST_NOW);
     const app = harness.app;
@@ -391,8 +401,8 @@ describe('the live takeover console', () => {
     const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
     expect(escalated.decision).toBe('escalated');
 
-    // The case file says nobody holds it yet, so the console shows the claim verb
-    // rather than a reply box that the message route would then refuse.
+    // The case file still says nobody holds it, so the console shows the claim verb
+    // rather than a reply box the message route would then refuse.
     const openedBeforeClaim = await app.inject({
       method: 'GET',
       url: `/api/staff/conversation?customerId=${encodeURIComponent(session.customerId)}&orderId=${encodeURIComponent(session.orderId)}`,
@@ -402,39 +412,33 @@ describe('the live takeover console', () => {
     expect(beforeBrief.state).toBe('handed_off');
     expect(beforeBrief.unattended).toBe(true);
 
+    // Nobody has claimed it, so the customer gets an answer instead of silence.
+    const answered = await session.send(session.orderId, 'I would like to return this item.');
+    expect(answered.handedOver).toBe(false);
+    expect(answered.decision).toBe('escalated');
+
+    // An agent now picks the thread up.
+    const claimed = await app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${encodeURIComponent(session.customerId)}/take-over`,
+      headers: { authorization: agent() },
+      payload: { orderId: session.orderId },
+    });
+    expect(claimed.statusCode).toBe(200);
+
+    // From here the original rule applies in full: a person is answering, so the
+    // assistant stays out of the way and the message goes to them.
     const routed = await app.inject({
       method: 'POST',
       url: '/api/chat/messages',
       headers: { cookie: cookiesOf(session) },
-      payload: { customerId: session.customerId, orderId: session.orderId, message: 'I would like to return this item.' },
+      payload: { customerId: session.customerId, orderId: session.orderId, message: 'Has anyone picked this up yet?' },
     });
     expect(routed.statusCode).toBe(201);
-    // No human has claimed it, so `agentConnected` is false rather than the
-    // optimistic true - the storefront uses it to decide whether to keep the
-    // customer's message box open or to show that a person is still to come.
-    expect(routed.json()).toMatchObject({ received: true, agentConnected: false, aiResponse: null });
-    expect(routed.json<{ message: { sender: string; body: string } }>().message).toMatchObject({
-      sender: 'customer',
-      body: 'I would like to return this item.',
-    });
+    expect(routed.json()).toMatchObject({ received: true, agentConnected: true, aiResponse: null });
 
-    // The message is durably recorded and announced to staff, so nobody has to
-    // poll the console to discover a customer is waiting.
-    const announced = harness.hubEvents().filter((observation) => observation.channel === 'staff');
-    expect(
-      announced.some(
-        (observation) =>
-          observation.event.type === 'customer.message' &&
-          (observation.event as { readonly message: { readonly body: string } }).message.body ===
-            'I would like to return this item.',
-      ),
-    ).toBe(true);
-
-    // And nothing was written on the customer's behalf.
+    // And nothing was written on the customer's behalf while the agent had it.
     const during = await customerThread(harness, session, session.orderId);
     expect(during.filter((turn) => turn.kind === 'agent' && turn.sender === 'agent')).toHaveLength(0);
-    expect(during.filter((turn) => turn.kind === 'handoff').map((turn) => turn.body)).toEqual([
-      'Your request is waiting for a person to review it. The assistant will not reply on their behalf.',
-    ]);
   });
 });

@@ -23,8 +23,31 @@ export interface DialogueTurn {
   readonly customerId: string;
   readonly orderId: string | null;
   readonly customerMessage: string;
+  /**
+   * The sentence the customer was asked, if it was a sentence.
+   *
+   * Empty for an item-picker offer, which is a question the customer answers by
+   * clicking rather than by typing. The two are stored apart because a picker
+   * replayed as prose is a dead end, and a thread has to survive a reload.
+   */
   readonly assistantQuestion: string;
+  /** The lines the picker offered, as offered. Null when this turn was a question. */
+  readonly offer: StoredItemOffer | null;
   readonly itemIds: readonly string[];
+}
+
+/** The item picker, as stored: enough to replay it exactly, and nothing else. */
+export interface StoredItemOffer {
+  readonly orderId: string;
+  readonly items: readonly {
+    readonly itemId: string;
+    readonly name: string;
+    readonly quantity: number;
+    readonly unitPriceCents: number;
+    readonly reported: boolean;
+  }[];
+  /** The lines the model nominated. Empty when it nominated none. */
+  readonly suggested: readonly string[];
 }
 
 interface DialogueRow {
@@ -34,6 +57,7 @@ interface DialogueRow {
   readonly order_id: string | null;
   readonly customer_message: string;
   readonly assistant_question: string;
+  readonly assistant_offer_json: string | null;
   readonly item_ids_json: string;
 }
 
@@ -42,6 +66,8 @@ export interface RecordDialogueInput {
   readonly orderId: string | null;
   readonly customerMessage: string;
   readonly assistantQuestion: string;
+  /** The picker to offer instead of a question. Mutually exclusive with the question. */
+  readonly offer?: StoredItemOffer;
   readonly itemIds: readonly string[];
   readonly now: Date;
 }
@@ -54,11 +80,14 @@ export function recordDialogueTurn(db: Db, input: RecordDialogueInput): Dialogue
     orderId: input.orderId,
     customerMessage: input.customerMessage,
     assistantQuestion: input.assistantQuestion,
+    offer: input.offer ?? null,
     itemIds: input.itemIds,
   };
   db.prepare(
-    `INSERT INTO shop_dialogue (id, created_at, customer_id, order_id, customer_message, assistant_question, item_ids_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO shop_dialogue
+       (id, created_at, customer_id, order_id, customer_message, assistant_question,
+        assistant_offer_json, item_ids_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     turn.id,
     turn.createdAt,
@@ -66,6 +95,7 @@ export function recordDialogueTurn(db: Db, input: RecordDialogueInput): Dialogue
     turn.orderId,
     turn.customerMessage,
     turn.assistantQuestion,
+    turn.offer === null ? null : JSON.stringify(turn.offer),
     JSON.stringify(turn.itemIds),
   );
   return turn;
@@ -86,7 +116,8 @@ export function listDialogueForOrder(
 ): readonly DialogueTurn[] {
   const rows = queryAll<DialogueRow>(
     db.prepare(
-      `SELECT id, created_at, customer_id, order_id, customer_message, assistant_question, item_ids_json
+      `SELECT id, created_at, customer_id, order_id, customer_message, assistant_question,
+              assistant_offer_json, item_ids_json
          FROM shop_dialogue
         WHERE customer_id = ? AND order_id IS ?
         ORDER BY created_at DESC, rowid DESC
@@ -149,8 +180,26 @@ function hydrate(row: DialogueRow): DialogueTurn {
     orderId: row.order_id,
     customerMessage: row.customer_message,
     assistantQuestion: row.assistant_question,
+    offer: parseOffer(row.assistant_offer_json),
     itemIds: parseItemIds(row.item_ids_json),
   };
+}
+
+function parseOffer(json: string | null): StoredItemOffer | null {
+  if (json === null) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== 'object' || parsed === null) {
+      return null;
+    }
+    return parsed as StoredItemOffer;
+  } catch {
+    // An offer this code cannot read is one it must not replay: the customer sees
+    // the ordinary sentence instead, which is answerable.
+    return null;
+  }
 }
 
 function parseItemIds(value: string): readonly string[] {

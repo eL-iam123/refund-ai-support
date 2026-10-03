@@ -3,7 +3,8 @@ import { queryAll } from '../db/sql.js';
 import { findOrder } from '../db/orderRepository.js';
 import { listUpdatesForOrder } from '../db/customerUpdates.js';
 import { listDialogueForOrder } from '../db/dialogue.js';
-import { ESCALATION_AGENT, activeHandoffForCustomer, listAgentMessagesForOrder } from '../db/handoffs.js';
+import type { ItemPickerOffer } from './itemPicker.js';
+import { ESCALATION_AGENT, activeHandoffForCustomer, isThreadOf, listAgentMessagesForOrder } from '../db/handoffs.js';
 import { NotFoundError } from '../http/errors.js';
 import type { DialogueLine } from '../ai/analyzer.js';
 
@@ -73,7 +74,14 @@ export type ChatTurn =
       readonly kind: 'dialogue';
       readonly id: string;
       readonly message: string;
+      /**
+       * The sentence asked, or empty when the assistant offered the item picker
+       * instead - which is why `offer` is a sibling rather than something the
+       * client has to parse out of prose. A replayed picker that arrives as a
+       * question is a question the customer cannot answer.
+       */
       readonly question: string;
+      readonly offer: ItemPickerOffer | null;
       readonly itemIds: readonly string[];
       readonly createdAt: string;
     }
@@ -180,7 +188,7 @@ function thread(db: Db, customerId: string, orderId: string | null, limit: numbe
   pushDialogue(entries, db, customerId, orderId, limit);
   pushUpdates(entries, db, customerId, orderId, limit);
   pushAgentMessages(entries, db, customerId, orderId, limit);
-  pushHandoffNotice(entries, db, customerId);
+  pushHandoffNotice(entries, db, customerId, orderId);
   return sort(entries);
 }
 
@@ -230,6 +238,7 @@ function pushDialogue(
         id: turn.id,
         message: turn.customerMessage,
         question: turn.assistantQuestion,
+        offer: turn.offer,
         itemIds: turn.itemIds,
         createdAt: turn.createdAt,
       },
@@ -287,25 +296,37 @@ function pushAgentMessages(
   }
 }
 
-function pushHandoffNotice(entries: Entry[], db: Db, customerId: string): void {
-  // The moment the thread changed hands. Rendered as a notice bubble, derived
-  // from the takeover row - which is why it is only there while the thread is
-  // actually live, and vanishes on hand-back without a row to clean up.
+/**
+ * The moment *this* thread changed hands.
+ *
+ * Scoped to the order, deliberately. A takeover is one-per-customer, so reading it
+ * without checking the thread put the notice on every conversation the customer has:
+ * one escalation on one order greeted them on all the others, which is how a banner
+ * that means "a person is looking at this" turns into decoration that means nothing.
+ *
+ * The unattended wording is also no longer a promise the system cannot keep. It used
+ * to say the assistant would not reply on the person's behalf, which was true when an
+ * unattended escalation diverted the message; it is false now, because the ladder
+ * answers the customer while the request waits. A notice that contradicts the sentence
+ * directly above it is worse than no notice.
+ */
+function pushHandoffNotice(entries: Entry[], db: Db, customerId: string, orderId: string | null): void {
   const active = activeHandoffForCustomer(db, customerId);
-  if (active !== null) {
-    const body = active.agentId === ESCALATION_AGENT
-      ? 'Your request is waiting for a person to review it. The assistant will not reply on their behalf.'
-      : 'A customer agent has joined this conversation.';
-    entries.push({
-      turn: {
-        kind: 'handoff',
-        id: active.id,
-        body,
-        createdAt: active.startedAt,
-      },
-      rank: 0.5,
-    });
+  if (active === null || !isThreadOf(active, orderId)) {
+    return;
   }
+  const body = active.agentId === ESCALATION_AGENT
+    ? 'A person is reviewing this request. We will keep answering you here in the meantime.'
+    : 'A customer agent has joined this conversation.';
+  entries.push({
+    turn: {
+      kind: 'handoff',
+      id: active.id,
+      body,
+      createdAt: active.startedAt,
+    },
+    rank: 0.5,
+  });
 }
 
 /**

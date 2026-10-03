@@ -10,6 +10,9 @@
  */
 
 import { request, post } from '../httpClient';
+import type { ItemPickerOffer } from '../api';
+
+export type { ItemPickerOffer };
 
 export interface Product {
   readonly id: string;
@@ -111,7 +114,10 @@ export const shopApi = {
    * decision bubble - and a decision is never a question, or the reverse.
    */
   requestRefund: (input: { customerId: string; orderId: string; message: string }) =>
-    post<{ request: RefundRequest } | { question: string; dialogueId: string }>('/api/chat/messages', input),
+    post<
+      | { request: RefundRequest }
+      | { question: string; picker: ItemPickerOffer | null; dialogueId: string }
+    >('/api/chat/messages', input),
 
   /**
    * One order's conversation with the assistant.
@@ -120,8 +126,13 @@ export const shopApi = {
    * client cannot widen the scope of this call, which is the only way a history
    * endpoint is safe to expose to a browser.
    */
-  chatHistory: (orderId: string): Promise<{ orderId: string; closed: boolean; turns: readonly ChatTurn[] }> =>
-    request(`/api/shop/chat/history?orderId=${encodeURIComponent(orderId)}`),
+  chatHistory: (orderId: string): Promise<{
+    orderId: string;
+    closed: boolean;
+    /** A person is holding the thread and has not answered yet. */
+    awaitingPerson: boolean;
+    turns: readonly ChatTurn[];
+  }> => request(`/api/shop/chat/history?orderId=${encodeURIComponent(orderId)}`),
 
   /** Message counts per order, for the "3 messages" badge on the order picker. */
   chatSummary: (): Promise<{ counts: readonly { orderId: string; count: number }[] }> =>
@@ -209,6 +220,8 @@ export type ChatTurn =
       readonly id: string;
       readonly message: string;
       readonly question: string;
+      /** The item picker offered here, when one was. Null for a question. */
+      readonly offer: ItemPickerOffer | null;
       readonly itemIds: readonly string[];
       readonly createdAt: string;
     }

@@ -10,9 +10,10 @@ import type {
   StageTiming,
 } from '@refund/shared';
 import type { IntakeReply } from './ai/analyzer.js';
+import { DEFAULT_ITEM_PICKER, itemPickerOffer, reportedItemIds, type ItemPickerOffer } from './retrieval/itemPicker.js';
 import type { Db } from './db/connection.js';
 import type { CustomerRecord, OrderRecord } from './db/records.js';
-import type { DiscretionConfig } from './config/env.js';
+import type { DiscretionConfig, ItemPickerConfig } from './config/env.js';
 import { findCustomer, findDuplicateSibling } from './db/orderRepository.js';
 import { verifyGrounding } from './ai/index.js';
 import type { AIAnalyzer, AttemptObserver, DialogueLine, ProviderAttempt } from './ai/index.js';
@@ -21,6 +22,7 @@ import { disputeCeiling, identifyOrder, type Identification } from './retrieval/
 import { scanForInjection } from './security/injection.js';
 import { transcriptForOrder } from './retrieval/conversation.js';
 import { adoptDialogueToOrder } from './db/dialogue.js';
+import { activeHandoffForCustomer } from './db/handoffs.js';
 import { runFactGates, type GateResult } from './policy/gates.js';
 import { evaluateRule, evaluateRules } from './policy/engine.js';
 import { DEFAULT_DISCRETION } from './policy/discretion.js';
@@ -32,6 +34,8 @@ import { composeDeterministicResponse } from './response/compose.js';
 import { isNoComplaint, noComplaintQuestion, NO_COMPLAINT_MODEL } from './response/noComplaint.js';
 import { clarifySparseDamage } from './response/claimClarification.js';
 import { assistantLines, refineQuestion } from './response/questionGuard.js';
+import { nextMissingField, questionForField, type NextQuestionInput } from './response/nextQuestion.js';
+import { acknowledgementFor } from './response/acknowledge.js';
 import { formatCents } from './lib/money.js';
 
 /**
@@ -77,6 +81,33 @@ export interface PipelineDeps {
    * this can never widen what is paid.
    */
   readonly discretion?: DiscretionConfig;
+  /**
+   * When to offer the item picker inside the conversation.
+   *
+   * Optional, defaulting to `DEFAULT_ITEM_PICKER`. Unlike discretion the default
+   * is *on*, because the picker cannot move money: it can only ask, and only the
+   * customer's click supplies the scope. Omitting it therefore cannot widen a
+   * claim - at worst the customer is asked a question they can decline.
+   */
+  readonly itemPicker?: ItemPickerConfig;
+  /**
+   * The lowest claim confidence the engine will act on without asking a person.
+   *
+   * Optional, defaulting to the `AI_MIN_CONFIDENCE` schema default, so a caller that
+   * has no opinion gets the production behaviour rather than something invented for a
+   * test. It can only ever escalate: the floor decides whether a *paid* decision is
+   * allowed, never whether a refusal is.
+   */
+  readonly minConfidence?: number;
+  /**
+   * Tell the customer something, mid-request.
+   *
+   * Used once: to say "I could not read that, trying once more" before the soft
+   * retry, so the retry is visible rather than a silent pause. Optional because a
+   * caller with no socket - a seed run, a script - simply has nowhere to publish,
+   * and the ladder must not depend on being watched.
+   */
+  readonly notifyCustomer?: (customerId: string) => void;
 }
 
 export interface ProcessInput {
@@ -92,6 +123,10 @@ export type ProcessResult =
   | {
       readonly stage: 'asked';
       readonly question: string;
+      /** The item picker to render instead of a sentence, when one was offered. */
+      readonly picker: ItemPickerOffer | null;
+      /** What the ladder had to do, for the customer. Null when nothing happened. */
+      readonly notice: string | null;
       readonly customer: CustomerRecord;
       readonly order: OrderRecord | null;
       readonly resolvedOrderId: string | null;
@@ -110,6 +145,8 @@ export type ProcessResult =
       readonly grounding: GroundingResult | null;
       readonly injection: InjectionScan;
       readonly responseText: string;
+      /** What the ladder had to do, for the customer. Null when nothing happened. */
+      readonly notice: string | null;
       readonly itemIds: readonly string[];
       readonly llmCalled: boolean;
       readonly aiMode: string;
@@ -144,15 +181,26 @@ class StageLog {
   }
 }
 
+/**
+ * The sink for every provider attempt.
+ *
+ * Its own function because it closes over two things, and a closure built inline in the
+ * middle of a pipeline stage is the sort of thing that ends up recording the wrong
+ * request id once someone adds a second one.
+ */
+function attemptObserver(deps: PipelineDeps, requestId: string): AttemptObserver {
+  return (attempt) => {
+    deps.recordAttempt(requestId, deps.analyzer.label, attempt);
+  };
+}
+
 export async function processRefundRequest(
   db: Db,
   deps: PipelineDeps,
   input: ProcessInput,
 ): Promise<ProcessResult> {
   const log = new StageLog();
-  const observer: AttemptObserver = (attempt) => {
-    deps.recordAttempt(input.requestId, deps.analyzer.label, attempt);
-  };
+  const observer = attemptObserver(deps, input.requestId);
 
   const intake = runIntake(db, input, deps.injectionAction, log);
   const retrieval = retrieveOrder(db, input, intake, log);
@@ -188,9 +236,12 @@ export async function processRefundRequest(
       { extraction: null, grounding: null, proposal: null },
       intake.customer,
       deps.discretion ?? DEFAULT_DISCRETION,
+      // No claim was read, so the floor has nothing to apply to.
+      undefined,
     );
     log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
-    const responseText = composeReply(decision, retrieval.order, input.message, log);
+    // Decided by a rule, without the model: the claim was never read, so the ladder
+    // had nothing to do and there is nothing to explain to the customer.
     return {
       stage: 'decided',
       customer: intake.customer,
@@ -199,7 +250,8 @@ export async function processRefundRequest(
       extraction: null,
       grounding: null,
       injection: intake.injection,
-      responseText,
+      responseText: composeReply(decision, retrieval.order, input.message, log),
+      notice: null,
       llmCalled: false,
       aiMode: mode,
       timings: log.all(),
@@ -224,7 +276,10 @@ async function afterGates(
 ): Promise<ProcessResult> {
   const analysis = await analyseClaim(db, deps, input, gates, retrieval, intake, observer, log);
   if (analysis.outcome === 'question') {
-    return askedResult(analysis.question, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log);
+    return askedResult(analysis.question, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log, analysis.notice ?? null);
+  }
+  if (analysis.outcome === 'picker') {
+    return pickerResult(analysis, retrieval, intake, mode, log);
   }
 
   const reasonEvaluations = runReasonRules(retrieval.context, gates, analysis, log);
@@ -237,11 +292,101 @@ async function afterGates(
     analysis,
     intake.customer,
     deps.discretion ?? DEFAULT_DISCRETION,
+    deps.minConfidence,
   );
   log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
 
-  const responseText = composeReply(decision, retrieval.order, input.message, log);
+  const question = unreadableFollowUp(db, input, retrieval, intake, reasonEvaluations, decision, log);
+  if (question !== null) {
+    return askedResult(question, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log);
+  }
 
+  return decidedResult(input.message, analysis, decision, retrieval, intake, mode, log);
+}
+
+/**
+ * Asks the question that might make the escalation unnecessary.
+ *
+ * R-12 is the safety valve: it fires when the model cannot point at words in the
+ * customer's message that support a reason. That is very often a conversation that has
+ * not been asked anything yet - "the item seems to have a problem" - and paging a
+ * person for it spends a scarce resource on a message that one question would have
+ * answered. So the valve gets one chance to become a question instead.
+ *
+ * Three conditions, and each is load-bearing:
+ *
+ *  - **R-12 must be the only thing that objected.** If a rule about money (R-03) or
+ *    risk (R-07, R-08) also escalated, the escalation is about the case rather than
+ *    about the reading, and asking "what has gone wrong?" would add a turn and change
+ *    nothing. This is checked against the evaluations rather than by re-reading the
+ *    claim, because R-12 is the authority on what "unreadable" means.
+ *  - **An injection signal disqualifies it.** On a flagged message the content is
+ *    untrustworthy, so an invitation to say more is an invitation to say more of it.
+ *  - **Nothing may have been asked already.** `questionForField` returns null for a
+ *    question this thread has already put, which is what stops the loop: ask once, and
+ *    if the answer is still unreadable the request escalates for a person, as before.
+ */
+function unreadableFollowUp(
+  db: Db,
+  input: ProcessInput,
+  retrieval: Retrieval,
+  intake: Intake,
+  reasonEvaluations: readonly RuleEvaluation[],
+  decision: RefundDecision,
+  log: StageLog,
+): string | null {
+  if (decision.decision !== 'escalated' || intake.injection.detected) {
+    return null;
+  }
+  const objected = reasonEvaluations.filter((rule) => rule.outcome !== 'pass');
+  const onlyTheValve = objected.length > 0 && objected.every((rule) => rule.ruleId === 'R-12' && rule.outcome === 'escalate');
+  if (!onlyTheValve) {
+    return null;
+  }
+
+  const order = retrieval.order;
+  const history = transcriptForOrder(db, input.customerId, order?.id ?? null, input.now, HISTORY_LIMIT);
+  const facts = threadFacts(db, input.customerId, order, history, input.message);
+  const field = nextMissingField({ order, ...facts, askedText: assistantLines(history) });
+  if (field === null) {
+    return null;
+  }
+  const targeted = questionForField(field, { order, ...facts, askedText: assistantLines(history) });
+  if (targeted === null) {
+    return null;
+  }
+
+  log.record(
+    'resolve',
+    `R-12 could not read a reason and nothing else objected, so asking for ${field} ` +
+      'rather than escalating; a second unreadable message still escalates',
+  );
+
+  // Opened with the same acknowledgement a decision would have carried, because the
+  // reason for asking is the same reason for acknowledging: a bare image link is
+  // unreadable to us, and "tell me in a few words what arrived" is the answer to
+  // that. Without it the customer gets a bare question about a message they
+  // believed was perfectly clear.
+  const acknowledgement = acknowledgementFor(input.message);
+  return acknowledgement === '' ? targeted : `${acknowledgement} ${targeted}`;
+}
+
+/**
+ * The decided branch, as one result.
+ *
+ * Its own function so the three branches of the pipeline read alike, and so the
+ * ladder's `notice` has one place to be attached rather than being threaded through
+ * the stage body.
+ */
+function decidedResult(
+  message: string,
+  analysis: Extract<AnalyseOutcome, { outcome: 'claim' }>,
+  decision: RefundDecision,
+  retrieval: Retrieval,
+  intake: Intake,
+  mode: string,
+  log: StageLog,
+): Extract<ProcessResult, { stage: 'decided' }> {
   return {
     stage: 'decided',
     customer: intake.customer,
@@ -250,7 +395,8 @@ async function afterGates(
     extraction: analysis.extraction,
     grounding: analysis.grounding,
     injection: intake.injection,
-    responseText,
+    responseText: composeReply(decision, retrieval.order, message, log),
+    notice: analysis.notice ?? null,
     llmCalled: true,
     aiMode: mode,
     timings: log.all(),
@@ -352,16 +498,138 @@ interface Analysis {
   readonly proposal: AiProposal | null;
 }
 
+/**
+ * What stage 4 produced, and what the customer is told about how.
+ *
+ * `notice` is present only when the ladder had to do something the customer would
+ * otherwise not know about - a soft retry that worked, a matcher reading the
+ * message, or a claim nobody could read. It is deliberately separate from
+ * `responseText`: that is what the customer is *told*, and it must not carry
+ * operational detail. The notice is what happened, in one sentence.
+ */
 type AnalyseOutcome =
-  | ({ readonly outcome: 'claim' } & Analysis)
-  | { readonly outcome: 'question'; readonly question: string; readonly model: string };
+  | ({ readonly outcome: 'claim'; readonly notice?: string } & Analysis)
+  | {
+      readonly outcome: 'question';
+      readonly question: string;
+      readonly model: string;
+      readonly notice?: string;
+    }
+  /**
+   * The item picker, offered instead of a claim.
+   *
+   * `itemIds` is empty by construction. An offer narrows nothing until it is
+   * answered, and the answer arrives as the customer's own `itemIds` on their next
+   * message - which is why this variant cannot carry scope of its own.
+   */
+  | {
+      readonly outcome: 'picker';
+      readonly notice?: string;
+      readonly question: string;
+      readonly model: string;
+      readonly itemIds: readonly string[];
+      readonly offer: ItemPickerOffer;
+    };
 
-const NO_ANALYSIS: AnalyseOutcome = {
+const NO_ANALYSIS: { readonly outcome: 'claim'; readonly notice?: string } & Analysis = {
   outcome: 'claim',
   extraction: null,
   grounding: null,
   proposal: null,
 };
+
+/** How long the ladder pauses before its one extra pass. */
+const SOFT_RETRY_PAUSE_MS = 400;
+
+/** What the customer is told, in their own terms, at each rung. */
+const RETRY_SUCCEEDED_NOTICE =
+  'We had trouble reading your first message and tried again. Nothing was missed.';
+const UNREADABLE_NOTICE =
+  'We could not read your message automatically just now, so a person will pick it up and read it themselves.';
+
+/**
+ * The degradation ladder, once the models have all failed.
+ *
+ * Three rungs, and the shape of it is the argument for the whole file:
+ *
+ *  1. **Say so.** The customer is told, before anything else happens, that their
+ *     message could not be read and is being tried again. A pause with nothing on
+ *     screen is indistinguishable from a broken product, and that is the single
+ *     complaint this ladder exists to answer.
+ *  2. **Soft retry.** One more full pass, with its own time budget, after a beat
+ *     long enough that a provider which was mid-outage has finished rebooting. Not
+ *     a schema repair and not a token-cheap probe: the same request, once more,
+ *     because the failure was in reaching the model rather than in what it said.
+ *  3. **A person, and an explanation.** With no claim, the request escalates - which
+ *     is where it always went - but the customer is now told that their message
+ *     could not be read, rather than being handed an escalation notice
+ *     indistinguishable from a policy one.
+ *
+ * There is deliberately no fourth rung. A pattern matcher reading the claim was tried
+ * here and removed: it is a second, untested reader of a document that decides money,
+ * and the difference between "the model read this and the policy refused it" and
+ * "a regex read this and the policy approved it" is not a wording difference. So an
+ * unreachable model means no claim, and a request nobody could read goes to a person
+ * - which is slow, and honest, and the only answer that does not quietly invent
+ * evidence.
+ */
+async function readWithLadder(
+  reason: string,
+  deps: PipelineDeps,
+  input: ProcessInput,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  observer: AttemptObserver,
+  log: StageLog,
+): Promise<AnalyseOutcome> {
+  const first = truncate(reason, 120);
+  deps.notifyCustomer?.(input.customerId);
+
+  const retried = await softRetry(deps, input, order, history, observer);
+  if (retried !== null) {
+    log.record('ai_analysis', `no usable extraction (${first}); the soft retry read it`);
+    return { outcome: 'claim', ...retried, proposal: null, notice: RETRY_SUCCEEDED_NOTICE };
+  }
+
+  log.record('ai_analysis', `no usable extraction (${first}); escalating for a person to read`);
+  return { ...NO_ANALYSIS, notice: UNREADABLE_NOTICE };
+}
+
+/**
+ * One more pass at the models, after a pause.
+ *
+ * Bounded and named: one extra attempt, once, with its own budget from the adapter.
+ * The pause is short enough to stay inside a customer's patience and long enough to
+ * outlast a provider that was restarting.
+ */
+async function softRetry(
+  deps: PipelineDeps,
+  input: ProcessInput,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  observer: AttemptObserver,
+): Promise<Omit<Analysis, 'proposal'> | null> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, SOFT_RETRY_PAUSE_MS);
+  });
+  try {
+    const reply = await deps.analyzer.analyze(
+      { message: input.message, order: toAnalyzerOrder(order), history },
+      observer,
+    );
+    if (reply.kind !== 'complete') {
+      return null;
+    }
+    const extraction = reply.extraction;
+    const corpus = [...history.filter((line) => line.role === 'customer').map((line) => line.text), input.message];
+    const grounding = verifyGrounding(extraction, corpus);
+    return grounding === null || !grounding.grounded ? null : { extraction, grounding };
+  } catch {
+    // A failed soft retry is not an error: the ladder has a next step, and the
+    // adapter has already written the reason into the attempt log.
+    return null;
+  }
+}
 
 /**
  * Stage 4: the intake call, plus the grounding check on its output.
@@ -397,12 +665,14 @@ async function analyseClaim(
   const order = retrieval.order;
   const history = transcriptForOrder(db, input.customerId, orderIdFor(order), input.now, HISTORY_LIMIT);
 
-  const damageClarification = clarifyDamageReport(input.message, order, history, log);
+  const facts = threadFacts(db, input.customerId, order, history, input.message);
+
+  const damageClarification = clarifyDamageReport(input.message, order, history, facts, log);
   if (damageClarification !== null) {
     return damageClarification;
   }
 
-  const noComplaint = clarifyNoComplaint(input.message, order, history, log);
+  const noComplaint = clarifyNoComplaint(input.message, order, history, facts, log);
   if (noComplaint !== null) {
     return noComplaint;
   }
@@ -415,8 +685,17 @@ async function analyseClaim(
     );
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error);
-    log.record('ai_analysis', `no usable extraction (${truncate(reason, 120)}); continuing without a claim`);
-    return NO_ANALYSIS;
+    return await readWithLadder(reason, deps, input, order, history, observer, log);
+  }
+
+  if (reply.kind === 'ask_items') {
+    // Withheld is a normal outcome, not a failure: the model's request is a hint
+    // and the conditions are the authority. A decline does *not* fall through to a
+    // claim, because there is no claim - the model asked rather than submitted
+    // one. So the request continues with none, which escalates to a person. That is
+    // the correct destination for an ambiguity the customer will not resolve.
+    const asked = offerItemPicker(reply, db, deps, input, gates, retrieval, intake, log);
+    return asked ?? NO_ANALYSIS;
   }
 
   if (reply.kind === 'question') {
@@ -428,7 +707,7 @@ async function analyseClaim(
       log.record('ai_analysis', 'discarded model question after an injection signal');
       return NO_ANALYSIS;
     }
-    return respondToQuestion(reply, order, history, log);
+    return respondToQuestion(reply, order, history, facts, log);
   }
 
   // Only the customer's side of the transcript is eligible evidence. The model
@@ -446,11 +725,72 @@ async function analyseClaim(
   return { outcome: 'claim', extraction, grounding, proposal: null };
 }
 
+/**
+ * Whether to put the item picker in front of the customer.
+ *
+ * One caller: the model asking through `ask_which_items`. `itemPickerOffer`
+ * decides, and it can only say yes or withhold - the model asks, the server
+ * decides. Two properties of this branch are load-bearing:
+ *
+ *  - **It never sets scope.** The offer is returned as a question-shaped result
+ *    with no item ids attached. The scope that reaches the money arrives as the
+ *    customer's `itemIds` on their next message, through the same field a manual
+ *    tick uses - so there is no code path from model output to the dispute
+ *    ceiling.
+ *  - **It is not a question the model wrote.** A picker is buttons, so the
+ *    deterministic caption is used and the model's candidates are treated as a
+ *    hint about which lines to show.
+ */
+function offerItemPicker(
+  reply: Extract<IntakeReply, { kind: 'ask_items' }>,
+  db: Db,
+  deps: PipelineDeps,
+  input: ProcessInput,
+  gates: GateResult,
+  retrieval: Retrieval,
+  intake: Intake,
+  log: StageLog,
+): AnalyseOutcome | null {
+  const offer = itemPickerOffer({
+    db,
+    customerId: input.customerId,
+    order: retrieval.order,
+    identification: retrieval.found,
+    gates,
+    injectionDetected: intake.injection.detected,
+    handoffActive: activeHandoffForCustomer(db, input.customerId) !== null,
+    request: { candidates: reply.candidates },
+    config: deps.itemPicker ?? DEFAULT_ITEM_PICKER,
+  });
+
+  if (offer === null) {
+    log.record('ai_analysis', 'item picker withheld: its conditions are not met');
+    return null;
+  }
+
+  log.record(
+    'ai_analysis',
+    `offering the item picker for ${offer.items.length} line(s)` +
+      `${offer.suggested.length > 0 ? `, model unsure about ${offer.suggested.join(', ')}` : ''}`,
+  );
+  return {
+    outcome: 'picker',
+    question: ITEM_PICKER_CAPTION,
+    model: reply.model,
+    itemIds: [],
+    offer,
+  };
+}
+
+/** The picker's caption. Deterministic: a model caption would be a second interface. */
+const ITEM_PICKER_CAPTION = 'Which item is this about? Pick one and I will check the policy for that item.';
+
 /** Keep a damage report without observed condition out of policy analysis. */
 function clarifyDamageReport(
   message: string,
   order: OrderRecord | null,
   history: readonly DialogueLine[],
+  facts: ThreadFacts,
   log: StageLog,
 ): AnalyseOutcome | null {
   const question = clarifySparseDamage(message);
@@ -462,6 +802,7 @@ function clarifyDamageReport(
     { kind: 'question', question, model: 'deterministic-damage-clarification-v1' },
     order,
     history,
+    facts,
     log,
   );
 }
@@ -471,6 +812,7 @@ function clarifyNoComplaint(
   message: string,
   order: OrderRecord | null,
   history: readonly DialogueLine[],
+  facts: ThreadFacts,
   log: StageLog,
 ): AnalyseOutcome | null {
   if (!isNoComplaint(message)) {
@@ -481,8 +823,36 @@ function clarifyNoComplaint(
     { kind: 'question', question: noComplaintQuestion(message, order !== null), model: NO_COMPLAINT_MODEL },
     order,
     history,
+    facts,
     log,
   );
+}
+
+/**
+ * The thread's facts, for the question that gets asked next.
+ *
+ * `reportedItemIds` comes from the order's own requests rather than from the
+ * transcript, because the transcript cannot tell a line that already carries a claim
+ * from one that merely went unmentioned - and offering a choice that has already been
+ * decided is the one way a picker becomes worse than a question.
+ */
+function threadFacts(
+  db: Db,
+  customerId: string,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  message: string,
+): ThreadFacts {
+  return {
+    reportedItemIds: order === null ? [] : reportedItemIds(db, customerId, order.id),
+    // The newest message is not in `history` yet: it is what the assistant is being
+    // asked about, and reasoning about a transcript that omits it would answer the
+    // wrong question.
+    customerText: [
+      ...history.filter((turn) => turn.role === 'customer').map((turn) => turn.text),
+      message,
+    ],
+  };
 }
 
 /**
@@ -494,15 +864,20 @@ function clarifyNoComplaint(
  * replaced with a warm restatement, a repeat hands the thread to a person, and
  * only a real question reaches the customer.
  */
+/** The thread facts the next question is derived from. */
+type ThreadFacts = Pick<NextQuestionInput, 'reportedItemIds' | 'customerText'>;
+
 function respondToQuestion(
   reply: IntakeReply & { readonly kind: 'question' },
   order: OrderRecord | null,
   history: readonly DialogueLine[],
+  facts: ThreadFacts,
   log: StageLog,
 ): AnalyseOutcome {
   const refined = refineQuestion(reply.question, {
     orderResolved: order !== null,
     priorAssistantText: assistantLines(history),
+    next: { order, ...facts, askedText: assistantLines(history) },
   });
   if (refined.kind === 'escalate') {
     log.record('ai_analysis', 'asked a question already asked; escalating to a person');
@@ -530,6 +905,35 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+/**
+ * The picker as a result the route can publish.
+ *
+ * Carries the deterministic caption for the thread's text and the offer for the
+ * interface to render, and no item ids - the scope is the customer's to give.
+ */
+function pickerResult(
+  analysis: Extract<AnalyseOutcome, { outcome: 'picker' }>,
+  retrieval: Retrieval,
+  intake: Intake,
+  mode: string,
+  log: StageLog,
+): Extract<ProcessResult, { stage: 'asked' }> {
+  return {
+    stage: 'asked',
+    question: analysis.question,
+    picker: analysis.offer,
+    notice: analysis.notice ?? null,
+    customer: intake.customer,
+    order: retrieval.order,
+    resolvedOrderId: retrieval.order?.id ?? null,
+    itemIds: [],
+    injection: intake.injection,
+    llmCalled: true,
+    aiMode: mode,
+    timings: log.all(),
+  };
+}
+
 function askedResult(
   question: string,
   order: OrderRecord | null,
@@ -538,10 +942,13 @@ function askedResult(
   llmCalled: boolean,
   aiMode: string,
   log: StageLog,
+  notice: string | null = null,
 ): Extract<ProcessResult, { stage: 'asked' }> {
   return {
     stage: 'asked',
     question,
+    picker: null,
+    notice: notice ?? null,
     customer: intake.customer,
     order,
     resolvedOrderId: order?.id ?? null,
@@ -596,6 +1003,7 @@ function resolveDecision(
   analysis: Analysis,
   customer: CustomerRecord,
   discretion: DiscretionConfig,
+  minConfidence: number | undefined,
 ): RefundDecision {
   const order = found.order;
   return resolve({
@@ -612,6 +1020,7 @@ function resolveDecision(
     extraction: analysis.extraction,
     customer,
     discretion,
+    minConfidence,
   });
 }
 

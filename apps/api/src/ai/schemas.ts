@@ -40,7 +40,29 @@ export const CompleteSchema = ClaimExtractionSchema.extend({
 });
 export type CompleteOutput = z.infer<typeof CompleteSchema>;
 
-export const IntakeOutputSchema = z.union([AskSchema, CompleteSchema]);
+/** The most lines one offer can name. Bounded so the array cannot be a payload. */
+export const MAX_ITEM_CANDIDATES = 8;
+
+/**
+ * The model's request for the item picker.
+ *
+ * Deliberately carries no free text. `ask_question` may put model prose in front
+ * of a customer because that prose *is* the answer to a question; here the answer
+ * is a list of buttons, so a caption would be a second, worse interface. Empty
+ * `candidates` means "I could not tell them apart" and is not an error - the
+ * server offers the lines anyway.
+ *
+ * `candidates` is a *hint*, and the name is the point: they are re-checked
+ * against the resolved order in `retrieval/itemPicker.ts`, and no part of the
+ * scope that reaches the money ever comes from this array. What the customer
+ * clicks does.
+ */
+export const AskItemsSchema = z.object({
+  action: z.literal('ask_items'),
+  candidates: z.array(z.string().min(1).max(64)).max(MAX_ITEM_CANDIDATES).default([]),
+});
+
+export const IntakeOutputSchema = z.union([AskItemsSchema, AskSchema, CompleteSchema]);
 export type IntakeOutput = z.infer<typeof IntakeOutputSchema>;
 
 /** Compact schema description for the prompt. Not enforced by the provider. */

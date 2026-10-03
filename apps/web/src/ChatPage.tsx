@@ -5,7 +5,7 @@ import { ErrorNote } from './components';
 import { formatCents } from './format';
 import { useConversation, type Conversation, type ReplyBody, type Turn } from './useConversation';
 import { money, shopApi, type ShopOrder, describe } from './shop/api';
-import type { DuplicateNotice } from './api';
+import type { DuplicateNotice, ItemChoice, ItemPickerOffer } from './api';
 import { reasonFor, REASONS } from './shop/issueReasons';
 import { useAsyncData } from './shop/hooks';
 
@@ -53,14 +53,16 @@ export function ChatPage(): ReactNode {
     selected.orderId,
     complaintFor(handoff?.issue ?? null),
   );
-  const reportedItemIds = useMemo(
-    () => [...new Set(chat.turns.flatMap((turn) =>
-      turn.kind === 'replied' || turn.kind === 'stored' ? turn.result.itemIds ?? [] : [],
-    ))],
-    [chat.turns],
-  );
-  const ticks = useItemTicks(order, reportedItemIds);
-  useShopSocket(customerId, chat.refresh);
+  // Settled and awaiting are different things, and treating them as one cost the
+  // customer the ability to talk about the item they had just complained about: an
+  // escalation marks its lines as reported, so after the first "it needs a person"
+  // every option greyed out except lines nobody had claimed - which reads as "you
+  // may only complain about the subscription".
+  const claimScope = useMemo(() => claimState(chat.turns), [chat.turns]);
+  const ticks = useItemTicks(order, claimScope.settled);
+  const [retrying, setRetrying] = useState(false);
+  const showRetrying = useCallback(() => setRetrying(true), []);
+  useShopSocket(customerId, chat.refresh, showRetrying);
 
   return (
     <div className="chat-layout">
@@ -77,7 +79,13 @@ export function ChatPage(): ReactNode {
         <PolicyNote />
       </aside>
 
-      <ChatThread chat={chat} order={order} ticks={ticks} reportedItemIds={reportedItemIds} />
+      <ChatThread
+        chat={chat}
+        order={order}
+        ticks={ticks}
+        claimScope={claimScope}
+        retrying={retrying && chat.busy}
+      />
     </div>
   );
 }
@@ -99,7 +107,7 @@ export function ChatPage(): ReactNode {
 interface ItemTicks {
   readonly itemIds: readonly string[];
   readonly toggle: (itemId: string) => void;
-  readonly select: (itemId: string) => void;
+  readonly clear: () => void;
 }
 
 function useItemTicks(order: ShopOrder | null, reportedItemIds: readonly string[] = []): ItemTicks {
@@ -119,9 +127,7 @@ function useItemTicks(order: ShopOrder | null, reportedItemIds: readonly string[
     [reportedItemIds],
   );
 
-  const select = useCallback((itemId: string) => setChosen([itemId]), []);
-
-  return { itemIds, toggle, select };
+  return { itemIds, toggle, clear: useCallback(() => setChosen([]), []) };
 }
 
 /**
@@ -133,53 +139,27 @@ function useItemTicks(order: ShopOrder | null, reportedItemIds: readonly string[
  * makes by ticking nothing, and silence about it is how a basket-wide claim
  * happens by accident.
  */
-/**
- * Whether the composer must open the picker before it can send.
- *
- * Only for a multi-line order with nothing ticked and no question waiting. The
- * `some` is the part that matters: once every line carries a decision or an open
- * escalation the picker has nothing selectable, so forcing it open stranded the
- * customer on a list of disabled buttons - with the follow-up they had typed,
- * the appeal, the photo and the handoff reply all sitting behind a control they
- * could never get past. With nothing to pick, the message is a whole-order one.
- */
-function mustPickItem(
-  order: ShopOrder | null,
-  selectedItemIds: readonly string[],
-  clarificationItemIds: readonly string[],
-  reportedItemIds: readonly string[],
-): boolean {
-  if (order === null || order.items.length <= 1) {
-    return false;
-  }
-  if (selectedItemIds.length > 0 || clarificationItemIds.length > 0) {
-    return false;
-  }
-  return order.items.some((item) => !reportedItemIds.includes(item.itemId));
-}
-
 /** The lines the last assistant question asked about, or none if it did not ask. */
 function clarificationFrom(turn: Turn | undefined): readonly string[] {
   return turn?.kind === 'asked' || turn?.kind === 'storedAsk' ? turn.itemIds : [];
 }
 
 /**
- * Send from the composer, opening the picker first only when a line must be
- * chosen. Pulled out of the component so its branch is not counted against the
- * thread's own complexity budget.
+ * Send from the composer.
+ *
+ * It never withholds the message. It used to: a multi-line order with nothing
+ * ticked opened the picker instead of sending, which made the customer's words
+ * contingent on choosing a line first, and the picker read as a form field rather
+ * than as an answer. The item scope is still the customer's to give - either here,
+ * by scoping the message to a line, or by tapping the assistant's offer when it
+ * asks - but the message goes either way, and a whole-order claim is a claim they
+ * can simply make.
  */
 function composerSend(
   chat: Conversation,
-  order: ShopOrder | null,
   selectedItemIds: readonly string[],
   clarificationItemIds: readonly string[],
-  reportedItemIds: readonly string[],
-  openPicker: () => void,
 ): Promise<void> {
-  if (mustPickItem(order, selectedItemIds, clarificationItemIds, reportedItemIds)) {
-    openPicker();
-    return Promise.resolve();
-  }
   return chat.send(selectedItemIds.length > 0 ? selectedItemIds : clarificationItemIds);
 }
 
@@ -248,31 +228,31 @@ function ChatThread({
   chat,
   order,
   ticks,
-  reportedItemIds,
+  claimScope,
+  retrying,
 }: {
   chat: Conversation;
   order: ShopOrder | null;
   ticks: ItemTicks;
-  reportedItemIds: readonly string[];
+  /** Which lines are done with, and which are still with a person. */
+  claimScope: ClaimScope;
+  /**
+   * The server is retrying after a model failure, and said so.
+   *
+   * Already gated on the request being in flight by the caller: a flag that had to be
+   * cleared when the reply arrived would need an effect to clear it, and a flag that
+   * outlives its request is worse than one that is simply not shown.
+   */
+  retrying: boolean;
 }): ReactNode {
-  const logRef = useRef<HTMLDivElement>(null);
-  const [showItemPicker, setShowItemPicker] = useState(false);
-
-  useEffect(() => {
-    const log = logRef.current;
-    if (log !== null) {
-      log.scrollTop = log.scrollHeight;
-    }
-  }, [chat.turns]);
-
+  const logRef = useScrollToBottom(chat.turns);
   const inHandoff = chat.turns.some((turn) => turn.kind === 'handoff');
 
   const [appealState, setAppealState] = useState<{ requestId: string; reason: string; submitting: boolean } | null>(null);
 
   const deps: ChatThreadDeps = { chat, inHandoff, appealState, setAppealState };
   const clarificationItemIds = clarificationFrom(chat.turns.at(-1));
-  const sendFromComposer = (): Promise<void> =>
-    composerSend(chat, order, ticks.itemIds, clarificationItemIds, reportedItemIds, () => setShowItemPicker(true));
+  const sendFromComposer = (): Promise<void> => composerSend(chat, ticks.itemIds, clarificationItemIds);
 
   return (
     <section className="chat-main">
@@ -282,19 +262,26 @@ function ChatThread({
             While loading, both it and the thread are absent, so the emptiness is
             brief and states itself. */}
         {chat.loading || chat.turns.length > 0 ? null : <Greeting onPick={chat.setDraft} />}
+        {/* Announced, not just drawn: the customer is waiting, and the reason for
+            the wait is the whole thing. */}
+        {retrying ? (
+          <p className="bubble-them" role="status" aria-live="polite">
+            Having trouble reading your message - trying once more.
+          </p>
+        ) : null}
         {chat.turns.map((turn) => (
-          <TurnView key={turn.id} turn={turn} {...(turn.kind === 'replied' && turn.result.decision === 'denied' ? { onAppeal: (id: string) => handleAppeal(deps, id) } : {})} />
+          <TurnView key={turn.id} turn={turn} chat={chat} {...(turn.kind === 'replied' && turn.result.decision === 'denied' ? { onAppeal: (id: string) => handleAppeal(deps, id) } : {})} />
         ))}
-        <ItemPicker
-          open={showItemPicker}
-          order={order}
-          reportedItemIds={reportedItemIds}
-          ticks={ticks}
-          chat={chat}
-          onClose={() => setShowItemPicker(false)}
-        />
       </div>
 
+      <ScopeChips
+        order={order}
+        scope={claimScope}
+        ticks={ticks}
+        pending={pendingPickerOpen(chat.turns)}
+      />
+
+      {chat.notice ? <p className="muted small">{chat.notice}</p> : null}
       <Composer
         draft={chat.draft}
         busy={chat.busy}
@@ -311,58 +298,236 @@ function ChatThread({
   );
 }
 
-function ItemPicker({
-  open,
-  order,
-  reportedItemIds,
-  ticks,
+/**
+ * The item picker, offered by the assistant inside the conversation.
+ *
+ * Rendered where the offer sits in the thread rather than over it, because the
+ * offer *is* a turn: the customer's message is above it, the answer is below, and
+ * the scroll behaves the same as for any other reply. A control that appears over
+ * the thread interrupts reading it.
+ *
+ * Every line is always shown, including the ones already reported. Hiding them
+ * would turn the list into a claim about what is still available, which is a
+ * different thing from what the customer bought, and a customer who cannot see
+ * the lamp cannot tell that it is why their message was capped to the mug.
+ */
+function ItemOfferBubble({
+  offer,
   chat,
-  onClose,
+  busy,
 }: {
-  open: boolean;
-  order: ShopOrder | null;
-  reportedItemIds: readonly string[];
-  ticks: ItemTicks;
+  offer: ItemPickerOffer;
   chat: Conversation;
-  onClose: () => void;
+  busy: boolean;
 }): ReactNode {
-  if (!open || order === null) {
+  // Which line they tapped, and that the tap is in flight.
+  //
+  // A tap is the answer to a question, so it has to look like one: acknowledged
+  // immediately, visibly locked while the next turn is on its way, and left showing
+  // afterwards so a reload does not present the same unanswered question again.
+  const [chosen, setChosen] = useState<string | null>(null);
+  const firstLine = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    // Focus the first line the customer can actually choose. They have just been asked
+    // a question and the answer is a list; moving the caret into it is the difference
+    // between answering and hunting for the control. `preventScroll` because the thread
+    // has just scrolled itself to the bottom.
+    firstLine.current?.focus({ preventScroll: true });
+  }, []);
+
+  /**
+   * A tap is the answer, so it is acknowledged before it is sent.
+   *
+   * `chosen` is set first and the request second: the customer sees their own choice
+   * land instantly, and the buttons lock behind it so a double-tap cannot send two
+   * scopes for one question.
+   */
+  function answerAs(key: string, itemIds: readonly string[], text: string): void {
+    setChosen(key);
+    void chat.send(itemIds, text);
+  }
+
+  return (
+    <div
+      className="bubble-them item-choice-prompt"
+      role="group"
+      aria-label="Choose the item this is about"
+      data-offer-id={offer.orderId}
+    >
+      <OfferCaption answered={chosen !== null} />
+      <ul className="item-choice-list">
+        {offer.items.map((item, index) => (
+          <li key={item.itemId}>
+            <ItemChoiceButton
+              item={item}
+              first={index === 0}
+              lineRef={firstLine}
+              busy={busy}
+              locked={chosen !== null}
+              chosen={chosen === item.itemId}
+              onPick={() => answerAs(item.itemId, [item.itemId], `It is about the ${item.name}`)}
+            />
+          </li>
+        ))}
+      </ul>
+      {/* The way out, always. "The whole order" is a claim a customer makes by
+          ticking nothing, and it is the only claim available once every line is
+          disabled - without this the picker is a dead end and the message behind it
+          can never be sent. */}
+      <ul className="item-choice-list">
+        <li>
+          <button
+            type="button"
+            className={chosen === 'all' ? 'item-choice chosen' : 'item-choice'}
+            disabled={busy || chosen !== null}
+            onClick={() => answerAs('all', [], 'It is about the whole order')}
+          >
+            <span>None of these - it is about the whole order</span>
+          </button>
+        </li>
+      </ul>
+      <OfferFootnote />
+    </div>
+  );
+}
+
+/**
+ * The offer's caption, and its live region.
+ *
+ * Announced rather than merely drawn: the question is new to anyone using a screen
+ * reader, and a group that appears without being read is a question nobody was asked.
+ * After the tap it says what is happening instead of repeating the question, so the
+ * answer and the confirmation are the same sentence.
+ */
+function OfferCaption({ answered }: { answered: boolean }): ReactNode {
+  return (
+    <p role="status" aria-live="polite">
+      {answered
+        ? 'Got it - checking the policy for that item now.'
+        : 'Which item is this about? Pick one and I will check the policy for that item.'}
+    </p>
+  );
+}
+
+/**
+ * The note under the offer.
+ *
+ * Its own component because it is the one part of this bubble that explains a
+ * *limit* rather than offering a choice, and it changes only when the offer does.
+ */
+function OfferFootnote(): ReactNode {
+  return (
+    <p className="muted small">
+      Already-reported items cannot be claimed again here. You can report a different problem with one in a new conversation.
+    </p>
+  );
+}
+
+/**
+ * One line of the offer.
+ *
+ * Its own component so the offer reads as a question and its answers, rather than as
+ * a wall of markup: every button here has four states (available, already reported,
+ * tapped, and locked-because-something-else-was) and only the last two are easy to
+ * miss when they are inline.
+ */
+function ItemChoiceButton({
+  item,
+  first,
+  lineRef,
+  busy,
+  locked,
+  chosen,
+  onPick,
+}: {
+  item: ItemChoice;
+  first: boolean;
+  lineRef: React.RefObject<HTMLButtonElement | null>;
+  busy: boolean;
+  locked: boolean;
+  chosen: boolean;
+  onPick: () => void;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      ref={first ? lineRef : undefined}
+      className={chosen ? 'item-choice chosen' : 'item-choice'}
+      disabled={busy || item.reported || locked}
+      onClick={onPick}
+    >
+      <span>
+        {item.name}
+        {item.quantity > 1 ? ` ×${item.quantity}` : ''}
+        {item.reported ? ' · already reported' : ''}
+        {chosen ? ' · checking' : ''}
+      </span>
+      <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
+    </button>
+  );
+}
+
+/**
+ * Whether the thread is sitting on an unanswered offer.
+ *
+ * The chips below the composer stand down while it is, so the customer is never
+ * given two places to say the same thing about the same order.
+ */
+function pendingPickerOpen(turns: readonly Turn[]): boolean {
+  const last = turns.at(-1);
+  return last !== undefined && (last.kind === 'asked' || last.kind === 'storedAsk') && last.picker !== null;
+}
+
+/**
+ * Optional per-line scope, under the composer.
+ *
+ * The assistant normally asks which item is at issue, and that is the path worth
+ * defaulting to. These chips exist because "proactively" and "only when asked" are
+ * different products: a customer who knows exactly which line is wrong should not
+ * have to wait to be offered a choice they were already going to make. They are a
+ * modifier on the message, never a gate in front of it.
+ */
+function ScopeChips({
+  order,
+  scope,
+  ticks,
+  pending,
+}: {
+  order: ShopOrder | null;
+  scope: ClaimScope;
+  ticks: ItemTicks;
+  pending: boolean;
+}): ReactNode {
+  if (order === null || order.items.length <= 1 || pending) {
     return null;
   }
-  const alreadyReported = new Set(reportedItemIds);
-  const selectable = order.items.filter((item) => !alreadyReported.has(item.itemId));
-  const choose = (itemId: string): void => {
-    onClose();
-    if (itemId.length > 0) {
-      ticks.select(itemId);
-    }
-    void chat.send(itemId.length > 0 ? [itemId] : []);
-  };
+  const settled = new Set(scope.settled);
+  const awaiting = new Set(scope.awaiting);
   return (
-    <div className="bubble-them item-choice-prompt" role="group" aria-label="Choose the item you need help with">
-      <p>Which item is this about? Choose one from this order, and I’ll check the policy for that item.</p>
-      <ul className="item-choice-list">
-        {order.items.map((item) => {
-          const reported = alreadyReported.has(item.itemId);
-          return (
-            <li key={item.itemId}>
-              <button type="button" className="item-choice" disabled={reported} onClick={() => choose(item.itemId)}>
-                <span>{item.name}{item.quantity > 1 ? ` ×${item.quantity}` : ''}{reported ? ' · already reported' : ''}</span>
-                <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-      {/* The escape hatch. Every line already decided or escalated leaves the
-          list above entirely disabled; without this the picker is a dead end and
-          the message the customer typed can never be sent. */}
-      {selectable.length === 0 ? (
-        <button type="button" className="item-choice" onClick={() => choose('')}>
-          <span>None of these - send it as a whole-order message</span>
+    <div className="scope-chips">
+      <span className="muted small">About a specific item?</span>
+      {order.items.map((item) => (
+        <button
+          key={item.itemId}
+          type="button"
+          className="chip"
+          aria-pressed={ticks.itemIds.includes(item.itemId)}
+          // Only a decided line is closed. A line waiting on a person stays open,
+          // because the customer is mid-conversation about it and being told "you may
+          // not discuss this item" is the opposite of what happened.
+          disabled={settled.has(item.itemId)}
+          onClick={() => ticks.toggle(item.itemId)}
+        >
+          {item.name}
+          {awaiting.has(item.itemId) ? <span className="muted small"> · with a person</span> : null}
+        </button>
+      ))}
+      {ticks.itemIds.length > 0 ? (
+        <button type="button" className="chip" onClick={() => ticks.clear()}>
+          Clear
         </button>
       ) : null}
-      <p className="muted small">Previously reported items are unavailable here. You can report a different issue about them in a new conversation if needed.</p>
     </div>
   );
 }
@@ -407,15 +572,27 @@ function useSelectedOrder(
  * used, the server routes them to the agent, and this channel is just how they
  * learn the reply landed.
  */
-function useShopSocket(customerId: string | null, onEvent: () => void): void {
+/**
+ * The thread's socket.
+ *
+ * Most events mean the stored thread changed, so the page re-reads it - one path for
+ * every event, because a re-read cannot be wrong about what is in storage. The
+ * exception is `assistant.retrying`, which describes something happening *now* and
+ * is not in storage: it raises a status line for as long as the request is in
+ * flight, so a customer waiting through a retry sees why rather than watching a
+ * spinner and guessing.
+ */
+function useShopSocket(customerId: string | null, onEvent: () => void, onRetrying: () => void): void {
   const handler = useRef(onEvent);
+  const retrying = useRef(onRetrying);
 
   // Written in an effect, not during render: a ref that is updated while the
   // component draws can be stale for a render the socket fires between, and it
   // is what the refs rule is about.
   useEffect(() => {
     handler.current = onEvent;
-  }, [onEvent]);
+    retrying.current = onRetrying;
+  }, [onEvent, onRetrying]);
 
   useEffect(() => {
     if (customerId === null) {
@@ -423,11 +600,83 @@ function useShopSocket(customerId: string | null, onEvent: () => void): void {
     }
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const socket = new WebSocket(`${scheme}://${location.host}/api/shop/chat/ws`);
-    socket.onmessage = () => handler.current();
+    socket.onmessage = (event: MessageEvent<string>) => {
+      if (isRetryingEvent(event.data)) {
+        retrying.current();
+        return;
+      }
+      handler.current();
+    };
     // `onclose` needs no special handling: the thread is re-read on every event,
     // so a dropped socket costs nothing but the notice arriving later.
     return () => socket.close();
   }, [customerId]);
+}
+
+/** Read off the wire without trusting it: a message we cannot read is a re-read. */
+function isRetryingEvent(data: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(data);
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      (parsed as { readonly type?: unknown }).type === 'assistant.retrying'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Keeps the thread pinned to its newest turn.
+ *
+ * Its own hook because the thread component is about *what* is in the log and this is
+ * about *where the log is scrolled*, and those two change for different reasons: a new
+ * turn arrives, or the window resizes.
+ */
+function useScrollToBottom(turns: readonly Turn[]): React.RefObject<HTMLDivElement | null> {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const log = ref.current;
+    if (log !== null) {
+      log.scrollTop = log.scrollHeight;
+    }
+  }, [turns]);
+
+  return ref;
+}
+
+/**
+ * Which lines are done with, and which are still with a person.
+ *
+ * A line is settled only when a request about it reached a final outcome - approved,
+ * refunded in part, or refused. A line on an *escalated* request is still in play:
+ * nobody has decided it, so the customer keeps the ability to say more about it, and
+ * is told why rather than being left to guess.
+ */
+/** Which lines are done with, and which are still with a person. */
+interface ClaimScope {
+  readonly settled: readonly string[];
+  readonly awaiting: readonly string[];
+}
+
+function claimState(turns: readonly Turn[]): ClaimScope {
+  const settled = new Set<string>();
+  const awaiting = new Set<string>();
+  for (const turn of turns) {
+    if (turn.kind !== 'replied' && turn.kind !== 'stored') {
+      continue;
+    }
+    // `ReplyBody` flattens the decision to its value, so this is a string and not a
+    // nested object.
+    const outcome = turn.result.decision;
+    const target = outcome === 'escalated' ? awaiting : settled;
+    for (const itemId of turn.result.itemIds ?? []) {
+      target.add(itemId);
+    }
+  }
+  return { settled: [...settled], awaiting: [...awaiting] };
 }
 
 /**
@@ -658,7 +907,15 @@ function Composer({
   );
 }
 
-function TurnView({ turn, onAppeal }: { turn: Turn; onAppeal?: (requestId: string) => void | Promise<void> }): ReactNode {
+function TurnView({
+  turn,
+  chat,
+  onAppeal,
+}: {
+  turn: Turn;
+  chat: Conversation;
+  onAppeal?: (requestId: string) => void | Promise<void>;
+}): ReactNode {
   if (turn.kind === 'pending') {
     return <PendingBubble text={turn.text} />;
   }
@@ -675,7 +932,7 @@ function TurnView({ turn, onAppeal }: { turn: Turn; onAppeal?: (requestId: strin
     return <StoredDecisionBubble turn={turn} {...(onAppeal !== undefined ? { onAppeal } : {})} />;
   }
   if (turn.kind === 'storedAsk' || turn.kind === 'asked') {
-    return <QuestionBubble turn={turn} />;
+    return <QuestionBubble turn={turn} chat={chat} />;
   }
   return <LiveDecisionBubble turn={turn} {...(onAppeal !== undefined ? { onAppeal } : {})} />;
 }
@@ -695,17 +952,34 @@ function AgentBubble({ turn }: { turn: Turn & { kind: 'agent' } }): ReactNode {
       <>
         <p className="bubble-me">{turn.text}</p>
         {turn.media && <img src={turn.media.url} alt="Photo from customer" className="chat-media" />}
+        {/* A message handed to a person and not yet answered. Saying so is the
+            whole difference between "someone has this" and "this is broken": the
+            message was kept and a person will reply, and silence is the one thing
+            that is actually wrong here. */}
+        {turn.waitingForPerson ? (
+          <p className="muted small">Sent to the agent reviewing this. Nothing else is needed.</p>
+        ) : null}
       </>
     );
   }
   return <AgentReply text={turn.text} media={turn.media ?? null} />;
 }
 
-function QuestionBubble({ turn }: { turn: Turn & { kind: 'storedAsk' | 'asked' } }): ReactNode {
+function QuestionBubble({
+  turn,
+  chat,
+}: {
+  turn: Turn & { kind: 'storedAsk' | 'asked' };
+  chat: Conversation;
+}): ReactNode {
   return (
     <>
       <p className="bubble-me">{turn.text}</p>
-      <Question reply={turn.question} />
+      {turn.picker === null ? (
+        <Question reply={turn.question} />
+      ) : (
+        <ItemOfferBubble offer={turn.picker} chat={chat} busy={chat.busy} />
+      )}
     </>
   );
 }

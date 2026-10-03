@@ -179,6 +179,7 @@ export const OVERRIDE_CODES = [
   'risk_rule_deny_rejected',
   'ungrounded_reason_escalated',
   'untrusted_extraction_discarded',
+  'low_confidence_claim_escalated',
   'discretion_approve',
   'discretion_partial_refund',
   'discretion_exchange',

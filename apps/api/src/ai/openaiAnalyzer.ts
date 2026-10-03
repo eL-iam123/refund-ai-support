@@ -1,10 +1,13 @@
 import OpenAI, { APIConnectionError, APIError, APIUserAbortError } from 'openai';
 import type { z } from 'zod';
 import { ClaimExtractionSchema } from '@refund/shared';
+import { breakerConfig } from '../config/env.js';
+import { ModelCircuitBreaker, runCandidates, unavailableFrom } from './breaker.js';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
 import { buildIntakeUser, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
 import { IntakeOutputSchema, type IntakeOutput } from './schemas.js';
+import type { AttemptOutcome } from './breaker.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
@@ -17,7 +20,6 @@ import {
   type ChatReply,
 } from './analyzer.js';
 import type { OrderRecord } from '../db/records.js';
-import { setTimeout as sleep } from 'node:timers/promises';
 
 /**
  * The production analyzer: one HTTP client for every OpenAI-compatible endpoint
@@ -36,8 +38,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
  */
 
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
-/** 400ms, then 1200ms, and 1200ms again: never a zero-delay retry. */
-const BACKOFF_MS = [400, 1200] as const;
 const MAX_REPAIRS = 1;
 /** A failure message is for a human reading a drawer, not a log archive. */
 const MAX_ERROR_LENGTH = 500;
@@ -139,12 +139,32 @@ interface TokenUsage {
 export class OpenAiAnalyzer implements AIAnalyzer {
   readonly label: string;
   readonly model: string;
-  readonly available = true;
-  readonly unavailableReason = null;
+
+  /**
+   * Dynamic, and that is the point.
+   *
+   * A model whose circuit is open cannot serve the next request, so reporting the
+   * analyzer as available while every candidate is tripped would be a lie told to
+   * the storefront and to `/api/health`. `/api/shop/assistant-status` is what the
+   * customer-facing page reads, so this is how a provider outage stops looking like
+   * "the assistant is thinking".
+   */
+  get available(): boolean {
+    return this.breaker.reason(this.candidates) === null;
+  }
+
+  get unavailableReason(): string | null {
+    return this.breaker.reason(this.candidates);
+  }
 
   private readonly client: OpenAI;
   private readonly candidates: readonly string[];
   private readonly jsonMode: boolean;
+  /**
+   * Per-instance, so a test that builds its own analyzer cannot inherit another
+   * test's view of a provider. See `breaker.ts` for why not a process-wide registry.
+   */
+  private readonly breaker: ModelCircuitBreaker;
 
   constructor(
     private readonly env: Env,
@@ -155,6 +175,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     this.jsonMode = preset.jsonMode;
     this.candidates = modelCandidates(env);
     this.model = this.candidates[0] ?? 'unknown';
+    this.breaker = new ModelCircuitBreaker(breakerConfig(env));
     this.client = new OpenAI({
       apiKey,
       baseURL: env.AI_BASE_URL ?? preset.baseUrl,
@@ -218,38 +239,41 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     );
   }
 
-  /** Tries each candidate model in turn, retrying each with a fixed backoff. */
+  /**
+   * Tries each candidate model in turn, retrying each with a fixed backoff, and
+   * skips whatever the breaker already has open.
+   *
+   * The ladder itself - including the backoff and the failure text - is in
+   * `breaker.ts`, shared with the other adapter and with chat mode. What is left
+   * here is the part that is genuinely this wire format: one HTTP call and the
+   * reading of its answer.
+   */
   private async complete(
     system: string,
     user: string,
     budget: AbortSignal,
     observer: AttemptObserver,
   ): Promise<Completion> {
-    const failures: string[] = [];
-
-    for (const model of this.candidates) {
-      for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
-        if (budget.aborted) {
-          throw new AiUnavailableError(`intake time budget exhausted after ${failures.length} attempt(s)`);
-        }
-
+    const result = await runCandidates<Completion>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'intake',
+      attempt: async (model, attempt) => {
         const outcome = await this.attempt(model, attempt, system, user, budget, observer);
-        if (outcome.ok) {
-          return outcome.completion;
-        }
-        failures.push(`${model}#${attempt} ${outcome.error}`);
-
-        const canRetry = attempt < this.env.AI_MAX_ATTEMPTS && outcome.retryable;
-        if (!canRetry) {
-          break;
-        }
-        await backoff(attempt, budget);
-      }
+        return outcome.ok ? { ok: true, value: outcome.completion } : outcome;
+      },
+    });
+    if (!result.ok) {
+      throw unavailableFrom(result);
     }
+    return result.value;
+  }
 
-    throw new AiUnavailableError(
-      cap(`all ${this.candidates.length} model(s) failed after ${failures.length} attempt(s): ${failures.join(' | ')}`),
-    );
+  /** What `/api/health` publishes: the breaker's view, not a probe. */
+  breakerState(): ReturnType<NonNullable<AIAnalyzer['breakerState']>> {
+    return this.breaker.snapshot(this.candidates);
   }
 
 
@@ -305,52 +329,71 @@ export class OpenAiAnalyzer implements AIAnalyzer {
 
   async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const messages = chatMessages(input);
-
-    for (const model of this.candidates) {
-      for (let attempt = 1; attempt <= this.env.AI_MAX_ATTEMPTS; attempt += 1) {
-        if (budget.aborted) {
-          throw new AiUnavailableError(`chat time budget exhausted`);
-        }
-
-        const startedAt = Date.now();
-        try {
-          const completion = await this.client.chat.completions.create(
-            {
-              model,
-              temperature: 0.7,
-              max_tokens: this.env.AI_MAX_TOKENS,
-              messages,
-              ...(input.tools.length > 0 ? { tools: [REMIND_FUNCTION], tool_choice: 'auto' as const } : {}),
-            },
-            { signal: budget },
-          );
-
-          const answer = chatAnswer(completion, model);
-          if (answer === null) {
-            continue;
-          }
-
-          observer({
-            model,
-            attempt,
-            ok: true,
-            latencyMs: Date.now() - startedAt,
-            promptTokens: null,
-            completionTokens: null,
-            error: null,
-          });
-          return answer;
-        } catch (error) {
-          const failure = classifyProviderFailure(error);
-          if (!failure.retryable || attempt >= this.env.AI_MAX_ATTEMPTS) {
-            continue;
-          }
-        }
-      }
+    const result = await runCandidates<ChatReply>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'chat',
+      attempt: async (model, attempt) => this.chatAttempt(model, attempt, input, budget, observer),
+    });
+    if (!result.ok) {
+      throw unavailableFrom(result);
     }
+    return result.value;
+  }
 
-    throw new AiUnavailableError(`all ${this.candidates.length} model(s) failed for chat`);
+  private async chatAttempt(
+    model: string,
+    attempt: number,
+    input: ChatInput,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<AttemptOutcome<ChatReply>> {
+    const startedAt = Date.now();
+    try {
+      const completion = await this.client.chat.completions.create(
+        {
+          model,
+          temperature: 0.7,
+          max_tokens: this.env.AI_MAX_TOKENS,
+          messages: chatMessages(input),
+          ...(input.tools.length > 0 ? { tools: [REMIND_FUNCTION], tool_choice: 'auto' as const } : {}),
+        },
+        { signal: budget },
+      );
+
+      const answer = chatAnswer(completion, model);
+      if (answer === null) {
+        // A reply with neither text nor a tool call is the empty-completion case
+        // again, in chat clothing. Non-retryable for the same reason: the model has
+        // answered, and its answer was nothing.
+        return { ok: false, error: 'chat reply carried no text and no tool call', retryable: false };
+      }
+
+      observer({
+        model,
+        attempt,
+        ok: true,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: null,
+      });
+      return { ok: true, value: answer };
+    } catch (error: unknown) {
+      const failure = classifyProviderFailure(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      return { ok: false, ...failure };
+    }
   }
 }
 
@@ -404,6 +447,9 @@ function chatAnswer(
  * the extraction schema and nothing else.
  */
 function toIntakeReply(data: IntakeOutput, model: string): IntakeReply {
+  if (data.action === 'ask_items') {
+    return { kind: 'ask_items', candidates: data.candidates, model };
+  }
   if (data.action === 'ask') {
     return { kind: 'question', question: data.question, model };
   }
@@ -443,19 +489,6 @@ function firstMessage(completion: OpenAI.Chat.Completions.ChatCompletion): strin
  * with `AI_MAX_ATTEMPTS=5` a zero-delay third retry would hammer an endpoint that
  * has already told us twice that it is busy.
  */
-async function backoff(attempt: number, budget: AbortSignal): Promise<void> {
-  const last = BACKOFF_MS.length - 1;
-  const wait = BACKOFF_MS[Math.min(attempt - 1, last)] ?? BACKOFF_MS[last];
-  try {
-    await sleep(wait, undefined, { signal: budget });
-  } catch (error: unknown) {
-    if (budget.aborted) {
-      throw new AiUnavailableError('analysis time budget exhausted while backing off');
-    }
-    throw error;
-  }
-}
-
 function formatIssues(error: z.ZodError): string {
   return error.issues
     .slice(0, 5)

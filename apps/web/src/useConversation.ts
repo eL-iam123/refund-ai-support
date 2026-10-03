@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { RefundRequestDto } from '@refund/shared';
 import { api, describe } from './api';
-import { shopApi, type ChatTurn as StoredTurn } from './shop/api';
+import { shopApi, type ChatTurn as StoredTurn, type ItemPickerOffer } from './shop/api';
 
 /**
  * What the server says about a suppressed repeat.
@@ -71,6 +71,14 @@ export type Turn =
       readonly id: string;
       readonly text: string;
       readonly question: string;
+      /**
+       * The item picker offered instead of a question, when one was.
+       *
+       * Rendered from this rather than parsed out of `question`: the offer is the
+       * customer's answer surface, and a question the model wrote is not. When it is
+       * present the turn renders as buttons; when it is null, as a sentence.
+       */
+      readonly picker: ItemPickerOffer | null;
       readonly itemIds: readonly string[];
     }
   | {
@@ -86,6 +94,7 @@ export type Turn =
       readonly id: string;
       readonly text: string;
       readonly question: string;
+      readonly picker: ItemPickerOffer | null;
       readonly itemIds: readonly string[];
     }
   | {
@@ -117,6 +126,15 @@ export type Turn =
       readonly createdAt: string;
       /** Optional photo attached to this message, served under `/media/`. Null for text. */
       readonly media: { readonly type: string; readonly url: string; readonly bytes: number } | null;
+      /**
+       * True when this message was handed to a person and nothing came back.
+       *
+       * Carried because without it the customer's own words are the last thing on
+       * screen and the thread looks frozen: the message went somewhere, was kept,
+       * and is waiting - which is the opposite of a failure, and has to look like
+       * it.
+       */
+      readonly waitingForPerson?: boolean;
     }
   | {
       /**
@@ -137,10 +155,40 @@ export interface Conversation {
   readonly error: string;
   /** Why the composer will not send, or null when it will. */
   readonly blocked: string | null;
+  /**
+   * What the server had to do to answer, in one sentence, when it had to do
+   * something worth explaining: a retry that worked, a matcher reading the message
+   * instead of a model, or a claim nobody could read. Null in the ordinary case.
+   *
+   * Kept separate from the reply text because it is not part of the answer. The
+   * customer should be able to learn that their message was read another way without
+   * the refund notice having to say so, and an operator should be able to read it in
+   * the thread rather than inferring it from the decision.
+   */
+  readonly notice: string | null;
+  /**
+   * A person is holding the thread and has not answered yet.
+   *
+   * The composer closes while it is true. A customer typing into a thread a person is
+   * about to answer collects messages nobody has read yet, and the box opening again
+   * on their reply is the signal that it is their turn.
+   */
+  readonly awaitingPerson: boolean;
   /** True while an order's stored history is loading. */
   readonly loading: boolean;
   readonly setDraft: (next: string) => void;
-  readonly send: (itemIds?: readonly string[]) => Promise<void>;
+  /**
+   * Sends the draft, scoped to `itemIds`.
+   *
+   * `text` overrides the draft, and exists for one caller: a tap on the item
+   * picker, which answers a question already asked. By the time the offer is on
+   * screen the customer's original message has been sent and the draft is empty,
+   * so a tap needs a sentence of its own to send. It is a short deterministic one
+   * naming the line, rather than the original message replayed - replaying it
+   * would be a second request with identical text, which the duplicate check
+   * would suppress, leaving the customer tapping a button that does nothing.
+   */
+  readonly send: (itemIds?: readonly string[], text?: string) => Promise<void>;
   /** Re-reads the stored thread: the socket tells us something changed. */
   readonly refresh: () => void;
 }
@@ -153,6 +201,32 @@ interface LoadedThread {
   readonly orderId: string;
   readonly turns: readonly Turn[];
   readonly closed: boolean;
+  /** Server-authoritative: a person is holding the thread and has not replied yet. */
+  readonly awaitingPerson: boolean;
+}
+
+/**
+ * Why the composer is closed, or null when it is not.
+ *
+ * Three reasons, in the order they are worth saying. A person holding the thread
+ * comes first because it is the only one that reverses: it closes while they have
+ * not replied and opens again the moment they do, so it is a wait rather than an
+ * ending - and telling someone a conversation is "closed" while a person is about to
+ * answer it is the fastest way to lose them.
+ */
+function blockedBecause(
+  awaitingPerson: boolean,
+  closed: boolean,
+  customerId: string | null,
+  orderId: string | null,
+): string | null {
+  if (awaitingPerson) {
+    return 'Someone is picking this up. You can write again as soon as they reply.';
+  }
+  if (closed) {
+    return 'This conversation is closed after the final decision. You can no longer send messages on this order.';
+  }
+  return reasonBlocked(customerId, orderId);
 }
 
 /**
@@ -177,7 +251,14 @@ interface LoadedThread {
 function useStoredThread(
   customerId: string | null,
   orderId: string | null,
-): { readonly turns: readonly Turn[]; readonly closed: boolean; readonly loading: boolean; readonly error: string; readonly reload: () => void } {
+): {
+  readonly turns: readonly Turn[];
+  readonly closed: boolean;
+  readonly awaitingPerson: boolean;
+  readonly loading: boolean;
+  readonly error: string;
+  readonly reload: () => void;
+} {
   const [loaded, setLoaded] = useState<LoadedThread | null>(null);
   const [failed, setFailed] = useState<string>('');
   // Bumped by `reload`. The socket announces "something changed, come look";
@@ -194,7 +275,12 @@ function useStoredThread(
       .chatHistory(orderId)
       .then((result) => {
         if (current && result.orderId === orderId) {
-          setLoaded({ orderId, turns: result.turns.map(toTurn), closed: result.closed });
+          setLoaded({
+            orderId,
+            turns: result.turns.map(toTurn),
+            closed: result.closed,
+            awaitingPerson: result.awaitingPerson,
+          });
           setFailed('');
         }
       })
@@ -214,6 +300,7 @@ function useStoredThread(
   return {
     turns: applies ? loaded.turns : [],
     closed: applies && loaded.closed,
+    awaitingPerson: applies && loaded.awaitingPerson,
     loading: orderId !== null && customerId !== null && !applies && failed === '',
     error: failed,
     reload: () => setVersion((v) => v + 1),
@@ -303,14 +390,15 @@ export function useConversation(
   const [draft, setDraft] = useState<string>(initialDraft);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
+  // Transient, per request: set from the reply, cleared when the next one starts.
+  const [notice, setNotice] = useState<string | null>(null);
+  const awaitingPerson = stored.awaitingPerson;
 
-  const blocked = stored.closed
-    ? 'This conversation is closed after the final decision. You can no longer send messages on this order.'
-    : reasonBlocked(customerId, orderId);
+  const blocked = blockedBecause(awaitingPerson, stored.closed, customerId, orderId);
   const turns = merge(stored.turns, live.turns);
 
-  const send = useCallback(async (selectedIds: readonly string[] = []): Promise<void> => {
-    const message = draft.trim();
+  const send = useCallback(async (selectedIds: readonly string[] = [], override?: string): Promise<void> => {
+    const message = (override ?? draft).trim();
     if (message.length === 0 || customerId === null || orderId === null || busy || stored.closed) {
       return;
     }
@@ -329,6 +417,7 @@ export function useConversation(
     const localId = `local-${Date.now()}`;
     setDraft('');
     setError('');
+    setNotice(null);
     setBusy(true);
     live.begin(orderId, message, localId);
 
@@ -346,6 +435,8 @@ export function useConversation(
   return {
     turns,
     closed: stored.closed,
+    notice,
+    awaitingPerson,
     draft,
     busy,
     error: error.length > 0 ? error : stored.error,
@@ -383,6 +474,7 @@ function settleReply(
       id: reply.dialogueId,
       text: message,
       question: reply.question,
+      picker: reply.picker ?? null,
       itemIds: reply.itemIds,
     });
     return;
@@ -395,6 +487,7 @@ function settleReply(
       sender: 'customer',
       createdAt: reply.message.createdAt,
       media: reply.message.media ?? null,
+      waitingForPerson: !reply.agentConnected,
     });
     return;
   }
@@ -427,7 +520,14 @@ function toTurn(stored: StoredTurn): Turn {
     return { kind: 'update', id: stored.id, text: stored.body, ofRequestId: stored.requestId };
   }
   if (stored.kind === 'dialogue') {
-    return { kind: 'storedAsk', id: stored.id, text: stored.message, question: stored.question, itemIds: stored.itemIds };
+    return {
+      kind: 'storedAsk',
+      id: stored.id,
+      text: stored.message,
+      question: stored.question,
+      picker: stored.offer ?? null,
+      itemIds: stored.itemIds,
+    };
   }
   if (stored.kind === 'agent') {
     return {

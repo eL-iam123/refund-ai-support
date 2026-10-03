@@ -191,7 +191,7 @@ export function takeoverForEscalated(
  * A person who does mean to help with both orders takes the takeover over, and
  * that claim is customer-wide.
  */
-function isThreadOf(handoff: ActiveHandoff, orderId: string | null): boolean {
+export function isThreadOf(handoff: ActiveHandoff, orderId: string | null): boolean {
   if (handoff.agentId !== ESCALATION_AGENT) {
     return true;
   }

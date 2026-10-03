@@ -1,7 +1,7 @@
 import type { Db } from '../db/connection.js';
 import { createAttemptRecorder } from '../db/attemptRecorder.js';
 import type { Env } from '../config/env.js';
-import { discretionConfig } from '../config/env.js';
+import { discretionConfig, itemPickerConfig } from '../config/env.js';
 import { createAnalyzer } from '../ai/index.js';
 import type { PipelineDeps } from '../orchestrator.js';
 import type { Logger } from '../lib/logger.js';
@@ -27,6 +27,19 @@ export interface AppContext {
   readonly pipeline: PipelineDeps;
   readonly log: Logger;
   readonly now: () => Date;
+  /** Late-bound, so the pipeline can announce ladder progress once the hub exists. */
+  readonly customerEvents: CustomerEvents;
+}
+
+/**
+ * Where the pipeline announces things that happen *during* a request.
+ *
+ * Late-bound because the hub is created after this context, and the pipeline is
+ * built inside it. A null notifier simply means no hub - a script, a seed run, a
+ * test that does not care - and the pipeline carries on either way.
+ */
+export interface CustomerEvents {
+  notify: ((customerId: string) => void) | null;
 }
 
 export function buildContext(
@@ -36,19 +49,22 @@ export function buildContext(
   now: () => Date,
   overrides: ContextOverrides = {},
 ): AppContext {
-  return {
-    env,
-    db,
-    pipeline:
-      overrides.pipeline ?? {
-        analyzer: createAnalyzer(env),
-        recordAttempt: createAttemptRecorder(db),
-        injectionAction: env.INJECTION_ACTION,
-        discretion: discretionConfig(env),
+  const customerEvents: CustomerEvents = { notify: null };
+  const pipeline =
+    overrides.pipeline ??
+    ({
+      analyzer: createAnalyzer(env),
+      recordAttempt: createAttemptRecorder(db),
+      injectionAction: env.INJECTION_ACTION,
+      discretion: discretionConfig(env),
+      itemPicker: itemPickerConfig(env),
+      minConfidence: env.AI_MIN_CONFIDENCE,
+      notifyCustomer: (customerId: string): void => {
+        customerEvents.notify?.(customerId);
       },
-    log,
-    now,
-  };
+    } satisfies PipelineDeps);
+
+  return { env, db, pipeline, log, now, customerEvents };
 }
 
 /**

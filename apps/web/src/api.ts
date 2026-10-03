@@ -25,6 +25,34 @@ import type {
 
 import { ApiError, request, post } from './httpClient';
 
+/**
+ * One line as the item picker offers it.
+ *
+ * `reported` means the line already has a request or an open escalation, so it is
+ * shown disabled rather than hidden: a list that silently omits a line reads as a
+ * list of everything the customer bought, which is not what it is.
+ */
+export interface ItemChoice {
+  readonly itemId: string;
+  readonly name: string;
+  readonly quantity: number;
+  readonly unitPriceCents: number;
+  readonly reported: boolean;
+}
+
+/**
+ * The picker's offer: a list to render, not a decision.
+ *
+ * The customer taps a line, and the scope that reaches the money is what they
+ * tapped on their next message - never anything in this object.
+ */
+export interface ItemPickerOffer {
+  readonly orderId: string;
+  readonly items: readonly ItemChoice[];
+  /** The lines the model was unsure about. Empty when it was unsure about all of them. */
+  readonly suggested: readonly string[];
+}
+
 export { ApiError };
 
 export interface AuditEvent {
@@ -214,7 +242,13 @@ export const api = {
   }) =>
     post<
       | { request: RefundRequestDto; duplicate?: DuplicateNotice }
-      | { question: string; dialogueId: string; itemIds: readonly string[] }
+      | {
+          question: string;
+          /** The item picker offered instead of a question, when one was. */
+          picker: ItemPickerOffer | null;
+          dialogueId: string;
+          itemIds: readonly string[];
+        }
       | ({ received: true } & AgentRoutedReply)
     >('/api/chat/messages', input),
 
