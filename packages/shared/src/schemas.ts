@@ -292,6 +292,12 @@ export const RefundRequestSchema = z.object({
   decision: RefundDecisionSchema,
   /** Composed, deterministic customer-facing reply. */
   responseText: z.string(),
+  /**
+   * Why intake needed help, in the words the customer was given: a model that could
+   * not be reached, a retry that worked, a message nobody could read. Null when the
+   * model read it first time, which is most of them.
+   */
+  ingestNotice: z.string().nullable(),
   extraction: ClaimExtractionSchema.nullable(),
   grounding: GroundingSchema.nullable(),
   injection: InjectionScanSchema,
@@ -382,6 +388,20 @@ export const AdminStatsSchema = z.object({
    */
   aiAvailable: z.boolean(),
   aiUnavailableReason: z.string().nullable(),
+  /**
+   * What each candidate model's circuit breaker is doing.
+   *
+   * Published here rather than only on `/api/health` because this is the payload the
+   * operator's eye is already on, and "a model is out of rotation" is the first thing
+   * worth knowing when the numbers stop moving.
+   */
+  models: z.array(
+    z.object({
+      model: z.string(),
+      state: z.enum(['closed', 'open', 'half_open']),
+      consecutiveFailures: z.number().int().nonnegative(),
+    }),
+  ),
 
   /** Money the system has promised but not paid. */
   pendingVerification: z.object({

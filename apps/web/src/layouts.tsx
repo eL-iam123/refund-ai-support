@@ -88,6 +88,7 @@ export function AdminLayout(): ReactNode {
           <NavLink to="/admin" end><LayoutDashboard size={16} /> Overview</NavLink>
           <NavLink to="/admin/live"><Headset size={16} /> Live</NavLink>
           <NavLink to="/admin/refunds"><Wallet size={16} /> Payouts</NavLink>
+          <NavLink to="/admin/returns"><Package size={16} /> Returns</NavLink>
           <NavLink to="/admin/requests"><Inbox size={16} /> All requests</NavLink>
           <NavLink to="/admin/policy"><FileText size={16} /> Policy</NavLink>
           {signedIn ? (

@@ -49,6 +49,11 @@ export interface OrderRecord {
 }
 
 export interface PersistedRequest {
+  /**
+   * Why intake needed help, in the customer's words. Null when the model read the
+   * message first time and no ladder step ran.
+   */
+  readonly ingestNotice: string | null;
   readonly id: string;
   readonly createdAt: string;
   readonly customerId: string;

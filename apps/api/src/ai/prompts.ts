@@ -1,5 +1,5 @@
 import { INTENTS, ITEM_CONDITIONS, REASON_CODES } from '@refund/shared';
-import type { AnalyzerOrder, DialogueLine } from './analyzer.js';
+import type { AnalyzerOrder, DialogueLine, IntakeExit } from './analyzer.js';
 import { describeOutput, IntakeOutputSchema } from './schemas.js';
 import { formatCents } from '../lib/money.js';
 
@@ -65,6 +65,43 @@ Return JSON matching one of these two schemas:
 ${describeOutput(IntakeOutputSchema)}`;
 
 /**
+ * The exits open on this turn, said plainly.
+ *
+ * The last thing in the prompt, and deliberately explicit rather than implied by
+ * omission: a model told it may use three tools will sometimes use the least
+ * effortful one, and one that leads nowhere costs the customer a turn of the
+ * conversation. Naming what is closed is more reliable than describing what is open,
+ * because "do not ask which item" is easier to follow than "you may ask which item
+ * only if...".
+ */
+/** The tool name for each exit, so the prompt names the same three things twice. */
+const TOOL_NAME: Readonly<Record<IntakeExit, string>> = {
+  ask: 'ask_question',
+  ask_items: 'ask_which_items',
+  decide: 'decide_claim',
+};
+
+function openExits(allowedExits: readonly IntakeExit[] | undefined): string {
+  if (allowedExits === undefined || allowedExits.length === 0) {
+    return 'Choose one tool call: ask_question to ask for the single missing detail, or decide_claim to submit the claim now.';
+  }
+  const all: readonly IntakeExit[] = ['ask', 'ask_items', 'decide'];
+  const closed = all.filter((exit) => !allowedExits.includes(exit));
+  const open = allowedExits.map((exit) => TOOL_NAME[exit]).join(' or ');
+  if (closed.length === 0) {
+    return `Choose one tool call: ${open}.`;
+  }
+  const names = closed.map((exit) => TOOL_NAME[exit]).join(' or ');
+  return `You may only use ${open} this turn. Do not use ${names} - ${reasonFor(closed)}`;
+}
+
+function reasonFor(closed: readonly IntakeExit[]): string {
+  return closed.includes('ask_items')
+    ? 'which item is concerned is already settled by what the customer has said.'
+    : 'that question has already been answered.';
+}
+
+/**
  * The user turn for intake: the transcript, then the facts, then the choice.
  *
  * The order block is stated explicitly as already identified, because a model
@@ -76,6 +113,7 @@ export function buildIntakeUser(
   order: AnalyzerOrder | null,
   history: readonly DialogueLine[],
   shareOrderFacts: boolean,
+  allowedExits?: readonly IntakeExit[],
 ): string {
   const transcript =
     history.length === 0
@@ -97,8 +135,7 @@ ${message}
 ${facts}
 ${identified}
 
-Choose one tool call: ask_question to ask for the single missing detail, or decide_claim
-to submit the claim now. Remember: JSON only, and evidenceQuotes in a claim must be copied
+${openExits(allowedExits)} Remember: JSON only, and evidenceQuotes in a claim must be copied
 verbatim from a customer message above.`;
 }
 

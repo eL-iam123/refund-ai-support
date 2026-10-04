@@ -19,20 +19,12 @@ import { findOrder } from './orderRepository.js';
  * support agent reads before promising anyone their money back.
  */
 
-export const RETURN_STATUSES = [
-  'return_requested',
-  'return_label_generated',
-  'return_shipped',
-  'return_received',
-  'return_processed',
-  'return_denied',
-] as const;
+import { RETURN_STATUSES, CARRIERS, type ReturnStatus, type Carrier } from '@refund/shared';
 
-export type ReturnStatus = (typeof RETURN_STATUSES)[number];
-
-export type Carrier = 'usps' | 'ups' | 'fedex';
-
-const CARRIERS: readonly Carrier[] = ['usps', 'ups', 'fedex'];
+// Re-exported so the rest of the API keeps importing return vocabulary from one
+// place, whichever module it happens to be reading.
+export { RETURN_STATUSES, CARRIERS };
+export type { ReturnStatus, Carrier };
 
 /**
  * The only legal moves, and the only status each can be reached from.
@@ -43,6 +35,15 @@ const CARRIERS: readonly Carrier[] = ['usps', 'ups', 'fedex'];
  * or `return_denied` it is closed - the goods have been dealt with and reopening
  * it would mean somebody has to reconcile two histories.
  */
+export function returnTransitions(status: ReturnStatus): readonly ReturnStatus[] {
+  return TRANSITIONS[status];
+}
+
+/** Whether a denial is still available: anything not already closed. */
+export function canDenyReturn(status: ReturnStatus): boolean {
+  return TRANSITIONS[status].includes('return_denied');
+}
+
 const TRANSITIONS: Readonly<Record<ReturnStatus, readonly ReturnStatus[]>> = {
   return_requested: ['return_label_generated', 'return_denied'],
   return_label_generated: ['return_shipped', 'return_denied'],

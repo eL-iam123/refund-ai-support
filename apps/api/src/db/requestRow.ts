@@ -38,6 +38,7 @@ export function rowFromDecision(args: {
     messageFingerprint: messageFingerprint(message),
     ...decisionColumns(result.decision),
     responseText: result.responseText,
+    ingestNotice: result.notice,
     claimItemIdsJson: JSON.stringify(result.itemIds),
     extractionJson: toJson(result.extraction),
     groundingJson: toJson(result.grounding),

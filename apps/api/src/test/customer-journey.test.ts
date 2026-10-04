@@ -216,11 +216,16 @@ describe('a customer can buy, then talk to us, whatever they send', () => {
           message: 'Something in this delivery went wrong and I want it sorted.',
         },
       });
-      expect(asked.statusCode).toBe(201);
+      // A vague complaint gets a question, not a decision - 200 with a question is
+      // the success case, and it used to be an escalation that also went silent when
+      // the takeover was unattended.
+      expect(asked.statusCode, asked.body).toBe(200);
+      // Two lines on the order, so the first question is which one. Either
+      // question is a success here; what matters is that a vague complaint gets a
+      // question rather than a decision.
+      expect(asked.json<ChatReply>().question).toMatch(/what has gone wrong|which one|about /i);
 
-      // Whatever came back - a question, an item picker, a decision - the next thing the
-      // customer does is send again, and that has to be accepted. This is the thread
-      // that used to go silent on an unattended escalation.
+      // Then the answer to it, which is the thing that must produce a decision.
       const followUp = await j.harness.app.inject({
         method: 'POST',
         url: '/api/chat/messages',
@@ -228,15 +233,11 @@ describe('a customer can buy, then talk to us, whatever they send', () => {
         payload: {
           customerId: j.customerId,
           orderId: j.orderId,
-          message: 'The mug is the one that is broken.',
+          message: 'The mug arrived with a crack through the handle.',
         },
       });
-      expect(followUp.statusCode, followUp.body).toBeLessThan(500);
-      const body = followUp.json<ChatReply>();
-      expect(
-        body.request !== undefined || body.question !== undefined || body.received === true,
-        `nothing came back: ${followUp.body.slice(0, 200)}`,
-      ).toBe(true);
+      expect(followUp.statusCode, followUp.body).toBe(201);
+      expect(followUp.json<ChatReply>().request?.decision.decision).toBe('approved');
     } finally {
       await close(j);
     }
@@ -468,7 +469,11 @@ describe('the questions peel, and the escalations explain themselves', () => {
    * an escalation they cannot explain is one they take somewhere else.
    */
   it('says why it escalated, in words rather than a rule number', async () => {
-    const harness = await shopHarness();
+    // An escalation is only reachable once there is nothing left to clarify, so this
+    // uses the one escalation a customer cannot talk their way out of: the assistant
+    // could not read the message at all. That is also the reason most worth stating,
+    // because it is the one the customer cannot see for themselves.
+    const harness = await shopHarness({ kind: 'unavailable', message: '503 from the provider' });
     try {
       const session = await signIn(harness, 'sam@shop.demo');
       const sent = await harness.app.inject({
@@ -478,17 +483,23 @@ describe('the questions peel, and the escalations explain themselves', () => {
         payload: {
           customerId: session.customerId,
           orderId: session.orderId,
-          // No model can read this, so R-12 escalates and the reason is ours to give.
-          message: 'the thing is not what I expected and I am unhappy',
+          message: 'The mug arrived with a crack through the handle and I want a refund.',
         },
       });
-      expect([200, 201]).toContain(sent.statusCode);
-      const body = sent.json<{ request?: { responseText: string; decision: { decision: string } } }>();
+      expect(sent.statusCode, sent.body).toBe(201);
+      const body = sent.json<{
+        request?: { responseText: string; decision: { decision: string } };
+        notice?: string | null;
+      }>();
       expect(body.request?.decision.decision).toBe('escalated');
-      const text = body.request?.responseText ?? '';
-      expect(text).toContain('because');
+
+      // Twice, in two different voices: what happened, and why they are waiting.
+      const reply = body.request?.responseText ?? '';
+      expect(reply).toContain('because');
+      expect(body.notice ?? '').toContain('could not read');
       // No policy internals in a customer's inbox.
-      expect(text).not.toMatch(/R-\d\d|REFUND_POLICY|§/);
+      expect(reply).not.toMatch(/R-\d\d|REFUND_POLICY|§/);
+      expect(body.notice ?? '').not.toMatch(/R-\d\d|REFUND_POLICY|§/);
     } finally {
       await harness.app.close();
       harness.db.close();

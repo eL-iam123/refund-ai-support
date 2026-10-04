@@ -168,12 +168,35 @@ export interface RuleEvaluation {
   readonly itemIds: readonly string[];
 }
 
+/**
+ * Where a return stands.
+ *
+ * Shared because the staff console renders these and offers the moves each one
+ * allows. A client keeping its own copy would eventually offer a move the server
+ * refuses, and the failure would look like the parcel being in two states at once.
+ */
+export const RETURN_STATUSES = [
+  'return_requested',
+  'return_label_generated',
+  'return_shipped',
+  'return_received',
+  'return_processed',
+  'return_denied',
+] as const;
+
+export type ReturnStatus = (typeof RETURN_STATUSES)[number];
+
+export const CARRIERS = ['usps', 'ups', 'fedex'] as const;
+
+export type Carrier = (typeof CARRIERS)[number];
+
 export const OVERRIDE_CODES = [
   'ai_proposal_rejected',
   'ai_proposed_approve_clamped_to_deny',
   'ai_proposed_approve_clamped_to_escalate',
   'amount_clamped_to_order_value',
   'amount_limited_to_disputed_items',
+  'amount_limited_to_remaining_balance',
   'amount_zeroed_on_deny',
   'amount_not_payable_until_reviewed',
   'risk_rule_deny_rejected',

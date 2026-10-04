@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { useConversation } from '../useConversation';
 import { ChatPage } from '../ChatPage';
+import { FulfilOutcome, OverrideForm } from '../detail/OverrideForm';
 
 /**
  * The storefront, driven like a customer.
@@ -179,12 +180,7 @@ beforeEach(() => {
     if (init?.method !== 'POST' || !url.includes('/api/chat/messages')) {
       return Promise.resolve(route(world, url));
     }
-    // Parsed rather than stringified: a body that reached the client as `[object Object]`
-    // is exactly the kind of defect this layer is here to catch, so the stub refuses to
-    // pretend it did not happen.
-    const body = JSON.parse(typeof init.body === 'string' ? init.body : JSON.stringify(init.body)) as {
-      message: string;
-    };
+    const body = payloadOf(init) as { message: string };
     world.sent.push({ url, body });
     return Promise.resolve(json(world.reply(body.message)));
   });
@@ -223,6 +219,12 @@ function renderPage(): void {
       <ChatPage />
     </MemoryRouter>,
   );
+}
+
+/** The JSON a request carried, read the way the server reads it. */
+function payloadOf(init: RequestInit | undefined): Record<string, unknown> {
+  const body = init?.body;
+  return JSON.parse(typeof body === 'string' ? body : JSON.stringify(body ?? {})) as Record<string, unknown>;
 }
 
 /** The message the page actually put on the wire. */
@@ -440,5 +442,169 @@ describe('what the line chips say about a line with a person', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /harbour stoneware mug/i })).toBeDisabled();
     });
+  });
+});
+
+  function decidedRequest(decision: string, amount = 0, eligible = 10_000) {
+    return {
+      id: 'REQ-1',
+      createdAt: '2026-01-02T00:00:00.000Z',
+      customerId: 'CUST-TEST',
+      customerName: 'Test Shopper',
+      orderId: 'ORD-TEST',
+      source: 'storefront',
+      message: 'the mug is broken',
+      responseText: 'We are looking at it.',
+      extraction: null,
+      grounding: null,
+      injection: { detected: false, signals: [], obfuscationNoted: false },
+      aiMode: 'fake (test)',
+      llmCalled: false,
+      timings: [],
+      overriddenBy: null,
+      overrideNote: null,
+      decision: {
+        decision,
+        refundAmountCents: amount,
+        eligibleAmountCents: eligible,
+        currency: 'USD',
+        summary: '',
+        policyRef: 'REFUND_POLICY.md §5.1',
+        trace: [],
+        overrides: [],
+        eligibleItemIds: [],
+        blockedItems: [],
+      },
+    };
+  }
+
+  function stubOverrideCapture(): { calls: { decision: string; note: string; amountCents?: number; acknowledgeHardBlock?: boolean }[] } {
+    const calls: { decision: string; note: string; amountCents?: number; acknowledgeHardBlock?: boolean }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (init?.method === 'POST' && urlOf(input).includes('/override')) {
+          const body = payloadOf(init) as {
+            decision: string;
+            note: string;
+            amountCents?: number;
+            acknowledgeHardBlock?: boolean;
+          };
+          calls.push(body);
+          return Promise.resolve(
+            new Response(JSON.stringify({ request: decidedRequest(body.decision, body.amountCents ?? 0) }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            }),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify({}), { status: 404 }));
+      },
+    );
+    return { calls };
+  }
+
+describe('the admin can do what the engine decides', () => {
+  /**
+   * The engine reaches six outcomes and can authorise a reduced amount. Before this
+   * the override form could reach neither: choosing `partial_refund` sent no figure
+   * and the API answered 422, and reversing a denial was impossible because the
+   * acknowledgement the server requires had no control to tick. An operator weaker
+   * than the policy is a policy nobody can correct.
+   */
+  it('sends the amount an admin names for a partial refund', async () => {
+    const user = userEvent.setup();
+    const { calls } = stubOverrideCapture();
+    render(
+      <OverrideForm request={decidedRequest('approved', 10_000) as never} onApplied={() => {}} />,
+    );
+
+    await user.selectOptions(screen.getByLabelText('Decision'), 'partial_refund');
+    await user.type(screen.getByLabelText('Amount to authorise'), '25.50');
+    await user.type(screen.getByLabelText('Note'), 'goodwill on the smaller line');
+    await user.click(screen.getByRole('button', { name: 'Override' }));
+
+    await waitFor(() => {
+      expect(calls).toHaveLength(1);
+    });
+    expect(calls[0]?.amountCents).toBe(2_550);
+  });
+
+  it('refuses a partial refund with no figure, in the form rather than as a server error', async () => {
+    const user = userEvent.setup();
+    const { calls } = stubOverrideCapture();
+    render(<OverrideForm request={decidedRequest('approved', 10_000) as never} onApplied={() => {}} />);
+
+    await user.selectOptions(screen.getByLabelText('Decision'), 'partial_refund');
+    await user.type(screen.getByLabelText('Note'), 'partial goodwill');
+    await user.click(screen.getByRole('button', { name: 'Override' }));
+
+    expect(await screen.findByText(/has to say how much/i)).toBeInTheDocument();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('asks for the acknowledgement when the override introduces money, and not when it moves money', async () => {
+    const user = userEvent.setup();
+    stubOverrideCapture();
+
+    // Escalated to approved introduces money the policy did not authorise, so the
+    // tick is required - `overrideGuard.ts` restricts every such transition, not
+    // only the ones that overturn a refusal.
+    const { unmount } = render(
+      <OverrideForm request={decidedRequest('escalated') as never} onApplied={() => {}} />,
+    );
+    await user.selectOptions(screen.getByLabelText('Decision'), 'approved');
+    expect(screen.getByLabelText(/read the rules it cited/)).toBeInTheDocument();
+    unmount();
+
+    // Approved to partial is money becoming money: not introducing a payment where
+    // there was none, so the server does not restrict it and the box must not
+    // appear either. A prompt for something irrelevant is an obstacle.
+    render(<OverrideForm request={decidedRequest('approved', 10_000) as never} onApplied={() => {}} />);
+    await user.selectOptions(screen.getByLabelText('Decision'), 'partial_refund');
+    expect(screen.queryByLabelText(/read the rules it cited/)).not.toBeInTheDocument();
+  });
+});
+
+describe('and an alternative outcome can be carried out', () => {
+  /**
+   * An exchange and a store credit authorise nothing, so nothing in the money path
+   * tracks the work - and the customer was told a member of the team would confirm
+   * the details here. Without this the outcome is terminal on paper and open in
+   * reality.
+   */
+  it('records that an exchange was carried out, and says so to the customer', async () => {
+    const user = userEvent.setup();
+    const sent: { note: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (init?.method === 'POST' && urlOf(input).includes('/fulfil')) {
+          sent.push(payloadOf(init) as unknown as { note: string });
+          return Promise.resolve(
+            new Response(JSON.stringify({ request: decidedRequest('exchange'), customerMessageId: 'UPD-1' }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            }),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify({}), { status: 404 }));
+      },
+    );
+
+    render(<FulfilOutcome request={decidedRequest('exchange') as never} onFulfilled={() => {}} />);
+
+    await user.type(screen.getByLabelText('What was done'), 'replacement shipped on Tuesday');
+    await user.click(screen.getByRole('button', { name: 'Record it' }));
+
+    await waitFor(() => {
+      expect(sent).toHaveLength(1);
+    });
+    expect(sent[0]?.note).toBe('replacement shipped on Tuesday');
+  });
+
+  it('shows no fulfilment control on a money decision', () => {
+    render(<FulfilOutcome request={decidedRequest('approved', 10_000) as never} onFulfilled={() => {}} />);
+    expect(screen.queryByRole('button', { name: 'Record it' })).not.toBeInTheDocument();
   });
 });

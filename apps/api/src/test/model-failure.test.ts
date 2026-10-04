@@ -34,23 +34,37 @@ describe('the circuit breaker', () => {
     const breaker = new ModelCircuitBreaker(config, now);
 
     expect(breaker.admit('m')).toBe(true);
-    breaker.recordFailure('m');
-    breaker.recordFailure('m');
+    breaker.recordFailure('m', true);
+    breaker.recordFailure('m', true);
     expect(breaker.admit('m')).toBe(true);
 
-    breaker.recordFailure('m');
+    breaker.recordFailure('m', true);
     expect(breaker.admit('m')).toBe(false);
     expect(breaker.reason(['m'])).toContain('m');
+  });
+
+  it('does not open a circuit for a failure that says nothing about availability', () => {
+    // A schema mismatch or a truncated reply is evidence about the request, not about
+    // the provider. Counting it made a healthy model look dead - the storefront
+    // reported the assistant unavailable while the model was answering fine.
+    const { now } = clock();
+    const breaker = new ModelCircuitBreaker(config, now);
+    for (let i = 0; i < 5; i += 1) {
+      breaker.recordFailure('m', false);
+    }
+
+    expect(breaker.admit('m')).toBe(true);
+    expect(breaker.reason(['m'])).toBeNull();
   });
 
   it('counts only consecutive failures, so one success resets it', () => {
     const { now } = clock();
     const breaker = new ModelCircuitBreaker(config, now);
 
-    breaker.recordFailure('m');
-    breaker.recordFailure('m');
+    breaker.recordFailure('m', true);
+    breaker.recordFailure('m', true);
     breaker.recordSuccess('m');
-    breaker.recordFailure('m');
+    breaker.recordFailure('m', true);
 
     // Three failures spread around a success is one failure, not three: a provider
     // flapping is not a provider that is down.
@@ -62,7 +76,7 @@ describe('the circuit breaker', () => {
     const breaker = new ModelCircuitBreaker(config, time.now);
 
     for (let i = 0; i < 3; i += 1) {
-      breaker.recordFailure('m');
+      breaker.recordFailure('m', true);
     }
     expect(breaker.admit('m')).toBe(false);
 
@@ -77,11 +91,11 @@ describe('the circuit breaker', () => {
     const time = clock();
     const breaker = new ModelCircuitBreaker(config, time.now);
     for (let i = 0; i < 3; i += 1) {
-      breaker.recordFailure('m');
+      breaker.recordFailure('m', true);
     }
     time.advance(30_000);
     expect(breaker.admit('m')).toBe(true);
-    breaker.recordFailure('m');
+    breaker.recordFailure('m', true);
 
     time.advance(10_000);
     expect(breaker.admit('m')).toBe(false);
@@ -91,7 +105,7 @@ describe('the circuit breaker', () => {
     const { now } = clock();
     const breaker = new ModelCircuitBreaker(config, now);
     for (let i = 0; i < 3; i += 1) {
-      breaker.recordFailure('bad');
+      breaker.recordFailure('bad', true);
     }
 
     expect(breaker.reason(['bad', 'good'])).toBeNull();
@@ -107,7 +121,7 @@ describe('the ladder walks candidates and skips what the breaker has open', () =
     const { now } = clock();
     const breaker = new ModelCircuitBreaker(config, now);
     for (let i = 0; i < 2; i += 1) {
-      breaker.recordFailure('dead');
+      breaker.recordFailure('dead', true);
     }
 
     const tried: string[] = [];
@@ -132,7 +146,7 @@ describe('the ladder walks candidates and skips what the breaker has open', () =
     const { now } = clock();
     const breaker = new ModelCircuitBreaker(config, now);
     for (let i = 0; i < 2; i += 1) {
-      breaker.recordFailure('dead');
+      breaker.recordFailure('dead', true);
     }
 
     const result = await runCandidates<string>({

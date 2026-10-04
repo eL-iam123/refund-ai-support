@@ -13,6 +13,8 @@ import type {
   RefundRequestSummaryDto,
   RuleOutcome,
   Scenario,
+  ReturnStatus,
+  Carrier,
 } from '@refund/shared';
 
 /**
@@ -211,6 +213,59 @@ export interface HandoffBrief {
   readonly appeals: readonly { readonly requestId: string; readonly reason: string; readonly createdAt: string }[];
 }
 
+/**
+ * A return, as the staff console sees it.
+ *
+ * Declared here rather than imported from the API package, like the rest of this
+ * file's shapes: the console is a client of the HTTP contract, and a client that
+ * imports the server's types stops noticing when the two drift.
+ */
+export interface ReturnDto {
+  readonly id: string;
+  readonly requestId: string | null;
+  readonly orderId: string;
+  readonly customerId: string;
+  readonly status: ReturnStatus;
+  readonly reason: string;
+  readonly trackingNumber: string | null;
+  readonly carrier: Carrier | null;
+  readonly labelUrl: string | null;
+  readonly shippedAt: string | null;
+  readonly receivedAt: string | null;
+  readonly processedAt: string | null;
+  readonly deniedAt: string | null;
+  readonly deniedReason: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ReturnItemDto {
+  readonly id: string;
+  readonly returnId: string;
+  readonly itemId: string;
+  readonly name: string;
+  readonly quantity: number;
+  readonly unitPriceCents: number;
+  readonly receivedQuantity: number;
+  /** What it looked like on arrival; null until the parcel has been received. */
+  readonly condition: string | null;
+  readonly restockedQuantity: number;
+}
+
+/**
+ * A return with the moves that are legal from where it stands.
+ *
+ * `nextStates` comes from the server rather than from a table copied into this
+ * file, so the buttons on the page are the server's rules rather than a guess at
+ * them that goes stale the first time a state is added.
+ */
+export interface ReturnDetailDto {
+  readonly return: ReturnDto;
+  readonly items: readonly ReturnItemDto[];
+  readonly nextStates: readonly ReturnStatus[];
+  readonly canDeny: boolean;
+}
+
 export const api = {
   health: (): Promise<{ status: string; aiMode: string; adminEnabled: boolean }> => request('/api/health'),
 
@@ -259,6 +314,8 @@ export const api = {
 
   override: (id: string, decision: OverrideDecision) =>
     post<{ request: RefundRequestDto }>(`/api/requests/${id}/override`, decision),
+  fulfilOutcome: (id: string, note: string) =>
+    post<{ request: RefundRequestDto }>(`/api/requests/${id}/fulfil`, { note }),
 
   stats: (): Promise<{ stats: AdminStatsDto }> => request('/api/admin/stats'),
 
@@ -276,6 +333,22 @@ export const api = {
 
   /** The verification queue: approvals that are authorised but not yet paid. */
   pendingRefunds: (): Promise<{ refunds: RefundDto[] }> => request('/api/refunds?status=pending_verification'),
+
+  /* Returns: the parcel. Five moves, each one the only legal move from its state. */
+  listStaffReturns: (): Promise<{ returns: readonly ReturnDto[] }> => request('/api/admin/returns'),
+  staffReturn: (id: string): Promise<ReturnDetailDto> => request(`/api/admin/returns/${id}`),
+  labelReturn: (id: string, body: { carrier: Carrier; labelUrl: string }) =>
+    post<ReturnDetailDto>(`/api/admin/returns/${id}/label`, body),
+  shipReturn: (id: string, body: { carrier: Carrier; trackingNumber: string }) =>
+    post<ReturnDetailDto>(`/api/admin/returns/${id}/ship`, body),
+  receiveReturn: (
+    id: string,
+    body: { lines: readonly { itemId: string; quantity: number; condition: string }[] },
+  ) => post<ReturnDetailDto>(`/api/admin/returns/${id}/receive`, body),
+  processReturn: (id: string, body: { restock: readonly { itemId: string; quantity: number }[] }) =>
+    post<ReturnDetailDto>(`/api/admin/returns/${id}/process`, body),
+  denyReturn: (id: string, reason: string) =>
+    post<ReturnDetailDto>(`/api/admin/returns/${id}/deny`, { reason }),
 
   settleRefund: (id: string): Promise<{ refund: RefundDto }> => post(`/api/refunds/${id}/settle`, {}),
 

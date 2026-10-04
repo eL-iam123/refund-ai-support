@@ -11,6 +11,7 @@ import {
   AiUnavailableError,
   type AIAnalyzer,
   type IntakeInput,
+  type IntakeExit,
   type IntakeReply,
   type AttemptObserver,
   type ChatInput,
@@ -119,7 +120,13 @@ export class AnthropicAnalyzer implements AIAnalyzer {
    */
   async analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const first = buildIntakeUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
+    const first = buildIntakeUser(
+      input.message,
+      input.order,
+      input.history,
+      this.env.AI_SHARE_ORDER_FACTS,
+      input.allowedExits,
+    );
     let complaints = 'no completion';
 
     for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
@@ -128,7 +135,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
           ? first
           : `${first}\n\nYour previous reply was rejected: ${complaints}. Call a tool with a valid object.`;
 
-      const completion = await this.complete(first, user, budget, observer);
+      const completion = await this.complete(first, user, budget, observer, input.allowedExits);
       const parsed = IntakeOutputSchema.safeParse(parseJson(completion.text));
 
       if (parsed.success) {
@@ -163,6 +170,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     user: string,
     budget: AbortSignal,
     observer: AttemptObserver,
+    allowedExits?: readonly IntakeExit[],
   ): Promise<Completion> {
     const result = await runCandidates<Completion>({
       candidates: this.candidates,
@@ -171,7 +179,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
       budget,
       purpose: 'intake',
       attempt: async (model, attempt) => {
-        const outcome = await this.attempt(model, attempt, firstUserMessage, user, budget, observer);
+        const outcome = await this.attempt(model, attempt, firstUserMessage, user, budget, observer, allowedExits);
         return outcome.ok ? { ok: true, value: outcome.completion } : outcome;
       },
     });
@@ -189,6 +197,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     user: string,
     budget: AbortSignal,
     observer: AttemptObserver,
+    allowedExits?: readonly IntakeExit[],
   ): Promise<Attempt> {
     const startedAt = Date.now();
     try {
@@ -200,7 +209,9 @@ export class AnthropicAnalyzer implements AIAnalyzer {
           'x-api-key': this.apiKey,
           'anthropic-version': ANTHROPIC_VERSION,
         },
-        body: JSON.stringify(requestBody(model, firstUserMessage, user, this.env.AI_MAX_TOKENS)),
+        body: JSON.stringify(
+          requestBody(model, firstUserMessage, user, this.env.AI_MAX_TOKENS, allowedExits),
+        ),
       });
 
       if (!response.ok) {
@@ -365,6 +376,7 @@ function requestBody(
   firstUserMessage: string,
   user: string,
   maxTokens: number,
+  allowedExits: readonly IntakeExit[] | undefined,
 ): Record<string, unknown> {
   const repairTurn = user !== firstUserMessage;
   return {
@@ -377,7 +389,13 @@ function requestBody(
     // `any` rather than the single-tool `tool` choice: the model must call one of
     // the tools but gets to pick which - exactly the ask-or-decide discriminator
     // the engine is built around, now with a third exit for the item picker.
-    tools: [askTool(), askItemsTool(), decideTool()],
+    // The tool list is the enforced gate on this wire format: a tool that is not
+    // offered cannot be called, so a closed exit is closed rather than merely
+    // discouraged.
+    tools:
+      allowedExits === undefined || allowedExits.includes('ask_items')
+        ? [askTool(), askItemsTool(), decideTool()]
+        : [askTool(), decideTool()],
     tool_choice: { type: 'any' },
     messages: repairTurn
       ? [

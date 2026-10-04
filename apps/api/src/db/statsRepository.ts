@@ -152,7 +152,11 @@ function latencyBucket(db: Db): { readonly averageMs: number; readonly p95Ms: nu
   };
 }
 
-export function adminStats(db: Db, aiMode: string, ai: { available: boolean; reason: string | null }): AdminStatsDto {
+export function adminStats(
+  db: Db,
+  aiMode: string,
+  ai: { available: boolean; reason: string | null; models: readonly { model: string; state: 'closed' | 'open' | 'half_open'; consecutiveFailures: number }[] },
+): AdminStatsDto {
   const latency = latencyBucket(db);
   const guard = guardRailCounts(db);
   return {
@@ -165,6 +169,7 @@ export function adminStats(db: Db, aiMode: string, ai: { available: boolean; rea
     aiMode,
     aiAvailable: ai.available,
     aiUnavailableReason: ai.reason,
+    models: [...ai.models],
     averageLatencyMs: latency.averageMs,
     pendingVerification: moneyBucket(db, 'pending_verification'),
     settled: moneyBucket(db, 'settled'),

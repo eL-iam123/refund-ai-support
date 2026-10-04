@@ -101,15 +101,31 @@ export class ModelCircuitBreaker {
     this.records.delete(model);
   }
 
-  recordFailure(model: string): void {
+  /**
+   * Record a failed attempt.
+   *
+   * `retryable` is the whole argument here. A transport error, a 429 or a 5xx is
+   * evidence the model is *unavailable*, and that is what an open circuit means. A
+   * schema mismatch or a reply that ran out of tokens is evidence about *this
+   * request*, and counting it makes a perfectly healthy model look dead: the
+   * storefront would report the assistant unavailable, the escalation notice would
+   * change, and nothing was actually wrong with the provider. Those failures still
+   * fail the request and still move to the next candidate; they just do not open the
+   * circuit.
+   */
+  recordFailure(model: string, retryable: boolean): void {
     const record = this.records.get(model) ?? closedRecord();
+    record.probeInFlight = false;
+    if (!retryable) {
+      this.records.set(model, record);
+      return;
+    }
     record.consecutiveFailures += 1;
     if (record.consecutiveFailures >= this.config.failureThreshold) {
       // Re-arm the clock on every trip, so a model that keeps failing stays open
       // rather than being re-probed on every cooldown interval.
       record.openedAt = this.now();
     }
-    record.probeInFlight = false;
     this.records.set(model, record);
   }
 
@@ -200,7 +216,7 @@ export async function runCandidates<T>(deps: LadderDeps<T>): Promise<LadderResul
         return { ok: true, value: outcome.value };
       }
       failures.push(`${model}#${attempt} ${outcome.error}`);
-      deps.breaker.recordFailure(model);
+      deps.breaker.recordFailure(model, outcome.retryable);
 
       const canRetry = attempt < deps.maxAttempts && outcome.retryable && !deps.budget.aborted;
       if (!canRetry) {

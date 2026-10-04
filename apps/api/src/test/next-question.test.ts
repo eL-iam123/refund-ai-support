@@ -30,12 +30,15 @@ const ORDER: OrderRecord = {
 function input(overrides: {
   readonly order?: OrderRecord | null;
   readonly reportedItemIds?: readonly string[];
+  /** What `identifyOrder` resolved - a name or a tick the customer has given. */
+  readonly resolvedItemIds?: readonly string[];
   readonly customerText?: readonly string[];
   readonly askedText?: readonly string[];
 } = {}) {
   return {
     order: overrides.order === undefined ? ORDER : overrides.order,
     reportedItemIds: overrides.reportedItemIds ?? [],
+    resolvedItemIds: overrides.resolvedItemIds ?? [],
     customerText: overrides.customerText ?? [],
     askedText: overrides.askedText ?? [],
   };
@@ -56,6 +59,15 @@ describe('the next question removes exactly one unknown', () => {
     expect(question).toContain('$129.00');
     expect(question).toContain('Harbour Stoneware Mug');
     expect(question).toContain('$24.00');
+  });
+
+  it('does not ask which item when the customer has already named or ticked one', () => {
+    // The question they just answered, asked again. This is the tone problem the
+    // whole feature exists to avoid, and it is why the resolved lines travel with the
+    // question rather than being re-derived from the words.
+    const named = input({ resolvedItemIds: [LAMP.id], customerText: ['my lamp is damaged'] });
+    expect(nextMissingField(named)).not.toBe('item');
+    expect(questionForField('reason', named)).toMatch(/what has gone wrong/i);
   });
 
   it('does not ask which item when only one line is still open', () => {

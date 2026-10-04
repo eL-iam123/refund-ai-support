@@ -28,7 +28,12 @@ import { useAsyncData, Spinner } from './shop/hooks';
  * re-deriving what the machine already established.
  */
 export function LiveConversationsPage(): ReactNode {
-  const [selected, setSelected] = useState<StaffConversation | null>(null);
+  // Which conversation is open, by identity. Deliberately not the row itself: the
+  // list is re-fetched after every action and on every socket message, and a stored
+  // object is a snapshot that no refresh can update - so the case header would keep
+  // rendering the state from before the agent clicked, which is how "Take over"
+  // stayed on the button after it had worked.
+  const [open, setOpen] = useState<StaffConversation | null>(null);
   const [version, setVersion] = useState(0);
   const conversations = useAsyncData(
     () => api.staffConversations().then((result) => result.conversations),
@@ -40,12 +45,26 @@ export function LiveConversationsPage(): ReactNode {
   );
   // Hoisted out of the console because the case file renders in the sidebar and
   // the thread in the console; one read feeds both.
+  // The live row, read from the newest list rather than remembered - this is the one
+  // place the staleness showed, because the header's verbs come from it. A row that has
+  // gone from the list (the thread closed) leaves the case open on the case file,
+  // which is still readable, so the selection falls back to "open, no handoff".
+  const selected: StaffConversation | null =
+    open === null
+      ? null
+      : conversations.data?.find(
+          (row) => row.customerId === open.customerId && row.orderId === open.orderId,
+        ) ??
+        // The row is gone from the list - the thread closed between clicks. The case
+        // file is still readable, so the case stays open with no handoff.
+        ({ ...open, activeHandoff: null });
+
   const caseFile = useAsyncData<CaseDetail | null>(
     () =>
-      selected === null
+      open === null
         ? Promise.resolve(null)
-        : api.staffConversation(selected.customerId, selected.orderId).then((result) => result),
-    ['live-case', selected?.customerId ?? '', selected?.orderId ?? '', version],
+        : api.staffConversation(open.customerId, open.orderId).then((result) => result),
+    ['live-case', open?.customerId ?? '', open?.orderId ?? '', version],
   );
 
   useStaffConversationSocket(() => setVersion((v) => v + 1));
@@ -59,9 +78,8 @@ export function LiveConversationsPage(): ReactNode {
    * every socket message and a fresh object for the same case arrives each time.
    */
   const toggleCase = (row: StaffConversation): void => {
-    setSelected((current) =>
-      current !== null && conversationKey(current) === conversationKey(row) ? null : row,
-    );
+    const key = conversationKey(row);
+    setOpen((current) => (current !== null && conversationKey(current) === key ? null : row));
   };
 
   return (
@@ -79,7 +97,7 @@ export function LiveConversationsPage(): ReactNode {
           conversations={conversations}
           selected={selected}
           onSelect={toggleCase}
-          onClose={() => setSelected(null)}
+          onClose={() => setOpen(null)}
           detail={caseFile.data}
           error={caseFile.error}
         />
@@ -143,12 +161,7 @@ function Rail({
   if (selected === null || detail === null) {
     return (
       <aside className="live-rail">
-        <ConversationList
-          conversations={conversations}
-          selected={selected}
-          onSelect={onSelect}
-          active
-        />
+        <ConversationList conversations={conversations} selected={null} onSelect={onSelect} active />
       </aside>
     );
   }

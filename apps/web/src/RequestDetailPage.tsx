@@ -4,7 +4,7 @@ import type { RefundRequestDto } from '@refund/shared';
 import { api, type RequestDetail } from './api';
 import { DecisionBadge, ErrorNote, Loading, Panel } from './components';
 import { ModelClaim } from './detail/ModelClaim';
-import { OverrideForm } from './detail/OverrideForm';
+import { FulfilOutcome, OverrideForm } from './detail/OverrideForm';
 import { BlockedItems, Overruled } from './detail/Overruled';
 import { AuditLog, ModelCalls, Timings } from './detail/Provenance';
 import { RuleTrace } from './detail/RuleTrace';
@@ -82,6 +82,7 @@ function Drawer({ detail, onApplied }: { detail: RequestDetail; onApplied: () =>
       <Overruled request={request} />
       <BlockedItems request={request} />
       <OverrideForm request={request} onApplied={onApplied} />
+      <FulfilOutcome request={request} onFulfilled={onApplied} />
 
       <div className="two-col">
         <Timings request={request} />

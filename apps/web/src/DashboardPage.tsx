@@ -86,8 +86,35 @@ function Overview({ stats }: { stats: AdminStatsDto }): ReactNode {
           <Metric label="Human overrides" value={String(stats.humanOverrides)} />
           <Metric label="Average pipeline" value={`${stats.averageLatencyMs}ms`} />
         </div>
+        {/* The dangerous direction, on its own: a claim for money that came back
+            refused. A zero here is the number an operator wants to keep watching,
+            because it is where a resolver bug would show up as a payout. */}
+        <p className="muted small">
+          {stats.clampRate.modelSaidYesPolicySaidNo} claim{stats.clampRate.modelSaidYesPolicySaidNo === 1 ? '' : 's'} for
+          money were read and refused.
+        </p>
+        {modelsLine(stats)}
       </Panel>
     </>
+  );
+}
+
+/**
+ * What the models are doing, when the breaker has an opinion.
+ *
+ * Shown only when a circuit is not closed, because during normal operation it is
+ * all noise - and "the models are down" is exactly the thing that should be on this
+ * page the moment it becomes true.
+ */
+function modelsLine(stats: AdminStatsDto): ReactNode {
+  const tripped = stats.models.filter((model) => model.state !== 'closed');
+  if (tripped.length === 0) {
+    return null;
+  }
+  return (
+    <p className="muted small">
+      Out of rotation: {tripped.map((model) => `${model.model} (${model.state})`).join(', ')}.
+    </p>
   );
 }
 

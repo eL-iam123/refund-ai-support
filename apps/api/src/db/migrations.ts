@@ -695,6 +695,24 @@ const MIGRATIONS: readonly Migration[] = [
       db.exec('ALTER TABLE shop_dialogue ADD COLUMN assistant_offer_json TEXT');
     },
   },
+  {
+    version: 19,
+    name: 'refund_requests.ingest_notice',
+    up: (db) => {
+      if (!hasTable(db, 'refund_requests') || hasColumn(db, 'refund_requests', 'ingest_notice')) {
+        return;
+      }
+      // What the ladder had to do, in the words the customer was given.
+      //
+      // Nullable, and not derived on read: the answer depends on what happened while
+      // the request was in flight - a model that was unreachable, a retry that
+      // worked - and none of that survives in the row afterwards. Without it the
+      // customer is told "we could not read your message, so a person will" and the
+      // person reading the request has no way to know that, which is the wrong way
+      // round for the one party whose job is to read it.
+      db.exec('ALTER TABLE refund_requests ADD COLUMN ingest_notice TEXT');
+    },
+  },
 ];
 
 /**

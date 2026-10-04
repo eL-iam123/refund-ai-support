@@ -117,6 +117,33 @@ function useRowAction(refund: RefundDto, onChanged: () => void): {
   return { state, setReason: (next: string) => setState({ ...state, reason: next }), act };
 }
 
+/**
+ * Who moved the money, and why.
+ *
+ * The queue answers "what is waiting", so the person who has just paid needs to be
+ * able to answer "who did this" without leaving the page. A release is the one that
+ * really needs it: giving a reservation back is a decision somebody made and has to
+ * be accounted for.
+ */
+function resolution(refund: RefundDto): ReactNode {
+  if (refund.verifiedBy !== null && refund.settledAt !== null) {
+    return (
+      <small className="muted">
+        {'paid by '}
+        {refund.verifiedBy} on {new Date(refund.settledAt).toLocaleString()}
+      </small>
+    );
+  }
+  if (refund.verifiedAt !== null && refund.releasedAt !== null) {
+    return (
+      <small className="muted">
+        {'released' + (refund.releaseReason === null ? '' : `: ${refund.releaseReason}`)}
+      </small>
+    );
+  }
+  return null;
+}
+
 function Row({ refund, onChanged }: { refund: RefundDto; onChanged: () => void }): ReactNode {
   const { state, setReason, act } = useRowAction(refund, onChanged);
 
@@ -134,6 +161,7 @@ function Row({ refund, onChanged }: { refund: RefundDto; onChanged: () => void }
       </td>
       <td>
         <small className="muted">{new Date(refund.createdAt).toLocaleString()}</small>
+        {resolution(refund)}
       </td>
       <td>
         {/* Shown because this is the value a payment processor will be given.

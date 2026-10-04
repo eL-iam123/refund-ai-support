@@ -1,10 +1,11 @@
-import { type ReactNode } from 'react';
+import React, { useState, type ReactNode } from 'react';
 import { Route, Routes, useNavigate } from 'react-router-dom';
 import { ChatPage } from './ChatPage';
 import { DashboardPage } from './DashboardPage';
 import { AdminLayout, ShopperLayout } from './layouts';
 import { PolicyPage } from './PolicyPage';
 import { RefundsPage } from './RefundsPage';
+import { ReturnsPage } from './ReturnsPage';
 import { RequestDetailPage } from './RequestDetailPage';
 import { RequestsPage } from './RequestsPage';
 import { ScenariosPage } from './ScenariosPage';
@@ -35,7 +36,8 @@ import { Orders } from './shop/Orders';
  */
 export function App(): ReactNode {
   return (
-    <Routes>
+    <CrashBoundary>
+      <Routes>
       <Route element={<ShopperLayout />}>
         <Route path="/" element={<ShopRoute />} />
         <Route path="/cart" element={<CartRoute />} />
@@ -58,13 +60,71 @@ export function App(): ReactNode {
         <Route index element={<DashboardPage />} />
         <Route path="live" element={<LiveConversationsPage />} />
         <Route path="refunds" element={<RefundsPage />} />
+        <Route path="returns" element={<ReturnsPage />} />
         <Route path="requests" element={<RequestsPage />} />
         <Route path="requests/:id" element={<RequestDetailPage />} />
         <Route path="scenarios" element={<ScenariosPage />} />
         <Route path="policy" element={<PolicyPage />} />
       </Route>
-    </Routes>
+      </Routes>
+    </CrashBoundary>
   );
+}
+
+/**
+ * The last thing between a render fault and a blank page.
+ *
+ * Every list here reads a field off a record the server sent, so one unexpected
+ * shape - a column added, a field renamed, a null where a string was - used to
+ * throw during render and leave an operator staring at an empty white rectangle
+ * with no way forward except a refresh. That is the worst possible failure for the
+ * console: the person whose job is to fix things is the one who cannot see them.
+ *
+ * So a fault is caught, named, and made recoverable. It shows the error rather than
+ * swallowing it, because the alternative - a page that merely says "something went
+ * wrong" - is how a real bug gets reported as "the site is down".
+ */
+function CrashBoundary({ children }: { children: ReactNode }): ReactNode {
+  const [fault, setFault] = useState<Error | null>(null);
+
+  if (fault !== null) {
+    return (
+      <div className="app">
+        <main className="main">
+          <h1>This page could not be shown</h1>
+          <p className="lede">
+            Something on this page did not look the way it expected. Nothing has been lost - nothing
+            was saved - and reloading usually clears it.
+          </p>
+          <p className="mono small">{fault.message}</p>
+          <button type="button" onClick={(): void => globalThis.location.reload()}>
+            Reload
+          </button>
+        </main>
+      </div>
+    );
+  }
+
+  return <RenderTrap onFault={setFault}>{children}</RenderTrap>;
+}
+
+/**
+ * Catches what a descendant throws while rendering.
+ *
+ * A class, because `componentDidCatch` is the only way React offers to see an
+ * error thrown below you, and there is no hook equivalent.
+ */
+class RenderTrap extends React.Component<
+  { onFault: (error: Error) => void; children: ReactNode },
+  Record<string, never>
+> {
+  override componentDidCatch(error: Error): void {
+    this.props.onFault(error);
+  }
+
+  override render(): ReactNode {
+    return this.props.children;
+  }
 }
 
 /** How many of a given product are already in the cart. */

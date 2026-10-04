@@ -11,6 +11,41 @@ import { formatTime, truncate } from '../format';
  * panel shows both the claim and the verdict on the claim.
  */
 export function ModelClaim({ request }: { request: RefundRequestDto }): ReactNode {
+  return (
+    <>
+      <IngestNotice request={request} />
+      <ClaimBody request={request} />
+    </>
+  );
+}
+
+/**
+ * What intake had to do, when it had to do anything.
+ *
+ * The customer is told this in their reply - "we could not read your message, so a
+ * person will" - and the person who has to read it had no way to know. It is the one
+ * line that explains an escalation nobody could otherwise account for, so it sits
+ * above the claim rather than in a detail panel.
+ */
+function IngestNotice({ request }: { request: RefundRequestDto }): ReactNode {
+  if (request.ingestNotice === null) {
+    return null;
+  }
+  return (
+    <Panel title="Why this needed a person">
+      <p className="muted">The customer was told:</p>
+      <blockquote className="quote">{request.ingestNotice}</blockquote>
+      {request.llmCalled ? (
+        <p className="note">
+          The model was asked and nothing usable came back, so every rule below ran without a
+          claim to read.
+        </p>
+      ) : null}
+    </Panel>
+  );
+}
+
+function ClaimBody({ request }: { request: RefundRequestDto }): ReactNode {
   if (request.extraction === null) {
     return (
       <Panel title="Model claim">

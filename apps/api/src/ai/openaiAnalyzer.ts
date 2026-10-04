@@ -38,6 +38,31 @@ import type { OrderRecord } from '../db/records.js';
  */
 
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * Asks an OpenAI-compatible provider not to spend tokens on reasoning.
+ *
+ * Sent through `extra_body` because a chat-template argument is not an SDK
+ * parameter, and that option exists precisely for sending one anyway.
+ */
+const NO_THINKING = { chat_template_kwargs: { enable_thinking: false } };
+
+/** Derived from the client, so an SDK restructure cannot break it. */
+/**
+ * A non-streaming completion request, plus whatever the provider understands.
+ *
+ * The second half of the type is the point. `chat_template_kwargs` is a
+ * chat-template argument, not an SDK parameter - the SDK removed `extra_body` in v7
+ * and its request types do not model provider-specific fields - so the body is widened
+ * by exactly one index signature rather than cast at each call. Nothing here is
+ * `any`, and every provider-specific field we send goes through this one door.
+ */
+type CompletionRequest = Parameters<OpenAI['chat']['completions']['create']>[0];
+
+type CompletionReply = Omit<
+  Extract<Awaited<ReturnType<OpenAI['chat']['completions']['create']>>, { choices: readonly unknown[] }>,
+  '_request_id'
+> & { readonly _request_id?: string | null | undefined };
 const MAX_REPAIRS = 1;
 /** A failure message is for a human reading a drawer, not a log archive. */
 const MAX_ERROR_LENGTH = 500;
@@ -174,6 +199,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     this.label = preset.label;
     this.jsonMode = preset.jsonMode;
     this.candidates = modelCandidates(env);
+    this.breaker = new ModelCircuitBreaker(breakerConfig(env));
     this.model = this.candidates[0] ?? 'unknown';
     this.breaker = new ModelCircuitBreaker(breakerConfig(env));
     this.client = new OpenAI({
@@ -200,7 +226,13 @@ export class OpenAiAnalyzer implements AIAnalyzer {
    */
   async analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply> {
     const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const base = buildIntakeUser(input.message, input.order, input.history, this.env.AI_SHARE_ORDER_FACTS);
+    const base = buildIntakeUser(
+      input.message,
+      input.order,
+      input.history,
+      this.env.AI_SHARE_ORDER_FACTS,
+      input.allowedExits,
+    );
     let complaints = 'no completion';
 
     for (let repair = 0; repair <= MAX_REPAIRS; repair += 1) {
@@ -237,6 +269,47 @@ export class OpenAiAnalyzer implements AIAnalyzer {
         ? `intake time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
         : `model output failed schema validation: ${complaints}`,
     );
+  }
+
+  /**
+   * One completion, with thinking switched off where the provider honours it.
+   *
+   * A reasoning model spends its token budget thinking before it emits anything, and
+   * `max_tokens` covers both. Measured against one provider: a 27-token prompt drew
+   * 245 characters of reasoning for 7 tokens of JSON, and the full intake prompt drew
+   * reasoning alone - long enough that `finish_reason` came back `length`, which this
+   * adapter treats as unusable. Every claim escalated to a person, which looked
+   * exactly like the assistant being broken.
+   *
+   * A provider that rejects the extra field answers 400 and the call is retried once
+   * without it, so this is an optimisation that cannot break a deployment which has
+   * never heard of it.
+   */
+  private async createCompletion(body: CompletionRequest, budget: AbortSignal): Promise<CompletionReply> {
+    const withExtras = this.env.AI_DISABLE_THINKING
+      ? ({ ...body, ...NO_THINKING } as CompletionRequest)
+      : body;
+    try {
+      // The cast is at a third-party typing boundary and is deliberate:
+      // Both casts are at one third-party typing boundary and are deliberate.
+      // `chat_template_kwargs` is a provider chat-template argument, and the SDK's
+      // request types do not model provider-specific fields (v7 removed `extra_body`
+      // entirely), so widening the body to send it is unavoidable. The answer is
+      // narrowed back to the non-streaming shape: no call in this file streams, and
+      // the SDK's return type is a union with the streaming form, which under
+      // `exactOptionalPropertyTypes` will not accept the SDK's own declared
+      // `_request_id`.
+      //
+      // A provider that rejects the unknown field answers 400 and the call is retried
+      // immediately below without it, so this cannot break a deployment that has never
+      // heard of the argument.
+      return (await this.client.chat.completions.create(withExtras, { signal: budget })) as CompletionReply;
+    } catch (error: unknown) {
+      if (!this.env.AI_DISABLE_THINKING || !(error instanceof APIError) || error.status !== 400) {
+        throw error;
+      }
+      return (await this.client.chat.completions.create(body, { signal: budget })) as CompletionReply;
+    }
   }
 
   /**
@@ -287,7 +360,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
   ): Promise<Attempt> {
     const startedAt = Date.now();
     try {
-      const completion = await this.client.chat.completions.create(
+      const completion = await this.createCompletion(
         {
           model,
           temperature: 0,
@@ -298,7 +371,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
           ],
           ...(this.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
         },
-        { signal: budget },
+        budget,
       );
 
       const text = firstMessage(completion);

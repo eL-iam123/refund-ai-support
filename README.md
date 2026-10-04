@@ -189,8 +189,9 @@ pnpm --filter @refund/api token --agent alice --role admin   # or --role agent
 
 A small storefront on the *same SQLite database* as the refund engine, so buying
 something and then disputing it is one continuous story rather than two
-fixtures. `/shop` is served by the API in production, and proxies to the API in
-dev.
+fixtures. The storefront is served from `/` by the API in production (client-side
+routing sends every non-API path to the app's own `index.html`), and Vite proxies
+`/api` to it in development.
 
 - **Accounts** — register and sign in. Passwords are scrypt with a per-user salt;
   sessions are 256-bit random tokens stored only as SHA-256 hashes in an
@@ -209,21 +210,17 @@ dev.
 
 ### Who the customer is
 
-**`POST /api/chat/messages` takes a `customerId` in the body, and on its own it
-trusts it.** The endpoint is public so a customer can reach it from a plain web
-form, and there is no token on that route, so the id is a claim the customer
-makes about themselves. Anyone who knows or guesses a `CUST-*` id can read that
-customer's order history and refund history through the endpoint.
+**`POST /api/chat/messages` requires a `shop_session` cookie.** Without one it
+answers `401`; the `customerId` in the body is never consulted. The session *is*
+the identity, so a caller cannot become another customer by putting their id in
+the body — the body field exists so the storefront can be explicit about which
+conversation it is continuing, and it is overwritten from the session before
+anything reads it. `apps/api/src/http/routes/chat.ts` states the override in a
+comment so the next reader does not have to rediscover it.
 
-A valid `shop_session` cookie closes this for the storefront: the session's
-customer wins, and the id in the body is ignored. The shop footer says so, and
-`apps/api/src/http/routes/chat.ts` states the override in a comment so the next
-reader does not have to rediscover it.
-
-To close it properly, every caller needs a credential — put the chat endpoint
-behind authentication, or issue the session cookie to every entry point. Do not
-put a customer id in a query string or treat it as an identifier without
-meaning that someone can assert one. See "Known limits".
+A customer id is still never an identifier you may assert. The route, the order
+lookups and the refund history all key off the session's customer, so a guessed
+`CUST-*` id reaches nothing.
 
 ### The refund path, end to end
 
@@ -824,10 +821,14 @@ failed request.
 ## Testing
 
 ```
-648 API passed · 8 API skipped · 8 storefront passed
+pnpm verify      # typecheck, lint, and every test that needs no network
 ```
 
-The 8 API skips are the opt-in live provider suite, which stays dark unless
+The gate is the command rather than a figure in a README, because a figure here is
+wrong the moment anyone adds a test — and a stale count is worse than none, since it
+reads as a claim somebody checked.
+
+The API suite's skips are the opt-in live provider suite, which stays dark unless
 `LIVE_AI_TESTS=1`. The storefront suite runs in jsdom - the browser is part of what it
 tests, because "the request succeeded and the screen shows nothing" is a bug no backend
 assertion can see.
@@ -952,11 +953,9 @@ one is like this.
 
 ## Known limits
 
-- **`POST /api/chat/messages` trusts the `customerId` in the body.** It is public
-  by design, so a caller who knows a `CUST-*` id can see that customer's orders
-  and refund history. A `shop_session` cookie fixes it for the storefront and
-  overrides the body; nothing fixes it for an unauthenticated caller. This is the
-  first thing to fix before exposing the endpoint.
+- **The chat route is as safe as the shop session is.** It requires one, and the
+  body's `customerId` is ignored, so identity is only as strong as the session
+  cookie's signing. A caller without a session gets `401`.
 - The injection scanner misses translated and obfuscated attacks. Deliberate, asserted
   by S-18, and bounded by the resolver.
 - Escalation volume is a real operational cost that has to be staffed. The model can

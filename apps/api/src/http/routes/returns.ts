@@ -18,6 +18,8 @@ import {
   markReturnReceived,
   markReturnShipped,
   processReturn,
+  returnTransitions,
+  canDenyReturn,
   type ListReturnsFilters,
   type ReturnRecord,
   type ReturnStatus,
@@ -329,7 +331,17 @@ function registerReturnReadRoutes(
 
   app.get<{ Params: unknown }>('/api/admin/returns/:id', { preHandler: agent }, (request) => {
     const { id } = parseOr(ReturnIdParams.safeParse(request.params), 'return id');
-    return { return: existingOr404(ctx, id), items: listReturnItems(ctx.db, id) };
+    const record = existingOr404(ctx, id);
+    return {
+      return: record,
+      items: listReturnItems(ctx.db, id),
+      // Which moves are legal from here, published rather than restated in the UI.
+      // A page that keeps its own copy of this table drifts, and the drift shows up
+      // as a button that offers an illegal move - which is how a parcel gets marked
+      // received twice.
+      nextStates: returnTransitions(record.status),
+      canDeny: canDenyReturn(record.status),
+    };
   });
 
   app.get<{ Params: unknown }>('/api/admin/returns/by-request/:requestId', { preHandler: agent }, (request) => {

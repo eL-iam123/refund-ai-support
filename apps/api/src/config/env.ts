@@ -254,6 +254,21 @@ const EnvSchema = z.object({
    */
   AI_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.5),
   /**
+   * Ask the provider not to spend tokens on reasoning.
+   *
+   * On by default, because it is the difference between a usable token budget and an
+   * unusable one: a reasoning model spends `AI_MAX_TOKENS` thinking before emitting
+   * any JSON, and on a long intake prompt that alone overruns the cap - which is
+   * reported as a truncated reply, which this engine treats as no answer at all.
+   * Turn it off for a model that reasons usefully, or for a provider that rejects the
+   * argument (the adapter also retries once without it, so this is an optimisation
+   * rather than a requirement).
+   */
+  AI_DISABLE_THINKING: z
+    .enum(['true', 'false', '1', '0'])
+    .default('true')
+    .transform((value) => value === 'true' || value === '1'),
+  /**
    * How long a tripped model is left alone before one probe is let through.
    *
    * Thirty seconds: long enough that a burst of traffic during an outage does not

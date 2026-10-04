@@ -67,6 +67,7 @@ export function toRequestDto(row: PersistedRequest): RefundRequestDto {
     message: row.message,
     decision: toDecisionDto(row),
     responseText: row.responseText,
+    ingestNotice: row.ingestNotice,
     extraction: parseOrNull<ClaimExtractionDto>(row.extractionJson, 'extraction_json'),
     grounding: parseOrNull<GroundingDto>(row.groundingJson, 'grounding_json'),
     injection: parse<InjectionScanDto>(row.injectionJson, 'injection_json'),

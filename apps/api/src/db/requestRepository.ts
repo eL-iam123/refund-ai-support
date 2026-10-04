@@ -38,6 +38,14 @@ export interface NewRequestRow {
   readonly claimItemIdsJson?: string;
   readonly blockedItemsJson: string;
   readonly responseText: string;
+  /**
+   * What the ladder had to do, or null when it had to do nothing.
+   *
+   * Optional rather than nullable-and-required: a row written by a caller that never
+   * heard of intake still has a truthful answer - there was no ladder step - and the
+   * column defaults to NULL for exactly that reason.
+   */
+  readonly ingestNotice?: string | null | undefined;
   readonly extractionJson: string | null;
   readonly groundingJson: string | null;
   readonly injectionJson: string;
@@ -52,13 +60,13 @@ INSERT INTO refund_requests (
   id, created_at, customer_id, order_id, message, message_sha256, message_fingerprint,
   decision, refund_amount_cents, eligible_amount_cents, summary, policy_ref,
   trace_json, overrides_json, eligible_item_ids_json, claim_item_ids_json, blocked_items_json,
-  response_text, extraction_json, grounding_json, injection_json,
+  response_text, ingest_notice, extraction_json, grounding_json, injection_json,
   ai_mode, llm_called, timings_json, scenario_id
 ) VALUES (
   @id, @createdAt, @customerId, @orderId, @message, @messageSha256, @messageFingerprint,
   @decision, @refundAmountCents, @eligibleAmountCents, @summary, @policyRef,
   @traceJson, @overridesJson, @eligibleItemIdsJson, @claimItemIdsJson, @blockedItemsJson,
-  @responseText, @extractionJson, @groundingJson, @injectionJson,
+  @responseText, @ingestNotice, @extractionJson, @groundingJson, @injectionJson,
   @aiMode, @llmCalled, @timingsJson, @scenarioId
 )`;
 
@@ -69,6 +77,9 @@ export function insertRequest(db: Db, row: NewRequestRow): void {
   assertDecisionCoherent(row.decision, row.refundAmountCents);
   db.prepare(INSERT_SQL).run({
     ...row,
+    // A caller that never heard of intake has still answered truthfully: no ladder
+    // step ran, so there is nothing to report.
+    ingestNotice: row.ingestNotice ?? null,
     claimItemIdsJson: row.claimItemIdsJson ?? '[]',
     llmCalled: row.llmCalled ? 1 : 0,
   });
@@ -78,7 +89,7 @@ const SELECT_COLUMNS = `
   id, created_at, customer_id, order_id, message, message_sha256,
   decision, refund_amount_cents, eligible_amount_cents, summary, policy_ref,
   trace_json, overrides_json, eligible_item_ids_json, claim_item_ids_json, blocked_items_json,
-  response_text, extraction_json, grounding_json, injection_json,
+  response_text, ingest_notice, extraction_json, grounding_json, injection_json,
   ai_mode, llm_called, timings_json, overridden_by, override_note, scenario_id,
   (SELECT name FROM customers WHERE customers.id = refund_requests.customer_id) AS customer_name
 `;
@@ -103,6 +114,7 @@ interface RequestRow {
   readonly claim_item_ids_json: string;
   readonly blocked_items_json: string;
   readonly response_text: string;
+  readonly ingest_notice: string | null;
   readonly extraction_json: string | null;
   readonly grounding_json: string | null;
   readonly injection_json: string;
@@ -133,6 +145,7 @@ function hydrate(row: RequestRow): PersistedRequest {
     claimItemIdsJson: row.claim_item_ids_json,
     blockedItemsJson: row.blocked_items_json,
     responseText: row.response_text,
+    ingestNotice: row.ingest_notice,
     extractionJson: row.extraction_json,
     groundingJson: row.grounding_json,
     injectionJson: row.injection_json,

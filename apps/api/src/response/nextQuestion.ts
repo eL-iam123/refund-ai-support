@@ -37,6 +37,14 @@ export type MissingField = 'order' | 'item' | 'reason' | 'condition';
 export interface NextQuestionInput {
   /** The order the thread is about, or null when it has not been identified. */
   readonly order: OrderRecord | null;
+  /**
+   * The lines already resolved for this request.
+   *
+   * Without this the onion asks which item on an order where the customer has just
+   * named one, or ticked one - which is the question they have already answered. The
+   * resolution comes from `identifyOrder`, so it is a fact rather than a guess.
+   */
+  readonly resolvedItemIds: readonly string[];
   /** Lines already carrying a request or an open escalation. */
   readonly reportedItemIds: readonly string[];
   /** Everything the customer has said, oldest first, including the newest message. */
@@ -57,7 +65,10 @@ export function nextMissingField(input: NextQuestionInput): MissingField | null 
   if (input.order === null) {
     return 'order';
   }
-  if (candidateLines(input).length > 1) {
+  // Only while nothing is resolved. A customer who has named or ticked a line has
+  // answered this, and being asked again is the tone problem the whole feature
+  // exists to avoid.
+  if (input.resolvedItemIds.length === 0 && candidateLines(input).length > 1) {
     return 'item';
   }
   const said = input.customerText.join(' ');

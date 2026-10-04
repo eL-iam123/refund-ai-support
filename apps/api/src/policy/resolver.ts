@@ -10,7 +10,7 @@ import {
 } from '@refund/shared';
 import { assertAmountSane } from '../lib/assert.js';
 import { formatCents } from '../lib/money.js';
-import { settledCentsForOrder, pendingCentsForOrder } from '../db/refundLedger.js';
+import { pendingCentsForOrder, settledCentsForOrder } from '../db/refundLedger.js';
 import type { Db } from '../db/connection.js';
 import type { CustomerRecord, OrderRecord } from '../db/records.js';
 import type { DiscretionConfig } from '../config/env.js';
@@ -111,18 +111,20 @@ export function resolve(input: ResolveInput): RefundDecision {
   const gated = confidenceGate(baseDecision, concluded, input);
   const softened = applyDiscretion(gated.decision, gated.winner, evaluations, input);
   const decision = softened.decision;
-  const amount = amountFor(decision, input, softened.partialAmountCents);
+  const requested = amountFor(decision, input, softened.partialAmountCents);
+  const { decision: payable, amount, balanceNote } = settledAgainstBalance(decision, requested, input);
   const ceiling = ceilingOverride(input, amount);
   const overrides = [
     ...softened.overrides,
     ...gated.overrides,
-    ...reconcile(input, decision, amount, evaluations),
+    ...balanceNote,
+    ...reconcile(input, payable, amount, evaluations),
     ...ceiling,
   ];
   assertAmountSane(amount, input.orderTotalCents);
 
   return {
-    decision,
+    decision: payable,
     refundAmountCents: amount,
     eligibleAmountCents: input.gateResult.eligibleAmountCents,
     currency: 'USD',
@@ -357,6 +359,92 @@ function amountFor(decision: Decision, input: ResolveInput, partialAmountCents: 
     return partialAmountCents === null ? base : Math.min(partialAmountCents, base);
   }
   return 0;
+}
+
+/**
+ * What is still refundable on this order.
+ *
+ * The same arithmetic as R-06b, which asks whether anything is *left*; this asks
+ * how much. Duplicated deliberately rather than exported from the rule, because a
+ * rule returns an evaluation and this needs the figure - but both read the order's
+ * own count and the ledger, and both take the larger of the two so neither
+ * under-counts money that has already gone.
+ *
+ * Null when there is no order to count against, which is the case in most unit
+ * tests; the cap is then simply not applied.
+ */
+function remainingBalanceCents(input: ResolveInput): number | null {
+  if (input.order === null) {
+    return null;
+  }
+  const settled = Math.max(input.order.refundedCents, settledCentsForOrder(input.db, input.order.id));
+  const pending = pendingCentsForOrder(input.db, input.order.id);
+  // `orderTotalCents` rather than `order.totalCents`: it is the figure the rest of
+  // this file already treats as authoritative for "what was paid" - `assertAmountSane`
+  // bounds the amount by it and the ceiling is measured against it. Two sources for
+  // one fact is how a cap and a sanity check end up disagreeing about the same order.
+  return input.orderTotalCents - settled - pending;
+}
+
+/**
+ * An approval is capped to what is left to give back.
+ *
+ * Before this, the amount came from the claim alone: eligible, capped to the
+ * disputed lines. On an order that has already been partly refunded - a $100 order
+ * with $40 gone - a $100 claim produced a $100 authorisation, and the ledger then
+ * refused it. The customer saw a 409 with no request row, so a perfectly valid
+ * claim for the remaining $60 never reached the queue at all.
+ *
+ * Two outcomes, both visible:
+ *
+ *  - **Some remains.** The approval is reduced to it and reported as a partial
+ *    refund, because the customer asked for more than is coming and saying
+ *    "approved" for the smaller figure would be the wrong sentence for that.
+ *  - **Nothing remains.** The request escalates with a stated reason. It cannot
+ *    become an approval for $0.00, which reads as a success that moved no money.
+ */
+function settledAgainstBalance(
+  decision: Decision,
+  requested: number,
+  input: ResolveInput,
+): { decision: Decision; amount: number; balanceNote: readonly OverrideRecord[] } {
+  const none: readonly OverrideRecord[] = [];
+  const pays = decision === 'approved' || decision === 'partial_refund';
+  if (!pays) {
+    return { decision, amount: requested, balanceNote: none };
+  }
+
+  const remaining = remainingBalanceCents(input);
+  if (remaining === null) {
+    return { decision, amount: requested, balanceNote: none };
+  }
+
+  // Nothing left. Not an approval for $0.00, which reads as a success that moved no
+  // money - the customer believes they are done and the business is out of pocket.
+  if (remaining <= 0) {
+    return { decision: 'escalated', amount: 0, balanceNote: none };
+  }
+
+  if (requested <= remaining) {
+    return { decision, amount: requested, balanceNote: none };
+  }
+
+  // Reduced, not refused: the claim is valid and there is simply less left than the
+  // customer asked for, so the amount is reported as a reduction and the customer is
+  // told the remainder is not coming.
+  return {
+    decision: 'partial_refund',
+    amount: remaining,
+    balanceNote: [
+      {
+        code: 'amount_limited_to_remaining_balance',
+        detail:
+          `capped to ${formatCents(remaining)}, the amount still refundable on this order; ` +
+          `${formatCents(requested - remaining)} of the claim cannot be refunded`,
+        aiProposal: input.aiProposal,
+      },
+    ],
+  };
 }
 
 function capToDispute(input: ResolveInput): number {

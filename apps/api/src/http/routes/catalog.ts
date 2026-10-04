@@ -66,6 +66,7 @@ export function registerCatalogRoutes(app: FastifyInstance, ctx: AppContext): vo
       stats: adminStats(ctx.db, aiModeLabel(ctx.pipeline), {
         available: ctx.pipeline.analyzer.available,
         reason: ctx.pipeline.analyzer.unavailableReason,
+        models: ctx.pipeline.analyzer.breakerState?.() ?? [],
       }),
     };
   });

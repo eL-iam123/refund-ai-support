@@ -53,6 +53,7 @@ export const OVERRIDE_LABEL: Record<OverrideCode, string> = {
   ai_proposed_approve_clamped_to_deny: 'Approve clamped to deny',
   ai_proposed_approve_clamped_to_escalate: 'Approve clamped to escalate',
   amount_clamped_to_order_value: 'Amount clamped to order value',
+  amount_limited_to_remaining_balance: 'Capped to remaining balance',
   amount_limited_to_disputed_items: 'Limited to disputed items',
   amount_zeroed_on_deny: 'Amount zeroed on deny',
   amount_not_payable_until_reviewed: 'Escalated — not payable',

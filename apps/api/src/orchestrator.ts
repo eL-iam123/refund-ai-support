@@ -347,11 +347,11 @@ function unreadableFollowUp(
   const order = retrieval.order;
   const history = transcriptForOrder(db, input.customerId, order?.id ?? null, input.now, HISTORY_LIMIT);
   const facts = threadFacts(db, input.customerId, order, history, input.message);
-  const field = nextMissingField({ order, ...facts, askedText: assistantLines(history) });
+  const field = nextMissingField({ order, ...facts, resolvedItemIds: retrieval.found.items.map((i) => i.id), askedText: assistantLines(history) });
   if (field === null) {
     return null;
   }
-  const targeted = questionForField(field, { order, ...facts, askedText: assistantLines(history) });
+  const targeted = questionForField(field, { order, ...facts, resolvedItemIds: retrieval.found.items.map((i) => i.id), askedText: assistantLines(history) });
   if (targeted === null) {
     return null;
   }
@@ -666,21 +666,26 @@ async function analyseClaim(
   const history = transcriptForOrder(db, input.customerId, orderIdFor(order), input.now, HISTORY_LIMIT);
 
   const facts = threadFacts(db, input.customerId, order, history, input.message);
+  const resolvedItemIds = retrieval.found.items.map((item) => item.id);
 
-  const damageClarification = clarifyDamageReport(input.message, order, history, facts, log);
-  if (damageClarification !== null) {
-    return damageClarification;
-  }
-
-  const noComplaint = clarifyNoComplaint(input.message, order, history, facts, log);
-  if (noComplaint !== null) {
-    return noComplaint;
+  const askedFirst = clarifyBeforeIntake(input.message, order, history, facts, resolvedItemIds, log);
+  if (askedFirst !== null) {
+    return askedFirst;
   }
 
   let reply: IntakeReply;
   try {
     reply = await deps.analyzer.analyze(
-      { message: input.message, order: toAnalyzerOrder(order), history },
+      {
+        message: input.message,
+        order: toAnalyzerOrder(order),
+        history,
+        // The engine already knows whether the line is settled, so the picker is
+        // closed when it is: a model offered a door that leads nowhere will walk
+        // through it. Observed doing exactly that on a complaint that named both the
+        // item and the fault.
+        allowedExits: resolvedItemIds.length > 0 ? ['ask', 'decide'] : ['ask', 'ask_items', 'decide'],
+      },
       observer,
     );
   } catch (error: unknown) {
@@ -689,13 +694,7 @@ async function analyseClaim(
   }
 
   if (reply.kind === 'ask_items') {
-    // Withheld is a normal outcome, not a failure: the model's request is a hint
-    // and the conditions are the authority. A decline does *not* fall through to a
-    // claim, because there is no claim - the model asked rather than submitted
-    // one. So the request continues with none, which escalates to a person. That is
-    // the correct destination for an ambiguity the customer will not resolve.
-    const asked = offerItemPicker(reply, db, deps, input, gates, retrieval, intake, log);
-    return asked ?? NO_ANALYSIS;
+    return itemPickOrNextQuestion(reply, db, deps, input, gates, retrieval, history, intake, log);
   }
 
   if (reply.kind === 'question') {
@@ -707,7 +706,7 @@ async function analyseClaim(
       log.record('ai_analysis', 'discarded model question after an injection signal');
       return NO_ANALYSIS;
     }
-    return respondToQuestion(reply, order, history, facts, log);
+    return respondToQuestion(reply, order, history, facts, resolvedItemIds, log);
   }
 
   // Only the customer's side of the transcript is eligible evidence. The model
@@ -785,12 +784,134 @@ function offerItemPicker(
 /** The picker's caption. Deterministic: a model caption would be a second interface. */
 const ITEM_PICKER_CAPTION = 'Which item is this about? Pick one and I will check the policy for that item.';
 
+/**
+ * What to do when the model asks which item the claim is about.
+ *
+ * Withheld is a normal outcome, not a failure: the model's request is a hint and the
+ * conditions are the authority. But withholding the picker is not a reason to escalate.
+ * The customer may already have chosen the item - the picker is skipped precisely
+ * because they have - and then what is missing is the reason, which is a question and
+ * not a person. Escalating there meant a perfectly clear complaint ("it arrived
+ * cracked") was answered by summoning a human for a question the assistant could have
+ * asked itself.
+ *
+ * So: offer the picker when it is warranted, otherwise ask whatever is still missing,
+ * and only escalate when there is nothing left to ask.
+ */
+function itemPickOrNextQuestion(
+  reply: Extract<IntakeReply, { kind: 'ask_items' }>,
+  db: Db,
+  deps: PipelineDeps,
+  input: ProcessInput,
+  gates: GateResult,
+  retrieval: Retrieval,
+  history: readonly DialogueLine[],
+  intake: Intake,
+  log: StageLog,
+): AnalyseOutcome {
+  const offered = offerItemPicker(reply, db, deps, input, gates, retrieval, intake, log);
+  if (offered !== null) {
+    return offered;
+  }
+  const asked = askedClarifyingQuestion(
+    db,
+    input,
+    retrieval.order,
+    retrieval.found.items.map((item) => item.id),
+    history,
+    log,
+  );
+  if (asked !== null) {
+    return asked;
+  }
+
+  // Nothing for us to ask, but the model wanted to ask something, and there is no
+  // reason to override that with a page of policy. Its question goes through the same
+  // guard as any other and the customer is asked it. Escalating here meant a model
+  // that politely asked which item was involved could still produce a human being
+  // summoned instead - the opposite of asking before escalating.
+  if (intake.injection.detected) {
+    return NO_ANALYSIS;
+  }
+  return respondToQuestion(
+    { kind: 'question', question: `${PICKER_FALLBACK_QUESTION} ${reply.candidates.join(', ')}`.trim(), model: reply.model },
+    retrieval.order,
+    history,
+    threadFacts(db, input.customerId, retrieval.order, history, input.message),
+    retrieval.found.items.map((item) => item.id),
+    log,
+  );
+}
+
+/** Used when the model asked which item but the picker is not warranted. */
+const PICKER_FALLBACK_QUESTION = 'Is this about';
+
+/**
+ * The one question the thread is missing, or null when nothing is.
+ *
+ * The same derivation the picker uses, so a thread that was not offered a picker
+ * because the line was already known gets asked about the line's *fault* instead of
+ * being handed to a person. Deterministic, and refused if the thread has already
+ * asked it - the guard that stops the loop.
+ */
+function askedClarifyingQuestion(
+  db: Db,
+  input: ProcessInput,
+  order: OrderRecord | null,
+  resolvedItemIds: readonly string[],
+  history: readonly DialogueLine[],
+  log: StageLog,
+): AnalyseOutcome | null {
+  const facts = threadFacts(db, input.customerId, order, history, input.message);
+  const field = nextMissingField({ order, ...facts, resolvedItemIds, askedText: assistantLines(history) });
+  if (field === null) {
+    return null;
+  }
+  const question = questionForField(field, { order, ...facts, resolvedItemIds, askedText: assistantLines(history) });
+  if (question === null) {
+    return null;
+  }
+  return respondToQuestion(
+    { kind: 'question', question, model: 'deterministic-clarification-v1' },
+    order,
+    history,
+    facts,
+    // Everything already named is resolved scope, so the question must be about the
+    // fault rather than the line.
+    facts.reportedItemIds,
+    log,
+  );
+}
+
+/**
+ * The two deterministic floors, in the order they run.
+ *
+ * Both are questions the customer can answer without a model: a damage report with
+ * no observed condition, and a message that expresses no problem at all. They come
+ * before intake so the model is never consulted for a case where the answer is
+ * already known, which is what makes "the assistant asked" true of them.
+ */
+function clarifyBeforeIntake(
+  message: string,
+  order: OrderRecord | null,
+  history: readonly DialogueLine[],
+  facts: ThreadFacts,
+  resolvedItemIds: readonly string[],
+  log: StageLog,
+): AnalyseOutcome | null {
+  return (
+    clarifyDamageReport(message, order, history, facts, resolvedItemIds, log) ??
+    clarifyNoComplaint(message, order, history, facts, resolvedItemIds, log)
+  );
+}
+
 /** Keep a damage report without observed condition out of policy analysis. */
 function clarifyDamageReport(
   message: string,
   order: OrderRecord | null,
   history: readonly DialogueLine[],
   facts: ThreadFacts,
+  resolvedItemIds: readonly string[],
   log: StageLog,
 ): AnalyseOutcome | null {
   const question = clarifySparseDamage(message);
@@ -803,6 +924,7 @@ function clarifyDamageReport(
     order,
     history,
     facts,
+    resolvedItemIds,
     log,
   );
 }
@@ -813,6 +935,7 @@ function clarifyNoComplaint(
   order: OrderRecord | null,
   history: readonly DialogueLine[],
   facts: ThreadFacts,
+  resolvedItemIds: readonly string[],
   log: StageLog,
 ): AnalyseOutcome | null {
   if (!isNoComplaint(message)) {
@@ -824,6 +947,7 @@ function clarifyNoComplaint(
     order,
     history,
     facts,
+    resolvedItemIds,
     log,
   );
 }
@@ -872,12 +996,13 @@ function respondToQuestion(
   order: OrderRecord | null,
   history: readonly DialogueLine[],
   facts: ThreadFacts,
+  resolvedItemIds: readonly string[],
   log: StageLog,
 ): AnalyseOutcome {
   const refined = refineQuestion(reply.question, {
     orderResolved: order !== null,
     priorAssistantText: assistantLines(history),
-    next: { order, ...facts, askedText: assistantLines(history) },
+    next: { order, ...facts, resolvedItemIds, askedText: assistantLines(history) },
   });
   if (refined.kind === 'escalate') {
     log.record('ai_analysis', 'asked a question already asked; escalating to a person');

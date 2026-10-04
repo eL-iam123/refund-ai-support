@@ -1060,3 +1060,143 @@ describe('read-only catalog', () => {
     expect(response.json<ErrorBody>().error).toBe('not_found');
   });
 });
+
+describe('an admin can do what the system decides', () => {
+  /**
+   * The asymmetry this covers: the engine can reach six outcomes and authorise a
+   * partial amount, and the *form* could reach neither - choosing `partial_refund`
+   * was a 422, and reversing a denial was impossible because the acknowledgement the
+   * server requires had no control to tick. The engine being more capable than the
+   * person operating it is not a defensible state.
+   */
+  it('authorises a partial refund for an amount the admin names', async () => {
+    const fixture = scenario('S-01');
+    const created = (
+      await postChat({ customerId: fixture.customer.key, orderId: fixture.orderId, message: fixture.message })
+    ).json<CreatedResponse>();
+    expect(created.request.decision.decision).toBe('approved');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/requests/${created.request.id}/override`,
+      headers: { authorization: authHeader('admin') },
+      payload: { decision: 'partial_refund', amountCents: 2_500, note: 'goodwill on the smaller line' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const { request } = response.json<CreatedResponse>();
+    expect(request.decision.decision).toBe('partial_refund');
+    expect(request.decision.refundAmountCents).toBe(2_500);
+  });
+
+  it('refuses a partial refund with no figure rather than guessing one', async () => {
+    const fixture = scenario('S-01');
+    const created = (
+      await postChat({ customerId: fixture.customer.key, orderId: fixture.orderId, message: fixture.message })
+    ).json<CreatedResponse>();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/requests/${created.request.id}/override`,
+      headers: { authorization: authHeader('admin') },
+      payload: { decision: 'partial_refund', note: 'partial goodwill' },
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('records that an exchange was actually carried out, and tells the customer', async () => {
+    const fixture = scenario('S-01');
+    const created = (
+      await postChat({ customerId: fixture.customer.key, orderId: fixture.orderId, message: fixture.message })
+    ).json<CreatedResponse>();
+
+    // Make it an exchange, the way the discretion layer can.
+    const overridden = await app.inject({
+      method: 'POST',
+      url: `/api/requests/${created.request.id}/override`,
+      headers: { authorization: authHeader('admin') },
+      payload: { decision: 'exchange', note: 'replacement is quicker than a refund' },
+    });
+    expect(overridden.statusCode).toBe(200);
+
+    const fulfilled = await app.inject({
+      method: 'POST',
+      url: `/api/requests/${created.request.id}/fulfil`,
+      headers: { authorization: authHeader('admin') },
+      payload: { note: 'replacement shipped on Tuesday' },
+    });
+
+    expect(fulfilled.statusCode, fulfilled.body).toBe(200);
+    const { customerMessageId } = fulfilled.json<{ customerMessageId: string }>();
+    expect(customerMessageId).not.toBe('');
+
+    // The customer's own thread is where the promise was made, so the fulfilment is
+    // posted there rather than filed away in the audit chain alone. Read from the
+    // row rather than the endpoint: the storefront thread needs a shop session, and
+    // a test that had to mint one to see its own write would be testing the auth
+    // path too.
+    const updates = db
+      .prepare("SELECT kind, body FROM customer_updates WHERE request_id = ? AND kind = 'outcome_fulfilled'")
+      .all(created.request.id) as { kind: string; body: string }[];
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.body).toBe('replacement shipped on Tuesday');
+
+    // And the audit chain names who did it, because a fulfilment nobody can account
+    // for is the same problem an unexplained override is.
+    const audit = await app.inject({
+      method: 'GET',
+      url: `/api/requests/${created.request.id}`,
+      headers: { authorization: authHeader('admin') },
+    });
+    const detail = audit.json<{ audit: readonly { kind: string; detail: string }[] }>();
+    const event = detail.audit.find((entry) => entry.kind === 'outcome_fulfilled');
+    expect(event?.detail).toContain('replacement shipped on Tuesday');
+    expect(event?.detail).toContain('test-staff');
+  });
+
+  it('refuses a second fulfilment, because one of the two would be a lie', async () => {
+    const fixture = scenario('S-01');
+    const created = (
+      await postChat({ customerId: fixture.customer.key, orderId: fixture.orderId, message: fixture.message })
+    ).json<CreatedResponse>();
+    await app.inject({
+      method: 'POST',
+      url: `/api/requests/${created.request.id}/override`,
+      headers: { authorization: authHeader('admin') },
+      payload: { decision: 'store_credit', note: 'credit instead of a refund' },
+    });
+
+    const first = await app.inject({
+      method: 'POST',
+      url: `/api/requests/${created.request.id}/fulfil`,
+      headers: { authorization: authHeader('admin') },
+      payload: { note: 'credit applied' },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: `/api/requests/${created.request.id}/fulfil`,
+      headers: { authorization: authHeader('admin') },
+      payload: { note: 'applied again by mistake' },
+    });
+    expect(second.statusCode).toBe(409);
+  });
+
+  it('will not "fulfil" a money decision, which the ledger already owns', async () => {
+    const fixture = scenario('S-01');
+    const created = (
+      await postChat({ customerId: fixture.customer.key, orderId: fixture.orderId, message: fixture.message })
+    ).json<CreatedResponse>();
+    expect(created.request.decision.decision).toBe('approved');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/requests/${created.request.id}/fulfil`,
+      headers: { authorization: authHeader('admin') },
+      payload: { note: 'marked done' },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+});

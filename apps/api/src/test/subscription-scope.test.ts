@@ -125,11 +125,11 @@ describe('a mixed basket is not refused for its subscription line', () => {
       TEST_NOW,
     );
 
-    // A whole-basket claim on a two-line order is ambiguous, and ambiguity is now a
-    // question rather than an escalation: the assistant asks which line, naming both
-    // and their prices. Answering it the way the storefront's picker does - the
-    // customer's own `itemIds` - is the second half of this test, and the part that
-    // proves a subscription line does not poison the order.
+    // A whole-basket claim on a two-line order is ambiguous, and ambiguity is a
+    // question rather than an escalation. The whole sequence matters here, because it
+    // is the customer-facing defect this test now pins: ask which line, accept the
+    // customer's answer, then ask for the one thing still missing. Asking which line
+    // a second time - after they had just named it - would be the reported bug.
     const asked = await h.run({
       customerId: user.customerId,
       orderId: placed.id,
@@ -138,12 +138,26 @@ describe('a mixed basket is not refused for its subscription line', () => {
     expect(asked.stage).toBe('asked');
 
     const mugItemId = placed.items.find((item) => item.name !== 'Coffee Subscription (monthly)')?.itemId ?? '';
+
+    // The customer's answer, sent as their own `itemIds` exactly as the storefront's
+    // picker does. The next question must be about the fault, not the line.
+    const askedAgain = await h.run({
+      customerId: user.customerId,
+      orderId: placed.id,
+      itemIds: [mugItemId],
+      message: 'It is about the mug.',
+    });
+    expect(askedAgain.stage).toBe('asked');
+    expect(askedAgain.stage === 'asked' ? askedAgain.question : '').toMatch(/what has gone wrong/i);
+    expect(askedAgain.stage === 'asked' ? askedAgain.question : '').not.toMatch(/or a different one/i);
+
+    // Then the fault itself, which is the last thing the conversation needed.
     const result = decided(
       await h.run({
         customerId: user.customerId,
         orderId: placed.id,
         itemIds: [mugItemId],
-        message: 'It is about the mug.',
+        message: 'The handle is cracked.',
       }),
     );
 

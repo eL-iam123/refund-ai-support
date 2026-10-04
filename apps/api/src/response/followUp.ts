@@ -27,7 +27,9 @@ export type FollowUpKind =
   /** A reservation was given back without being paid. */
   | 'refund_withdrawn'
   /** The customer asked a person to look at a refusal again. */
-  | 'appeal_submitted';
+  | 'appeal_submitted'
+  /** An exchange or store credit was actually carried out. */
+  | 'outcome_fulfilled';
 
 export interface FollowUpFacts {
   readonly kind: FollowUpKind;

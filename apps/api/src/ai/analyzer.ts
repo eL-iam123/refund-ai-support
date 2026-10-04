@@ -65,7 +65,29 @@ export interface IntakeInput {
    * asked last turn is the customer's context for this turn.
    */
   readonly history: readonly DialogueLine[];
+  /**
+   * Which exits are genuinely open this turn. Undefined means all of them, which is
+   * what a caller that knows nothing about the thread should get.
+   */
+  readonly allowedExits?: readonly IntakeExit[];
 }
+
+/**
+ * The exits the model is allowed to take on a given turn.
+ *
+ * The engine knows what is already resolved before the model is consulted - which
+ * line the customer picked, what they have already said - and a model offered every
+ * exit will take the cheapest one. Observed against a live provider: a complaint that
+ * named both the item and the fault ("the mug arrived with a crack through the
+ * handle") came back as `ask_items` with no candidates, because asking which item was
+ * the least effortful reply available. That is not a model failure; it is offering a
+ * door that leads nowhere.
+ *
+ * So the caller closes the doors it has already answered and the model chooses only
+ * between the ones that are real. Narrowing the choice is what stops a clarification
+ * loop circling.
+ */
+export type IntakeExit = 'ask' | 'ask_items' | 'decide';
 
 /**
  * The model's request to ask the customer which line their claim is about.

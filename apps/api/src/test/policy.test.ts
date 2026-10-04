@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { openMemoryDatabase, type Db } from '../db/connection.js';
+import { seedDatabase } from '../db/seed.js';
+import { findOrder } from '../db/orderRepository.js';
+import { insertRequest, type NewRequestRow } from '../db/requestRepository.js';
+import { authoriseRefund, settleRefund } from '../db/refundLedger.js';
+import type { OrderRecord } from '../db/records.js';
+
 import {
   ALLOWED_OUTCOMES,
   PRECEDENCE,
@@ -23,7 +29,38 @@ import { scenarioHarness, scenario, decided, TEST_NOW } from './helpers.js';
 import { daysAgo } from '../db/seed.js';
 import { R03AmountAuthority } from '../policy/rules/R-03-amount-authority.js';
 import type { PolicyContext } from '../policy/types.js';
-import type { OrderRecord } from '../db/records.js';
+
+/** An already-approved request row, for the ledger to reserve against. */
+function approvedRequestRow(order: OrderRecord, amountCents: number, id: string): NewRequestRow {
+  const at = TEST_NOW.toISOString();
+  return {
+    id,
+    createdAt: at,
+    customerId: order.customerId,
+    customerName: 'Pat',
+    orderId: order.id,
+    message: 'the mug arrived cracked',
+    messageSha256: '1'.repeat(64),
+    messageFingerprint: '1'.repeat(64),
+    decision: 'approved',
+    refundAmountCents: amountCents,
+    eligibleAmountCents: amountCents,
+    summary: 'fixture',
+    policyRef: 'REFUND_POLICY.md §5.1',
+    traceJson: '[]',
+    overridesJson: '[]',
+    eligibleItemIdsJson: '[]',
+    blockedItemsJson: '[]',
+    responseText: 'fixture',
+    extractionJson: null,
+    groundingJson: null,
+    injectionJson: '{"detected":false,"signals":[],"obfuscationNoted":false}',
+    aiMode: 'fixture',
+    llmCalled: false,
+    timingsJson: '[]',
+    scenarioId: null,
+  };
+}
 
 /**
  * Invariants of the design, tested independently of the scenarios.
@@ -331,6 +368,117 @@ describe('INJECTION_ACTION', () => {
       }));
       expect(result.decision.decision, action).toBe('approved');
     }
+  });
+});
+
+describe('an approval is capped to what the order has left', () => {
+  /**
+   * The reported defect, exactly. A $100 order with $40 already refunded produced a
+   * $100 authorisation; the ledger then refused it, the customer saw a 409, no
+   * request row was written, and a valid claim for the remaining $60 never reached
+   * the queue. The ledger's transactional check was right - the *amount* was wrong.
+   */
+  function partlyRefunded(db: Db, refundedCents: number): {
+    readonly order: OrderRecord;
+    readonly gate: ReturnType<typeof fullGate>;
+  } {
+    seedDatabase(db, TEST_NOW);
+    const order = findOrder(db, 'CUST-AOKAFOR', 'ORD-1001', TEST_NOW);
+    if (order === null) {
+      throw new Error('the seeded order is missing');
+    }
+    expect(order.totalCents).toBe(10_000);
+
+    // A real settled refund rather than a hand-edited counter, so the balance is the
+    // one the ledger and the order row both agree on.
+    insertRequest(db, approvedRequestRow(order, refundedCents, `REQ-PAID-${refundedCents}`));
+    const reservation = authoriseRefund(db, {
+      requestId: `REQ-PAID-${refundedCents}`,
+      orderId: order.id,
+      customerId: order.customerId,
+      amountCents: refundedCents,
+      now: TEST_NOW,
+    });
+    settleRefund(db, reservation.id, 'alice@example.com', TEST_NOW);
+    return { order: findOrder(db, order.customerId, order.id, TEST_NOW) as OrderRecord, gate: fullGate(order) };
+  }
+
+  function fullGate(order: OrderRecord) {
+    return {
+      evaluations: [
+        {
+          ruleId: 'R-01' as const, ruleClass: 'eligibility' as const, scope: 'order' as const,
+          outcome: 'pass' as const, evidence: 'within window', policyRef: 'REFUND_POLICY.md §3.2', itemIds: [],
+        },
+      ],
+      eligibleItems: order.items,
+      blockedItems: [],
+      eligibleAmountCents: order.totalCents,
+      terminal: false,
+      decidingRuleId: null,
+    };
+  }
+
+  function approve(db: Db, order: OrderRecord) {
+    return resolve({
+      intakeEvaluations: [],
+      gateResult: fullGate(order),
+      reasonEvaluations: [evaluation({ ruleId: 'R-04', ruleClass: 'eligibility', outcome: 'approve' })],
+      grounding: { grounded: true, verifiedQuotes: ['it arrived cracked'], rejectedQuotes: [] },
+      aiProposal: null,
+      disputeCeilingCents: null,
+      db,
+      order,
+      customer: { id: order.customerId, name: 'Pat', email: 'pat@example.com', tier: 'standard', accountCreatedAt: new Date('2026-01-01T00:00:00.000Z'), accountAgeDays: 2000, priorRefundCount: 1, refundRequestsLast30Days: 0 },
+      orderTotalCents: order.totalCents,
+      orderId: order.id,
+      extraction: null,
+    });
+  }
+
+  it('reduces a claim to the remaining balance instead of failing the reservation', () => {
+    const db = openMemoryDatabase();
+    const { order } = partlyRefunded(db, 4_000);
+    expect(order.refundedCents).toBe(4_000);
+
+    const decision = approve(db, order);
+
+    // $60, not $100. The customer asked for the whole item; only what is left can go.
+    expect(decision.refundAmountCents).toBe(6_000);
+    // Reduced rather than refused, and reported as a reduction: an "approved" for
+    // the smaller figure would be the wrong sentence for a claim that asked for more.
+    expect(decision.decision).toBe('partial_refund');
+    expect(decision.overrides.map((override) => override.code)).toContain('amount_limited_to_remaining_balance');
+    db.close();
+  });
+
+  it('pays the whole claim when the order is untouched', () => {
+    // The cap must not quietly shrink ordinary approvals.
+    const db = openMemoryDatabase();
+    seedDatabase(db, TEST_NOW);
+    const order = findOrder(db, 'CUST-AOKAFOR', 'ORD-1001', TEST_NOW);
+    if (order === null) {
+      throw new Error('the seeded order is missing');
+    }
+
+    const decision = approve(db, order);
+    expect(decision.decision).toBe('approved');
+    expect(decision.refundAmountCents).toBe(10_000);
+    db.close();
+  });
+
+  it('never approves nothing when the balance is already gone', () => {
+    const db = openMemoryDatabase();
+    const { order } = partlyRefunded(db, 10_000);
+    expect(order.refundedCents).toBe(10_000);
+
+    const decision = approve(db, order);
+
+    // An approval for $0.00 is a success that moved no money: the customer believes
+    // they are done, and the business is out of pocket for nothing.
+    expect(decision.decision).not.toBe('approved');
+    expect(decision.refundAmountCents).toBe(0);
+    db.close();
   });
 });
 

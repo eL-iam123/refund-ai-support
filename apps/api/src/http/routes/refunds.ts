@@ -15,11 +15,13 @@ import {
   REFUND_STATUSES,
   type RefundRecord,
 } from '../../db/refundLedger.js';
-import { findRequestById } from '../../db/requestRepository.js';
+import { findRequestById, listAuditEvents } from '../../db/requestRepository.js';
+import type { PersistedRequest } from '../../db/records.js';
 import { recordCustomerUpdate } from '../../db/customerUpdates.js';
 import { followUpFor } from '../../response/followUp.js';
 import { toRefundDto } from '../serialize.js';
-import { ListAuditQuerySchema, type AuditChainDto, type RefundDto } from '@refund/shared';
+import { toRequestDto } from '../serialize.js';
+import { ListAuditQuerySchema, type AuditChainDto, type RefundDto, type RefundRequestDto } from '@refund/shared';
 
 /**
  * Flattens the chain verdict for the wire.
@@ -269,7 +271,90 @@ function registerRefundWriteRoutes(app: FastifyInstance, ctx: AppContext): void 
     const { id } = request.params as { id: string };
     return release(ctx, id, request.body);
   });
+
+  app.post<{ Params: unknown; Body: unknown }>(
+    '/api/requests/:id/fulfil',
+    { preHandler: admin },
+    (request) => {
+      const { id } = request.params as { id: string };
+      return fulfil(ctx, id, request.body, requirePrincipal(request.principal).subject);
+    },
+  );
 }
+
+/**
+ * Records that a non-money outcome has actually been carried out.
+ *
+ * An `exchange` or `store_credit` decision authorises nothing, so there is no
+ * reservation to settle and nothing in the money path knows the work still has to
+ * happen. Without this the system can decide a replacement and then have no record
+ * that it shipped - the outcome is terminal on paper and open in reality, which is
+ * the worst of both for the customer and for whoever has to answer them.
+ *
+ * So an admin says it is done, in their own words, and that becomes:
+ *
+ *  - a row in the audit chain, hashed like every other event, naming the staff
+ *    member rather than anything they typed;
+ *  - a message in the customer's thread, so the promise the decision text made -
+ *    "we will confirm the details here" - is visibly kept.
+ *
+ * Idempotent in the sense that matters: the second call is refused rather than
+ * duplicating, because two fulfilments of one outcome means one of them is a lie.
+ */
+function fulfil(
+  ctx: AppContext,
+  requestId: string,
+  body: unknown,
+  agentId: string,
+): { request: RefundRequestDto; customerMessageId: string } {
+  const parsed = FulfilBody.safeParse(body);
+  if (!parsed.success) {
+    throw badRequest('fulfilment note is required', parsed.error.issues.map((issue) => issue.message));
+  }
+  const row = findRequestById(ctx.db, requestId);
+  if (row === null) {
+    throw new NotFoundError('request', requestId);
+  }
+  if (row.decision !== 'exchange' && row.decision !== 'store_credit') {
+    throw badRequest(
+      `${row.decision} does not need fulfilling; only an exchange or store credit does`,
+    );
+  }
+
+  const already = listAuditEvents(ctx.db, requestId).find((event) => event.kind === 'outcome_fulfilled');
+  if (already !== undefined) {
+    throw conflict('already_fulfilled', 'this outcome has already been recorded as fulfilled');
+  }
+
+  const at = ctx.now().toISOString();
+  const message = recordCustomerUpdate(ctx.db, {
+    customerId: row.customerId,
+    orderId: row.orderId,
+    requestId,
+    kind: 'outcome_fulfilled',
+    body: parsed.data.note,
+    now: ctx.now(),
+  });
+  insertAuditEvent(
+    ctx.db,
+    requestId,
+    at,
+    'outcome_fulfilled',
+    `${row.decision} fulfilled by ${agentId}: ${parsed.data.note}`,
+  );
+
+  return {
+    request: toRequestDto(findRequestById(ctx.db, requestId) as PersistedRequest),
+    customerMessageId: message.id,
+  };
+}
+
+const FulfilBody = z.object({
+  note: z
+    .string()
+    .transform((value) => value.trim())
+    .pipe(z.string().min(1, 'say what was done - the customer is told this').max(2000)),
+});
 
 export function registerRefundRoutes(app: FastifyInstance, ctx: AppContext): void {
   registerRefundReadRoutes(app, ctx);
