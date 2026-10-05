@@ -4,13 +4,14 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom, type AttemptOutcome } from './breaker.js';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildIntakeUser, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
-import { AskItemsSchema, CompleteSchema, IntakeOutputSchema, type IntakeOutput } from './schemas.js';
+import { buildCaseSummaryUser, buildIntakeUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
+import { AskItemsSchema, CaseSummarySchema, CompleteSchema, IntakeOutputSchema, type IntakeOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
   type AIAnalyzer,
   type IntakeInput,
+  type CaseSummaryInput,
   type IntakeExit,
   type IntakeReply,
   type AttemptObserver,
@@ -50,6 +51,12 @@ import {
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 529]);
 const MAX_REPAIRS = 1;
+/** A case note is a paragraph. Asking for more spends the customer's latency on prose. */
+const CASE_SUMMARY_TOKENS = 220;
+
+function isNothingToAdd(text: string): boolean {
+  return text.toLowerCase() === 'nothing further to add.';
+}
 const MAX_ERROR_LENGTH = 500;
 const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -163,6 +170,65 @@ export class AnthropicAnalyzer implements AIAnalyzer {
         ? `intake time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
         : `model output failed schema validation: ${complaints}`,
     );
+  }
+
+  /**
+   * The case note, in one call, or null.
+   *
+   * The same contract as the other adapter, for the same reasons: one call, no ladder,
+   * no repair pass, and every failure returns null so a missing sentence can never fail
+   * a refund.
+   */
+  async summariseCase(input: CaseSummaryInput, observer: AttemptObserver): Promise<string | null> {
+    if (input.verifiedQuotes.length === 0) {
+      return null;
+    }
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const startedAt = Date.now();
+    const model = this.candidates[0] ?? 'unknown';
+    try {
+      const response = await fetch(`${this.baseUrl}/messages`, {
+        method: 'POST',
+        signal: budget,
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': ANTHROPIC_VERSION,
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: Math.min(this.env.AI_MAX_TOKENS, CASE_SUMMARY_TOKENS),
+          temperature: 0,
+          system: CASE_SUMMARY_SYSTEM,
+          messages: [{ role: 'user', content: buildCaseSummaryUser(input) }],
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = (await response.json()) as { content?: { type: string; text?: string }[] };
+      const text = (data.content ?? []).find((block) => block.type === 'text')?.text ?? '';
+      const parsed = CaseSummarySchema.safeParse(text);
+      if (!parsed.success || isNothingToAdd(parsed.data)) {
+        observer({
+          model, attempt: 1, ok: false, latencyMs: Date.now() - startedAt,
+          promptTokens: null, completionTokens: null, error: 'case summary rejected by validation',
+        });
+        return null;
+      }
+      observer({
+        model, attempt: 1, ok: true, latencyMs: Date.now() - startedAt,
+        promptTokens: null, completionTokens: null, error: null,
+      });
+      return parsed.data;
+    } catch (error: unknown) {
+      const failure = classify(error);
+      observer({
+        model, attempt: 1, ok: false, latencyMs: Date.now() - startedAt,
+        promptTokens: null, completionTokens: null, error: failure.error,
+      });
+      return null;
+    }
   }
 
   private async complete(

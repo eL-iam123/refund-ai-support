@@ -5,14 +5,15 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom } from './breaker.js';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildIntakeUser, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
-import { IntakeOutputSchema, type IntakeOutput } from './schemas.js';
+import { buildCaseSummaryUser, buildIntakeUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
+import { CaseSummarySchema, IntakeOutputSchema, type IntakeOutput } from './schemas.js';
 import type { AttemptOutcome } from './breaker.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
   type AIAnalyzer,
   type IntakeInput,
+  type CaseSummaryInput,
   type IntakeReply,
   type AnalyzerOrder,
   type AttemptObserver,
@@ -64,6 +65,18 @@ type CompletionReply = Omit<
   '_request_id'
 > & { readonly _request_id?: string | null | undefined };
 const MAX_REPAIRS = 1;
+/** A case note is a paragraph. Asking for more spends the customer's latency on prose. */
+const CASE_SUMMARY_TOKENS = 220;
+
+/**
+ * The documented "nothing worth adding".
+ *
+ * A model told it may reply with this will sometimes do so, and storing it verbatim
+ * would put a placeholder in every case file as though it were a real observation.
+ */
+function isNothingToAdd(text: string): boolean {
+  return text.toLowerCase() === 'nothing further to add.';
+}
 /** A failure message is for a human reading a drawer, not a log archive. */
 const MAX_ERROR_LENGTH = 500;
 
@@ -269,6 +282,59 @@ export class OpenAiAnalyzer implements AIAnalyzer {
         ? `intake time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
         : `model output failed schema validation: ${complaints}`,
     );
+  }
+
+  /**
+   * The case note, in one call, or null.
+   *
+   * No ladder and no repair pass: a summary is not worth a queue of provider attempts,
+   * and a provider that cannot manage one sentence is not a reason to spend the next.
+   * Every failure path returns null, because the alternative - throwing - would let a
+   * missing sentence fail a refund.
+   */
+  async summariseCase(input: CaseSummaryInput, observer: AttemptObserver): Promise<string | null> {
+    if (input.verifiedQuotes.length === 0) {
+      return null;
+    }
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const startedAt = Date.now();
+    try {
+      const completion = await this.createCompletion(
+        {
+          model: this.candidates[0] ?? 'unknown',
+          temperature: 0,
+          // A short paragraph, and a ceiling that makes "a short paragraph" enforceable
+          // rather than aspirational.
+          max_tokens: Math.min(this.env.AI_MAX_TOKENS, CASE_SUMMARY_TOKENS),
+          messages: [
+            { role: 'system', content: CASE_SUMMARY_SYSTEM },
+            { role: 'user', content: buildCaseSummaryUser(input) },
+          ],
+        },
+        budget,
+      );
+      const text = firstMessage(completion);
+      const parsed = CaseSummarySchema.safeParse(text);
+      if (!parsed.success || isNothingToAdd(parsed.data)) {
+        observer({
+          model: completion.model, attempt: 1, ok: false, latencyMs: Date.now() - startedAt,
+          promptTokens: null, completionTokens: null, error: 'case summary rejected by validation',
+        });
+        return null;
+      }
+      observer({
+        model: completion.model, attempt: 1, ok: true, latencyMs: Date.now() - startedAt,
+        promptTokens: null, completionTokens: null, error: null,
+      });
+      return parsed.data;
+    } catch (error: unknown) {
+      const failure = classifyProviderFailure(error);
+      observer({
+        model: this.model, attempt: 1, ok: false, latencyMs: Date.now() - startedAt,
+        promptTokens: null, completionTokens: null, error: failure.error,
+      });
+      return null;
+    }
   }
 
   /**

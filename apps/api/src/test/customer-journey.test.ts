@@ -506,3 +506,73 @@ describe('the questions peel, and the escalations explain themselves', () => {
     }
   });
 });
+
+describe('a selected item is not asked about again', () => {
+  /**
+   * The regression that made the onion look broken in the running app: a customer
+   * picks the mug, and the assistant asks whether it is about the mug or the coffee.
+   *
+   * The cause was the wrong set of lines reaching the question guard. The scope
+   * resolved for *this* request (the mug they just picked) is not the same thing as the
+   * lines carrying an earlier claim, and the guard was handed the latter - usually
+   * empty - so it believed the item was still unknown and replaced the reason question
+   * with the item question.
+   *
+   * Driven by a model that ignores the guidance and asks for the picker anyway, because
+   * the prompt telling it which exits are open is a request, not a guarantee. The
+   * server has to hold the line either way.
+   */
+  it('asks what happened, and keeps the selection, when the model asks for the picker', async () => {
+    const harness = await shopHarness({ kind: 'askItems', candidates: [], then: {} });
+    try {
+      const session = await signIn(harness, 'sam@shop.demo');
+      const bought = await harness.app.inject({
+        method: 'POST',
+        url: '/api/shop/checkout',
+        headers: { cookie: session.cookie },
+        payload: {
+          lines: [
+            { productId: 'PRD-COFFEE-01', quantity: 1 },
+            { productId: 'PRD-MUG-01', quantity: 1 },
+          ],
+        },
+      });
+      const order = bought.json<{ order: { id: string; items: readonly { itemId: string; name: string }[] } }>().order;
+      const mug = order.items.find((item) => item.name.includes('Mug'));
+      if (mug === undefined) {
+        throw new Error('the mug should be on the order just bought');
+      }
+
+      const sent = await harness.app.inject({
+        method: 'POST',
+        url: '/api/chat/messages',
+        headers: { cookie: session.cookie },
+        payload: {
+          customerId: session.customerId,
+          orderId: order.id,
+          itemIds: [mug.itemId],
+          message: 'It is about the mug.',
+        },
+      });
+
+      expect(sent.statusCode, sent.body).toBe(200);
+      const body = sent.json<{
+        question: string;
+        picker: unknown;
+        itemIds: readonly string[];
+      }>();
+
+      // The picker is correctly withheld - the line is known - and the question is
+      // about the fault rather than the line.
+      expect(body.picker).toBeNull();
+      expect(body.question).toMatch(/what has gone wrong|what was wrong/i);
+      // Naming either line is the regression: the question would be about *which* item.
+      expect(body.question).not.toMatch(/Aurora Desk Lamp|Harbour Stoneware Mug/);
+      // And the selection survives: it is the scope the answer will be decided against.
+      expect(body.itemIds).toEqual([mug.itemId]);
+    } finally {
+      await harness.app.close();
+      harness.db.close();
+    }
+  });
+});

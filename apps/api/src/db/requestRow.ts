@@ -47,6 +47,7 @@ export function rowFromDecision(args: {
     llmCalled: result.llmCalled,
     timingsJson: JSON.stringify(result.timings),
     scenarioId,
+    caseSummary: (result as { readonly caseSummary?: string | null }).caseSummary ?? null,
   };
 }
 

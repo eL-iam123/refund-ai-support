@@ -66,66 +66,65 @@ export interface HandoffBrief {
   readonly riskFlags: readonly { readonly label: string; readonly detail: string }[];
 }
 
-export function buildHandoffBrief(db: Db, customerId: string, orderId: string | null): HandoffBrief {
+function closedChat(
+  closure: ReturnType<typeof chatClosureForThread>,
+): { closedAt: string; closedBy: string; requestId: string } | null {
+  return closure === null ? null : { closedAt: closure.closedAt, closedBy: closure.closedBy, requestId: closure.requestId };
+}
+
+/** The identity and handoff half of the brief: who this is and who has it. */
+function identity(
+  db: Db,
+  customerId: string,
+  active: ActiveHandoff | null,
+  closure: ReturnType<typeof chatClosureForThread>,
+): Pick<HandoffBrief, 'state' | 'customerName' | 'agentId' | 'unattended' | 'since' | 'chatClosed'> {
   const nameRow = db
     .prepare('SELECT name FROM customers WHERE id = ?')
     .get(customerId) as { readonly name: string } | undefined;
-
-  const active = activeHandoffForCustomer(db, customerId);
-  const thread = threadForStaff(db, customerId, orderId, 200);
-  const latest = latestRequestForThread(db, customerId, orderId);
-  const latestView = latest === null ? null : decodeLatest(latest);
-  const closure = chatClosureForThread(db, customerId, orderId);
-  const canCloseChat = closure === null && finalizedRequestId(db, customerId, orderId) !== null;
-
-  const conversation = collectCase(thread);
-
   return {
-    state: stateFor(active),
-    customerId,
-    customerName: customerNameFor(nameRow),
-    orderId,
-    agentId: agentIdFor(active),
+    state: active === null ? 'ai' : 'handed_off',
+    customerName: nameRow?.name ?? 'Unknown customer',
+    agentId: active?.agentId ?? null,
     unattended: active?.unattended ?? false,
-    since: sinceFor(active),
-    chatClosed: closure === null ? null : { closedAt: closure.closedAt, closedBy: closure.closedBy, requestId: closure.requestId },
-    canCloseChat,
-    handoffReason: handoffReasonFor(active, latest),
-    whatTheySaid: conversation.whatTheySaid,
-    dialogue: conversation.dialogue,
-    echoedEvidence: echoedEvidenceFor(latestView),
-    claim: claimFor(latestView),
-    policyTrail: policyTrailFor(latestView),
-    riskFlags: riskFlagsFor(conversation.asked, latestView),
+    since: active?.startedAt ?? null,
+    chatClosed: closedChat(closure),
   };
 }
 
-function stateFor(active: ActiveHandoff | null): HandoffBrief['state'] {
-  return active === null ? 'ai' : 'handed_off';
+/** The decision half: what was claimed, which rules ran, and what is risky. */
+function decision(
+  latestView: ReturnType<typeof decodeLatest> | null,
+  asked: readonly string[],
+): Pick<
+  HandoffBrief,
+  'echoedEvidence' | 'claim' | 'policyTrail' | 'riskFlags'
+> {
+  return {
+    echoedEvidence: latestView?.grounding?.verifiedQuotes ?? [],
+    claim: latestView === null ? null : claimFrom(latestView),
+    policyTrail: latestView === null ? [] : policyTrailFrom(latestView),
+    riskFlags: riskFlagsFor(asked, latestView),
+  };
 }
 
-function customerNameFor(nameRow: { readonly name: string } | undefined): string {
-  return nameRow?.name ?? 'Unknown customer';
-}
+export function buildHandoffBrief(db: Db, customerId: string, orderId: string | null): HandoffBrief {
+  const active = activeHandoffForCustomer(db, customerId);
+  const closure = chatClosureForThread(db, customerId, orderId);
+  const conversation = collectCase(threadForStaff(db, customerId, orderId, 200));
+  const latest = latestRequestForThread(db, customerId, orderId);
+  const latestView = latest === null ? null : decodeLatest(latest);
 
-function agentIdFor(active: ActiveHandoff | null): string | null {
-  return active?.agentId ?? null;
-}
-
-function sinceFor(active: ActiveHandoff | null): string | null {
-  return active?.startedAt ?? null;
-}
-
-function echoedEvidenceFor(latestView: LatestView | null): readonly string[] {
-  return latestView?.grounding?.verifiedQuotes ?? [];
-}
-
-function claimFor(latestView: LatestView | null): HandoffBrief['claim'] {
-  return latestView === null ? null : claimFrom(latestView);
-}
-
-function policyTrailFor(latestView: LatestView | null): HandoffBrief['policyTrail'] {
-  return latestView === null ? [] : policyTrailFrom(latestView);
+  return {
+    customerId,
+    orderId,
+    ...identity(db, customerId, active, closure),
+    canCloseChat: closure === null && finalizedRequestId(db, customerId, orderId) !== null,
+    handoffReason: handoffReasonFor(active, latest),
+    whatTheySaid: conversation.whatTheySaid,
+    dialogue: conversation.dialogue,
+    ...decision(latestView, conversation.asked),
+  };
 }
 
 /** The customer's own words and the asks that drew them out, from the thread. */
@@ -199,7 +198,7 @@ function riskFlagsFor(
 
 function claimFrom(latestView: LatestView): HandoffBrief['claim'] {
   return {
-    summary: latestView.summary,
+    summary: latestView.caseSummary ?? latestView.summary,
     decision: latestView.decision,
     refundAmountCents: latestView.refundAmountCents,
     reasonCodes: latestView.trace
@@ -216,6 +215,7 @@ function policyTrailFrom(latestView: LatestView): HandoffBrief['policyTrail'] {
 }
 
 interface LatestView {
+  readonly caseSummary: string | null;
   readonly summary: string;
   readonly decision: string;
   readonly refundAmountCents: number;
@@ -237,6 +237,7 @@ function decodeLatest(request: PersistedRequest): LatestView {
   );
   return {
     summary: request.summary,
+    caseSummary: request.caseSummary,
     decision: request.decision,
     refundAmountCents: request.refundAmountCents,
     extraction: decodeNullable<ClaimExtractionDto>(request.extractionJson, 'extraction_json'),

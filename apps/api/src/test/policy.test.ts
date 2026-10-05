@@ -480,6 +480,78 @@ describe('an approval is capped to what the order has left', () => {
     expect(decision.refundAmountCents).toBe(0);
     db.close();
   });
+
+describe('a balance-capped decision describes itself correctly', () => {
+/**
+ * The summary is read by a customer and by whoever picks the case up, and it used to
+ * describe the decision *before* the balance cap: "Approved under R-04 ... $0.00"
+ * sitting next to a decision of escalated. A record that contradicts itself in the one
+ * field both audiences read is worse than no summary.
+ *
+ * Both branches that move the amount now say why, in the summary as well as in the
+ * audit override.
+ */
+  it('says it was reduced, not approved, when the balance caps the amount', () => {
+    const db = openMemoryDatabase();
+    const order = partlyRefunded(db, 4_000).order;
+    const decision = resolve({
+      intakeEvaluations: [],
+      gateResult: fullGate(order),
+      reasonEvaluations: [evaluation({ ruleId: 'R-04', ruleClass: 'eligibility', outcome: 'approve' })],
+      grounding: { grounded: true, verifiedQuotes: ['it arrived cracked'], rejectedQuotes: [] },
+      aiProposal: null,
+      disputeCeilingCents: null,
+      db,
+      order,
+      customer: { id: 'CUST-PART-1', name: 'Pat', email: 'pat@example.com', tier: 'standard', accountCreatedAt: new Date('2026-01-01T00:00:00.000Z'), accountAgeDays: 2000, priorRefundCount: 1, refundRequestsLast30Days: 0 },
+      orderTotalCents: order.totalCents,
+      orderId: order.id,
+      extraction: null,
+    });
+
+  expect(decision.decision).toBe('partial_refund');
+  expect(decision.refundAmountCents).toBe(6_000);
+  // The summary names the decision that was actually reached...
+  expect(decision.summary).toMatch(/partially/i);
+  expect(decision.summary).not.toMatch(/^Approved/);
+  // ...the amount it authorised...
+  expect(decision.summary).toContain(formatCents(6_000));
+  // ...and why it was not more.
+  expect(decision.summary).toMatch(/still refundable|left to refund/i);
+  db.close();
+});
+
+  it('says nothing is left, when the balance is already gone', () => {
+    // The whole order value has been refunded, so a later claim has nothing to draw
+    // on. The ledger refusing to reserve is the safety net working; what is under test
+    // here is that the *summary* says so, rather than claiming an approval.
+    const db = openMemoryDatabase();
+    const { order } = partlyRefunded(db, 10_000);
+    expect(order.refundedCents).toBe(10_000);
+
+    const decision = resolve({
+      intakeEvaluations: [],
+      gateResult: fullGate(order),
+      reasonEvaluations: [evaluation({ ruleId: 'R-04', ruleClass: 'eligibility', outcome: 'approve' })],
+      grounding: { grounded: true, verifiedQuotes: ['it arrived cracked'], rejectedQuotes: [] },
+      aiProposal: null,
+      disputeCeilingCents: null,
+      db,
+      order,
+      customer: { id: 'CUST-AOKAFOR', name: 'Pat', email: 'pat@example.com', tier: 'standard', accountCreatedAt: new Date('2026-01-01T00:00:00.000Z'), accountAgeDays: 2000, priorRefundCount: 1, refundRequestsLast30Days: 0 },
+      orderTotalCents: order.totalCents,
+      orderId: order.id,
+      extraction: null,
+    });
+
+    expect(decision.decision).toBe('escalated');
+    expect(decision.refundAmountCents).toBe(0);
+    expect(decision.summary).not.toMatch(/^Approved/);
+    expect(decision.summary).toMatch(/nothing left to refund|refunded or reserved/i);
+    expect(decision.overrides.map((override) => override.code)).toContain('amount_limited_to_remaining_balance');
+    db.close();
+  });
+});
 });
 
 describe('resolver clamps', () => {

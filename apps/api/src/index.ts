@@ -1,8 +1,11 @@
 import { readEnv, isAiRequired, missingApiKeyFor, type Env } from './config/env.js';
-import { openDatabase } from './db/connection.js';
+import { openDatabase, type Db } from './db/connection.js';
 import { createLogger } from './lib/logger.js';
 import { buildApp } from './http/app.js';
 import { seedCatalogue } from './shop/seed.js';
+import { DEMO_EMAIL, seedDemoData, type SeededDemo } from './db/demoSeed.js';
+import type { PipelineDeps } from './orchestrator.js';
+import { buildPipelineDeps } from './http/context.js';
 import { purgeExpiredSessions } from './shop/auth.js';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +53,19 @@ async function main(): Promise<void> {
     log.info({ expired }, 'shop.sessions.purged');
   }
 
+  // Synthetic activity for a reviewer, on by default in the compose stack and off
+  // everywhere else. Every seeded claim is decided by the real pipeline, so the audit
+  // trail is genuine - which also means that without a model they all escalate, and the
+  // boot log says so rather than letting the reviewer conclude the AI is broken.
+  const demoPipeline = buildPipelineDeps(env, db);
+  const seeded = await seedDemoIfAsked(env, db, demoPipeline, log);
+  if (seeded !== null) {
+    log.info(
+      { ...seeded, demoEmail: DEMO_EMAIL, aiAvailable: demoPipeline.analyzer.available },
+      'demo.seeded',
+    );
+  }
+
   const app = buildApp({ env, db, staticDir: webDistDir() });
 
   const shutdown = (signal: string): void => {
@@ -69,6 +85,7 @@ async function main(): Promise<void> {
     throw portInUseError(error, env);
   }
   log.info({ port: env.API_PORT, ai: `${env.AI_PROVIDER}` }, 'server.listening');
+  logQuickPath(env);
 }
 
 /**
@@ -116,3 +133,66 @@ main().catch((error: unknown) => {
   process.stderr.write(`fatal: ${error instanceof Error ? error.stack : String(error)}\n`);
   process.exit(1);
 });
+
+/**
+ * The demo seed, when it has been asked for.
+ *
+ * Returns null when it is off, so boot logs one line rather than one line per reason
+ * it did nothing.
+ */
+/**
+ * Where to look, in one line, printed on boot.
+ *
+ * A reviewer who has to guess a URL or read a thousand-line README to find the staff
+ * console has already decided the product is hard to run. The password is printed
+ * only when it is the demo one - an operator's real password must never reach a log,
+ * however convenient that would be.
+ */
+function logQuickPath(env: Env): void {
+  const log = createLogger(env.LOG_LEVEL);
+  const port = env.API_PORT;
+  const isDemo = env.ADMIN_PASSWORD === 'refund-desk-demo';
+  log.info(
+    {
+      store: `http://localhost:${port}/`,
+      staff: `http://localhost:${port}/admin`,
+      adminUser: env.ADMIN_USERNAME === '' ? null : env.ADMIN_USERNAME,
+      // Only ever the demo password. A real one is not printed.
+      adminPassword: isDemo && env.ADMIN_PASSWORD !== '' ? env.ADMIN_PASSWORD : null,
+      model: env.AI_PROVIDER,
+      modelReady: isAiRequired(env) ? false : true,
+    },
+    'quickstart',
+  );
+  if (!isAiRequired(env)) {
+    log.warn(
+      { hint: 'set NVIDIA_API_KEY (or any provider key) in .env and restart' },
+      'quickstart.no-model: claims will escalate to a person, which is correct but looks like a broken assistant',
+    );
+  }
+}
+
+async function seedDemoIfAsked(
+  env: Env,
+  db: Db,
+  pipeline: PipelineDeps,
+  log: { info: (fields: object, message: string) => void; warn: (fields: object, message: string) => void },
+): Promise<SeededDemo | null> {
+  if (!env.SEED_DEMO_DATA) {
+    return null;
+  }
+  try {
+    const seeded = await seedDemoData(db, pipeline, new Date());
+    if (seeded.requests > 0 && !pipeline.analyzer.available) {
+      log.warn(
+        { ...seeded },
+        'demo.seeded.but.no-model: every seeded claim escalated because no model is configured. ' +
+          'Set NVIDIA_API_KEY (or any provider key) and restart to see real decisions.',
+      );
+    }
+    return seeded;
+  } catch (error: unknown) {
+    log.warn({ reason: error instanceof Error ? error.message : String(error) }, 'demo.seed.failed');
+    return null;
+  }
+}

@@ -2,6 +2,7 @@ import type { ClaimExtraction } from '@refund/shared';
 import {
   AiUnavailableError,
   type AIAnalyzer,
+  type CaseSummaryInput,
   type IntakeInput,
   type IntakeReply,
   type AttemptObserver,
@@ -91,6 +92,7 @@ function fixedAnalyzer(behaviour: { readonly extraction: Partial<ClaimExtraction
       recordOk(observer, 'fake-fixed-v1');
       return Promise.resolve(completeReply(extraction, 'fake-fixed-v1'));
     },
+    summariseCase: fakeCaseNote,
     chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       observer({
         model: 'fake-fixed-v1',
@@ -135,6 +137,7 @@ function askItemsAnalyzer(behaviour: {
       }
       return Promise.resolve(completeReply(extraction, 'fake-ask-items-v1'));
     },
+    summariseCase: fakeCaseNote,
     chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       observer({
         model: 'fake-ask-items-v1',
@@ -184,6 +187,7 @@ function askAnalyzer(behaviour: {
       }
       return Promise.resolve(completeReply(extraction, 'fake-ask-v1'));
     },
+    summariseCase: fakeCaseNote,
     chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       observer({
         model: 'fake-ask-v1',
@@ -209,11 +213,30 @@ function unavailableAnalyzer(message: string): AIAnalyzer {
       recordOk(observer, 'fake-unavailable-v1');
       return Promise.reject(new AiUnavailableError(message));
     },
+    summariseCase: fakeCaseNote,
     chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       recordOk(observer, 'fake-unavailable-v1');
       return Promise.reject(new AiUnavailableError(message));
     },
   };
+}
+
+/**
+ * The case note every fake writes.
+ *
+ * Deterministic, from the verified quotes, so a test that stores one can assert on it
+ * without a model.
+ *
+ * It deliberately reports **no attempt**. A real adapter records the call - that is the
+ * audit trail, and a provider call that is not recorded is a call nobody can account
+ * for - but a fake is not a provider, and counting its local note as a model call made
+ * `analyzerCalls()` stop meaning "intake calls", which is what the scenario fixtures
+ * assert on.
+ */
+function fakeCaseNote(input: CaseSummaryInput): Promise<string | null> {
+  return Promise.resolve(
+    input.verifiedQuotes.length === 0 ? null : `Case note: customer said "${input.verifiedQuotes[0]}".`,
+  );
 }
 
 function recordOk(observer: AttemptObserver, model: string): void {

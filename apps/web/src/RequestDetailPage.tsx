@@ -73,6 +73,16 @@ function Drawer({ detail, onApplied }: { detail: RequestDetail; onApplied: () =>
       </Panel>
 
       <IntegritySignals request={request} />
+      {/*
+        The case note leads, and it is agent-only on purpose. It is prose written by a
+        model, so the rules that decided this sit directly beneath it - the sentence is
+        for orientation, never a substitute for the trail an auditor reads.
+      */}
+      {request.caseSummary === null ? null : (
+        <Panel title="Case note">
+          <p className="lede">{request.caseSummary}</p>
+        </Panel>
+      )}
       <ModelClaim request={request} />
 
       <Panel title="Rules">

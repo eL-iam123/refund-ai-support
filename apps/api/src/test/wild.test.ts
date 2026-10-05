@@ -488,6 +488,9 @@ function hostileAnalyzer(reply: IntakeReply): AIAnalyzer {
     model: 'hostile-v1',
     available: true,
     unavailableReason: null,
+    summariseCase(): Promise<string | null> {
+      return Promise.resolve(null);
+    },
     analyze(_input, observer: AttemptObserver): Promise<IntakeReply> {
       observer({
         model: 'hostile-v1', attempt: 1, ok: true, latencyMs: 0,
@@ -579,6 +582,10 @@ function deadAnalyzer(): AIAnalyzer {
     model: 'dead-v1',
     available: true,
     unavailableReason: null,
+    summariseCase(): Promise<string | null> {
+      // A dead provider writes no case note, which is the documented null case.
+      return Promise.resolve(null);
+    },
     analyze(): Promise<IntakeReply> {
       return Promise.reject(new AiUnavailableError('503 from the provider'));
     },

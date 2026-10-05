@@ -112,7 +112,7 @@ export function resolve(input: ResolveInput): RefundDecision {
   const softened = applyDiscretion(gated.decision, gated.winner, evaluations, input);
   const decision = softened.decision;
   const requested = amountFor(decision, input, softened.partialAmountCents);
-  const { decision: payable, amount, balanceNote } = settledAgainstBalance(decision, requested, input);
+  const { decision: payable, amount, balanceNote, balanceWhy } = settledAgainstBalance(decision, requested, input);
   const ceiling = ceilingOverride(input, amount);
   const overrides = [
     ...softened.overrides,
@@ -128,7 +128,11 @@ export function resolve(input: ResolveInput): RefundDecision {
     refundAmountCents: amount,
     eligibleAmountCents: input.gateResult.eligibleAmountCents,
     currency: 'USD',
-    summary: summarise(decision, gated.winner, input, amount, softened.applied),
+    // From `payable`, not from the decision the rules reached. When the balance caps
+    // the amount, the two differ, and a summary that described the *pre-cap* decision
+    // read "Approved under R-04 ... $0.00" next to a decision of escalated - a record
+    // that contradicts itself, in the field a customer and an auditor both read.
+    summary: summarise(payable, gated.winner, input, amount, softened.applied, balanceWhy),
     policyRef: concluded?.policyRef ?? 'REFUND_POLICY.md §9',
     trace: evaluations,
     overrides,
@@ -407,26 +411,47 @@ function settledAgainstBalance(
   decision: Decision,
   requested: number,
   input: ResolveInput,
-): { decision: Decision; amount: number; balanceNote: readonly OverrideRecord[] } {
+): {
+  decision: Decision;
+  amount: number;
+  balanceNote: readonly OverrideRecord[];
+  /** Why the amount moved, in a sentence a customer can read. Null when it did not. */
+  balanceWhy: string | null;
+} {
   const none: readonly OverrideRecord[] = [];
+  const unchanged: null = null;
   const pays = decision === 'approved' || decision === 'partial_refund';
   if (!pays) {
-    return { decision, amount: requested, balanceNote: none };
+    return { decision, amount: requested, balanceNote: none, balanceWhy: unchanged };
   }
 
   const remaining = remainingBalanceCents(input);
   if (remaining === null) {
-    return { decision, amount: requested, balanceNote: none };
+    return { decision, amount: requested, balanceNote: none, balanceWhy: unchanged };
   }
 
   // Nothing left. Not an approval for $0.00, which reads as a success that moved no
   // money - the customer believes they are done and the business is out of pocket.
   if (remaining <= 0) {
-    return { decision: 'escalated', amount: 0, balanceNote: none };
+    // Said out loud, because "escalated" on its own tells the customer nothing about
+    // money that was already promised to somebody else.
+    return {
+      decision: 'escalated',
+      amount: 0,
+      balanceNote: [
+        {
+          code: 'amount_limited_to_remaining_balance',
+          detail: `nothing left to refund: ${formatCents(input.orderTotalCents)} of this order has already been refunded or reserved`,
+          aiProposal: input.aiProposal,
+        },
+      ],
+      balanceWhy:
+        'There is nothing left to refund on this order - it has already been refunded or reserved in full.',
+    };
   }
 
   if (requested <= remaining) {
-    return { decision, amount: requested, balanceNote: none };
+    return { decision, amount: requested, balanceNote: none, balanceWhy: unchanged };
   }
 
   // Reduced, not refused: the claim is valid and there is simply less left than the
@@ -444,6 +469,7 @@ function settledAgainstBalance(
         aiProposal: input.aiProposal,
       },
     ],
+    balanceWhy: `Only ${formatCents(remaining)} of this order was still refundable, so that is all that was authorised.`,
   };
 }
 
@@ -700,15 +726,17 @@ function summarise(
   input: ResolveInput,
   amount: number,
   discretionApplied: boolean,
+  balanceWhy: string | null = null,
 ): string {
   if (winner === null) {
     const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
-    return `${VERB[decision]}: no policy rule reached a conclusion, so the request escalated by default. ${amountPart}${discretionPart(discretionApplied)}`;
+    return `${VERB[decision]}: no policy rule reached a conclusion, so the request escalated by default. ${amountPart}${balanceWhy === null ? '' : ` ${balanceWhy}`}${discretionPart(discretionApplied)}`;
   }
   const rulePart = `${winner.ruleId} (${winner.policyRef}): ${winner.evidence}`;
   const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
   const orderPart = input.orderId === null ? '' : ` Order ${input.orderId}.`;
-  return `${VERB[decision]} under ${rulePart}${orderPart} ${amountPart}${discretionPart(discretionApplied)}`;
+  const balancePart = balanceWhy === null ? '' : ` ${balanceWhy}`;
+  return `${VERB[decision]} under ${rulePart}${orderPart} ${amountPart}${balancePart}${discretionPart(discretionApplied)}`;
 }
 
 /** The sentence that says the discretion layer was what changed the outcome. */

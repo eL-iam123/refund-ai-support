@@ -42,6 +42,27 @@ export interface CustomerEvents {
   notify: ((customerId: string) => void) | null;
 }
 
+/**
+ * The pipeline the app runs on.
+ *
+ * Extracted so the demo seed decides its claims through exactly this configuration
+ * rather than a lookalike: a demo whose requests went down a differently-configured
+ * path would not be evidence of anything.
+ */
+export function buildPipelineDeps(env: Env, db: Db, notifyCustomer?: (customerId: string) => void): PipelineDeps {
+  return {
+    analyzer: createAnalyzer(env),
+    recordAttempt: createAttemptRecorder(db),
+    injectionAction: env.INJECTION_ACTION,
+    discretion: discretionConfig(env),
+    itemPicker: itemPickerConfig(env),
+    minConfidence: env.AI_MIN_CONFIDENCE,
+    // Optional on the dependency, so absent rather than undefined when there is no
+    // socket to publish to.
+    ...(notifyCustomer === undefined ? {} : { notifyCustomer }),
+  };
+}
+
 export function buildContext(
   env: Env,
   db: Db,
@@ -52,17 +73,9 @@ export function buildContext(
   const customerEvents: CustomerEvents = { notify: null };
   const pipeline =
     overrides.pipeline ??
-    ({
-      analyzer: createAnalyzer(env),
-      recordAttempt: createAttemptRecorder(db),
-      injectionAction: env.INJECTION_ACTION,
-      discretion: discretionConfig(env),
-      itemPicker: itemPickerConfig(env),
-      minConfidence: env.AI_MIN_CONFIDENCE,
-      notifyCustomer: (customerId: string): void => {
-        customerEvents.notify?.(customerId);
-      },
-    } satisfies PipelineDeps);
+    buildPipelineDeps(env, db, (customerId: string): void => {
+      customerEvents.notify?.(customerId);
+    });
 
   return { env, db, pipeline, log, now, customerEvents };
 }

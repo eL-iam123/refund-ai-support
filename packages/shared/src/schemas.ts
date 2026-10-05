@@ -306,6 +306,12 @@ export const RefundRequestSchema = z.object({
   timings: z.array(StageTimingSchema),
   overriddenBy: z.string().nullable(),
   overrideNote: z.string().nullable(),
+  /**
+   * Agent-facing natural-language summary of the case, written by the model from
+   * the fixed outcome and verified quotes. Null when no model was available or the
+   * summary failed validation. Never customer-visible, never a decision input.
+   */
+  caseSummary: z.string().nullable(),
 });
 export type RefundRequestDto = z.infer<typeof RefundRequestSchema>;
 

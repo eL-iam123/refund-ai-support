@@ -80,6 +80,12 @@ export interface PersistedRequest {
   readonly overriddenBy: string | null;
   readonly overrideNote: string | null;
   readonly scenarioId: string | null;
+  /**
+   * Agent-facing natural-language summary written by the model from the fixed
+   * outcome and verified quotes. Null when no model was available or the summary
+   * failed validation. Never customer-visible, never a decision input.
+   */
+  readonly caseSummary: string | null;
 }
 
 export interface AuditEventRecord {

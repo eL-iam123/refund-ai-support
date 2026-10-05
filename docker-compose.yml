@@ -51,12 +51,21 @@ services:
       # `docker compose up` has no admin surface at all, and every staff route
       # answers 404 until an operator account is configured. admin-login.txt has
       # the demo pair, and the API refuses that exact password in production.
-      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Demo credentials by default, so a single `docker compose up` opens onto a
+      # working staff console instead of a 404. The API already refuses this exact
+      # password in production (`assertProductionCredentials`), so a deployment cannot
+      # end up running on them by accident - and NODE_ENV=production here leaves both
+      # empty, which is the honest default for a real deployment.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-refund-desk-demo}
       # Optional. The key staff sessions are signed with; it is derived from
       # ADMIN_PASSWORD when unset. Setting it separately means rotating one value
       # invalidates every outstanding session at once.
       ADMIN_API_SECRET: ${ADMIN_API_SECRET:-}
+      # Synthetic shoppers, orders and *live* claims on first boot. Off by default in
+      # the code, on here, because a reviewer's first run needs something to look at and
+      # a real deployment must not have invented activity in its audit trail.
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
     volumes:
       - refund-data:/data
     # The SQLite file is the only durable state, so a lost container is not a

@@ -49,6 +49,11 @@ export function UnavailableAnalyzer(reason: string, missingKey: string): AIAnaly
       });
       return Promise.reject(new AiUnavailableError(describe()));
     },
+    summariseCase(): Promise<string | null> {
+      // Null by definition rather than by failure: there is nothing here to write with,
+      // and the field is documented as null when no model was available.
+      return Promise.resolve(null);
+    },
     chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
       observer({
         model,

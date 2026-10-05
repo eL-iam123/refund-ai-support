@@ -1,5 +1,7 @@
 # Refund AI Support
 
+[![CI](https://github.com/eL-iam123/refund-ai-support/workflows/CI/badge.svg)](https://github.com/eL-iam123/refund-ai-support/actions)
+
 A customer-support refund agent for a fictional electronics retailer. Customers
 describe a problem in their own words; the system decides whether to refund, refuse,
 or hand the case to a human — and can show its reasoning to an agent afterwards.
@@ -245,7 +247,7 @@ edges are pinned in `apps/api/src/test/item-scope.test.ts`.
 
 ```bash
 pnpm verify        # typecheck + lint + test
-pnpm test:live     # 124 assertions against a real provider (opt-in)
+pnpm test:live     # live provider suite against a real model (opt-in)
 docker compose up --build     # the same image, as a deployment
 ```
 
@@ -560,7 +562,7 @@ Measured against this pipeline:
 
 | Model | Result |
 |---|---|
-| `nvidia/nemotron-3-ultra-550b-a55b` | 3/3 valid, grounded, ~11s avg |
+| `nvidia/nemotron-3-ultra-550b-a55b` | 3/3 valid, grounded |
 | `llama-3.3-70b-versatile` (Groq) | fast, schema-valid |
 | `gpt-4o-mini` (OpenAI) | fast, schema-valid |
 
@@ -570,8 +572,8 @@ because it routes to whatever is healthy and many of those ignore
 `response_format: json_object`. The adapter fails over safely, so this costs a wasted
 round trip rather than correctness — but there is no reason to pay it.
 
-Budget for seconds, not milliseconds. A real generation here is ~11s, which is why
-`AI_TOTAL_BUDGET_MS` sits above the worst observed call.
+Budget for seconds, not milliseconds. `AI_TOTAL_BUDGET_MS` sits above the worst
+observed call; tune it to your provider's p99.
 
 To exercise the heuristic analyzer without an account, explicitly set
 `AI_PROVIDER=local` in development. That is a pattern matcher with no key and no
@@ -843,13 +845,20 @@ project hit rather than a hypothetical one.
 - **18 conformance scenarios** drive the full pipeline through the production code
   path with a deterministic fake analyzer. Each asserts decision, amount, and the
   specific rule that decided it.
+ - **The agent-facing case note** - for every case that is not a clean approval, the
+  model writes one paragraph for whoever picks the case up, from the fixed outcome and
+  only from quotes that passed grounding. It is generated *after* the decision and fed
+  nowhere else, which is the property worth protecting: a summary that could influence
+  the outcome would be a place for a model to argue for money. Null when there is no
+  model, no verified evidence, or the output fails validation - a missing sentence
+  never fails a refund. Never rendered on the storefront.
 - **A generated corpus** (`wild.test.ts`) covers the space rather than the samples,
-  because a hand-written list only tests the attacks somebody thought of. ~650 attacks
-  are *composed* — an attack core, carried a particular way, perturbed a particular way,
-  in a particular language — plus ~90 degenerate inputs: zero-width characters inside
+   because a hand-written list only tests the attacks somebody thought of. Inputs are
+   *composed* — an attack core, carried a particular way, perturbed a particular way,
+   in a particular language — plus degenerate inputs: zero-width characters inside
   keywords, leetspeak, base64 padding, RTL text, null bytes, reversed strings, messages
-  at the length ceiling. Twelve more feed it replies the schema could never produce: a
-  quote nobody typed, confidence of `42`, a demand for a million dollars, a picker
+   at the length ceiling. More feed it replies the schema could never produce: a
+   quote nobody typed, confidence of `42`, a demand for a million dollars, a picker
   naming another order's items. A compromised provider is as wild as a hostile customer.
   Since the inputs cannot be enumerated, every one of them is held to the same
   invariants: it answers, money is arithmetic, a flagged injection never pays, nobody

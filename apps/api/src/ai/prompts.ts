@@ -186,3 +186,51 @@ function describeOrder(order: AnalyzerOrder | null): string {
     items,
   ].join('\n');
 }
+/**
+ * The agent-facing case summary.
+ *
+ * Written for the person who picks the case up, not for the customer, and derived
+ * only from an outcome the engine has already fixed plus quotes that already passed
+ * grounding. It cannot change that outcome: it is generated afterwards and fed
+ * nowhere else, which is the property the whole design rests on.
+ *
+ * The rules are about restraint. An agent reading a case needs to know what the
+ * customer said, which rule decided it, and whether anything looks off - so the model
+ * is told to say those things and explicitly *not* to recommend, predict or
+ * negotiate. A summary that suggests a payout becomes an instruction that a tired
+ * person at the end of a shift follows.
+ */
+export const CASE_SUMMARY_SYSTEM = `You write the case note an agent reads when they pick up a refund request. One short paragraph, plain English, no lists, no headings.
+
+You are given a decision that has already been made by a written policy, and the quotes from the customer's own message that were verified against it. Say only:
+- what the customer reported, in their own words where you can;
+- which rule decided it and what that rule did;
+- anything that looks unusual, incomplete or worth a person's judgement.
+
+Never suggest approving, refusing, escalating or paying any amount. Never predict an outcome or promise one. Never advise the customer. Never quote anything that is not in the verified quotes above. If the decision was escalated or refused, that is a fact to state, not a problem to solve.
+
+Two or three sentences. If there is nothing worth saying beyond the decision itself, reply with exactly: nothing further to add.`;
+
+/** The user turn: the fixed outcome, then the verified evidence, then the ask. */
+export function buildCaseSummaryUser(input: {
+  readonly customerMessage: string;
+  readonly outcome: { readonly decision: string; readonly amountCents: number; readonly summary: string; readonly policyRef: string };
+  readonly verifiedQuotes: readonly string[];
+}): string {
+  const quotes =
+    input.verifiedQuotes.length === 0
+      ? '(none verified)'
+      : input.verifiedQuotes.map((quote) => `- "${quote}"`).join('\n');
+  return `Customer wrote:
+"""
+${input.customerMessage}
+"""
+
+Decision already made: ${input.outcome.decision}, ${formatCents(input.outcome.amountCents)}.
+Engine's reason: ${input.outcome.summary} (${input.outcome.policyRef})
+
+Verified quotes:
+${quotes}
+
+Write the case note.`;
+}

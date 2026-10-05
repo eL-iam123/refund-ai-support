@@ -264,6 +264,19 @@ const EnvSchema = z.object({
    * argument (the adapter also retries once without it, so this is an optimisation
    * rather than a requirement).
    */
+  /**
+   * Seed synthetic shoppers, orders and live claims on boot.
+   *
+   * Default off in code and on in the compose stack. A production deployment seeds a
+   * catalogue and nothing else, because an audit trail full of invented claims is the
+   * one artefact this system exists not to produce; a reviewer's machine needs the
+   * opposite, and it gets it without anyone editing a file first.
+   */
+  SEED_DEMO_DATA: z
+    .enum(['true', 'false', '1', '0'])
+    .default('false')
+    .transform((value) => value === 'true' || value === '1'),
+
   AI_DISABLE_THINKING: z
     .enum(['true', 'false', '1', '0'])
     .default('true')

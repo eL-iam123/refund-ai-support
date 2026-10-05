@@ -237,6 +237,40 @@ export interface AIAnalyzer {
    * agent that the customer is waiting/pushing).
    */
   chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply>;
+  /**
+   * The agent-facing case summary: what the customer reported, and what it means.
+   *
+   * Read by whoever picks the case up, never by the customer. It is the one place a
+   * model's prose is allowed near a decision record, so the rules are narrow on
+   * purpose:
+   *
+   *  - **It is not a decision input.** Every caller computes this strictly after the
+   *    decision exists and passes it nowhere else. There is no code path from a
+   *    summary back into the resolver, and that is the property worth protecting.
+   *  - **It is best-effort by contract.** The return type has no error case: null
+   *    means "no summary", and a caller that cannot have one - no model, a failed
+   *    call, output that failed validation - gets null rather than an exception. A
+   *    missing sentence must never fail a refund.
+   *  - **Only verified evidence.** The input carries quotes that already passed
+   *    grounding. Unverified text cannot reach the prompt, so the summary cannot
+   *    quote a customer saying something they did not.
+   */
+  summariseCase(input: CaseSummaryInput, observer: AttemptObserver): Promise<string | null>;
+}
+
+/** What a case summary is written from: a fixed outcome, and evidence that verified. */
+export interface CaseSummaryInput {
+  /** What the customer reported, in their own words. */
+  readonly customerMessage: string;
+  /** The decision as the engine reached it. Never re-interpreted here. */
+  readonly outcome: {
+    readonly decision: string;
+    readonly amountCents: number;
+    readonly summary: string;
+    readonly policyRef: string;
+  };
+  /** Quotes that passed grounding. Empty is allowed and yields null. */
+  readonly verifiedQuotes: readonly string[];
 }
 
 /** Every configured model failed, or none of them answered with valid JSON. */

@@ -53,6 +53,11 @@ export interface NewRequestRow {
   readonly llmCalled: boolean;
   readonly timingsJson: string;
   readonly scenarioId: string | null;
+  /**
+   * Agent-facing case summary written by the model. Null when the model was
+   * unavailable or the summary failed validation. Never a decision input.
+   */
+  readonly caseSummary?: string | null | undefined;
 }
 
 const INSERT_SQL = `
@@ -61,13 +66,13 @@ INSERT INTO refund_requests (
   decision, refund_amount_cents, eligible_amount_cents, summary, policy_ref,
   trace_json, overrides_json, eligible_item_ids_json, claim_item_ids_json, blocked_items_json,
   response_text, ingest_notice, extraction_json, grounding_json, injection_json,
-  ai_mode, llm_called, timings_json, scenario_id
+  ai_mode, llm_called, timings_json, scenario_id, case_summary
 ) VALUES (
   @id, @createdAt, @customerId, @orderId, @message, @messageSha256, @messageFingerprint,
   @decision, @refundAmountCents, @eligibleAmountCents, @summary, @policyRef,
   @traceJson, @overridesJson, @eligibleItemIdsJson, @claimItemIdsJson, @blockedItemsJson,
   @responseText, @ingestNotice, @extractionJson, @groundingJson, @injectionJson,
-  @aiMode, @llmCalled, @timingsJson, @scenarioId
+  @aiMode, @llmCalled, @timingsJson, @scenarioId, @caseSummary
 )`;
 
 export function insertRequest(db: Db, row: NewRequestRow): void {
@@ -77,11 +82,10 @@ export function insertRequest(db: Db, row: NewRequestRow): void {
   assertDecisionCoherent(row.decision, row.refundAmountCents);
   db.prepare(INSERT_SQL).run({
     ...row,
-    // A caller that never heard of intake has still answered truthfully: no ladder
-    // step ran, so there is nothing to report.
     ingestNotice: row.ingestNotice ?? null,
     claimItemIdsJson: row.claimItemIdsJson ?? '[]',
     llmCalled: row.llmCalled ? 1 : 0,
+    caseSummary: row.caseSummary ?? null,
   });
 }
 
@@ -91,6 +95,10 @@ const SELECT_COLUMNS = `
   trace_json, overrides_json, eligible_item_ids_json, claim_item_ids_json, blocked_items_json,
   response_text, ingest_notice, extraction_json, grounding_json, injection_json,
   ai_mode, llm_called, timings_json, overridden_by, override_note, scenario_id,
+  -- Written on insert, and read here. It was in the INSERT and in neither read path,
+  -- so every case note came back absent while the column held it: the field looked
+  -- dead rather than broken, which is the worst way for it to fail.
+  case_summary,
   (SELECT name FROM customers WHERE customers.id = refund_requests.customer_id) AS customer_name
 `;
 
@@ -124,6 +132,7 @@ interface RequestRow {
   readonly overridden_by: string | null;
   readonly override_note: string | null;
   readonly scenario_id: string | null;
+  readonly case_summary: string | null;
 }
 
 function hydrate(row: RequestRow): PersistedRequest {
@@ -155,6 +164,7 @@ function hydrate(row: RequestRow): PersistedRequest {
     overriddenBy: row.overridden_by,
     overrideNote: row.override_note,
     scenarioId: row.scenario_id,
+    caseSummary: row.case_summary,
   };
 }
 

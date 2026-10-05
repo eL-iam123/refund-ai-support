@@ -76,6 +76,7 @@ export function toRequestDto(row: PersistedRequest): RefundRequestDto {
     timings: parse<StageTiming[]>(row.timingsJson, 'timings_json'),
     overriddenBy: row.overriddenBy,
     overrideNote: row.overrideNote,
+    caseSummary: row.caseSummary,
   };
 }
 

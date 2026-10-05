@@ -135,6 +135,8 @@ export type ProcessResult =
       readonly llmCalled: boolean;
       readonly aiMode: string;
       readonly timings: readonly StageTiming[];
+      /** Agent-facing case summary written by the model, or null. */
+      readonly caseSummary: string | null;
     }
   | {
       readonly stage: 'decided';
@@ -152,6 +154,8 @@ export type ProcessResult =
       readonly aiMode: string;
       readonly timings: readonly StageTiming[];
       readonly resolvedOrderId: string | null;
+      /** Agent-facing case summary written by the model, or null. */
+      readonly caseSummary: string | null;
     };
 
 export class UnknownCustomerError extends Error {
@@ -257,6 +261,7 @@ export async function processRefundRequest(
       timings: log.all(),
       resolvedOrderId: retrieval.order?.id ?? null,
       itemIds: retrieval.found.items.map((item) => item.id),
+      caseSummary: null,
     };
   }
 
@@ -301,7 +306,7 @@ async function afterGates(
     return askedResult(question, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log);
   }
 
-  return decidedResult(input.message, analysis, decision, retrieval, intake, mode, log);
+  return await decidedResult(input.message, analysis, decision, retrieval, intake, mode, log, deps, observer);
 }
 
 /**
@@ -378,7 +383,7 @@ function unreadableFollowUp(
  * ladder's `notice` has one place to be attached rather than being threaded through
  * the stage body.
  */
-function decidedResult(
+async function decidedResult(
   message: string,
   analysis: Extract<AnalyseOutcome, { outcome: 'claim' }>,
   decision: RefundDecision,
@@ -386,7 +391,9 @@ function decidedResult(
   intake: Intake,
   mode: string,
   log: StageLog,
-): Extract<ProcessResult, { stage: 'decided' }> {
+  deps: PipelineDeps,
+  observer: AttemptObserver,
+): Promise<Extract<ProcessResult, { stage: 'decided' }>> {
   return {
     stage: 'decided',
     customer: intake.customer,
@@ -402,7 +409,61 @@ function decidedResult(
     timings: log.all(),
     resolvedOrderId: retrieval.order?.id ?? null,
     itemIds: retrieval.found.items.map((item) => item.id),
+    caseSummary: await caseSummary(deps, observer, message, decision, analysis, log),
   };
+}
+
+/**
+ * The agent-facing case note, computed after the decision and used nowhere else.
+ *
+ * The ordering is the whole safety property: `decision` is already fixed when this
+ * runs, the value goes into the stored row and the DTO, and no resolver input can
+ * see it. A summary that could influence the outcome would be a place for a model to
+ * argue for money, which is the one thing this system is built to make impossible.
+ *
+ * Only cases a person will actually read get one. A clean auto-approval needs no
+ * briefing, and asking the model about every order would spend a provider call and
+ * the customer's latency on a paragraph nobody opens.
+ */
+async function caseSummary(
+  deps: PipelineDeps,
+  observer: AttemptObserver,
+  message: string,
+  decision: RefundDecision,
+  analysis: Extract<AnalyseOutcome, { outcome: 'claim' }>,
+  log: StageLog,
+): Promise<string | null> {
+  if (decision.decision === 'approved') {
+    return null;
+  }
+  const verifiedQuotes = analysis.grounding?.verifiedQuotes ?? [];
+  try {
+    const note = await deps.analyzer.summariseCase(
+      {
+        customerMessage: message,
+        outcome: {
+          decision: decision.decision,
+          amountCents: decision.refundAmountCents,
+          summary: decision.summary,
+          policyRef: decision.policyRef,
+        },
+        verifiedQuotes,
+      },
+      observer,
+    );
+    if (note !== null) {
+      // `respond`, not a stage of its own: `STAGES` is a published enum that every
+      // client renders timings from, and one more value would mean every one of them
+      // learns about a stage most will never see.
+      log.record('respond', `case note written for ${decision.decision}`);
+    }
+    return note;
+  } catch (error: unknown) {
+    // Contract says null rather than an error, so this should be unreachable; a missing
+    // case note is never worth failing a refund over, so it is caught anyway.
+    log.record('respond', `case note unavailable (${truncate(error instanceof Error ? error.message : String(error), 80)})`);
+    return null;
+  }
 }
 
 interface Intake {
@@ -876,9 +937,12 @@ function askedClarifyingQuestion(
     order,
     history,
     facts,
-    // Everything already named is resolved scope, so the question must be about the
-    // fault rather than the line.
-    facts.reportedItemIds,
+    // The scope that was actually resolved for *this* request, which is not the same
+    // thing as the lines that carry an earlier claim. Passing the wrong one here made
+    // the guard believe the item was still unknown and replace the reason question
+    // with the item question - so a customer who had just picked the mug was asked
+    // which item, again, by the component meant to be asking what was wrong with it.
+    resolvedItemIds,
     log,
   );
 }
@@ -1045,6 +1109,7 @@ function pickerResult(
 ): Extract<ProcessResult, { stage: 'asked' }> {
   return {
     stage: 'asked',
+    caseSummary: null,
     question: analysis.question,
     picker: analysis.offer,
     notice: analysis.notice ?? null,
@@ -1071,6 +1136,7 @@ function askedResult(
 ): Extract<ProcessResult, { stage: 'asked' }> {
   return {
     stage: 'asked',
+    caseSummary: null,
     question,
     picker: null,
     notice: notice ?? null,

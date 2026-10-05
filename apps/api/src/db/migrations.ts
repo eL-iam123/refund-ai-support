@@ -713,6 +713,16 @@ const MIGRATIONS: readonly Migration[] = [
       db.exec('ALTER TABLE refund_requests ADD COLUMN ingest_notice TEXT');
     },
   },
+  {
+    version: 20,
+    name: 'refund_requests.case_summary',
+    up: (db) => {
+      if (!hasTable(db, 'refund_requests') || hasColumn(db, 'refund_requests', 'case_summary')) {
+        return;
+      }
+      db.exec('ALTER TABLE refund_requests ADD COLUMN case_summary TEXT');
+    },
+  },
 ];
 
 /**

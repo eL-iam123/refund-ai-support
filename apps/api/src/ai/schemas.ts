@@ -69,3 +69,15 @@ export type IntakeOutput = z.infer<typeof IntakeOutputSchema>;
 export function describeOutput(shape: z.ZodType): string {
   return JSON.stringify(z.toJSONSchema(shape), null, 2);
 }
+
+/**
+ * A case summary, bounded.
+ *
+ * A paragraph an agent skims, so the ceiling is low and the floor is a sentence. The
+ * empty string is not a valid summary: there is a documented phrase for "nothing to
+ * add", and a blank cell in a case file reads as a bug rather than as an absence.
+ */
+export const CaseSummarySchema = z
+  .string()
+  .transform((value) => value.trim())
+  .pipe(z.string().min(1).max(800));

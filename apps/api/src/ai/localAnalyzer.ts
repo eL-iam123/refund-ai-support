@@ -78,6 +78,23 @@ export function LocalAnalyzer(): AIAnalyzer {
     chat(input, observer) {
       return Promise.resolve(chatWithHeuristics(input, observer));
     },
+    summariseCase(input) {
+      // Written from the decision rather than generated, so the case file says
+      // something useful in the deployments where no model exists - which is exactly
+      // where an agent most needs reading help.
+      //
+      // No attempt is reported, because this is not a provider call and there is
+      // nothing to audit: the observer exists so a real network attempt cannot go
+      // unrecorded, and recording a local string would put a fictitious model call
+      // in the audit trail of every deployment that runs the matcher on purpose.
+      if (input.verifiedQuotes.length === 0) {
+        return Promise.resolve(null);
+      }
+      const fault = input.verifiedQuotes[0] ?? '';
+      return Promise.resolve(
+        `Customer reported: "${fault}". Decided ${input.outcome.decision} on ${input.outcome.summary} No further reading was available without a model.`,
+      );
+    },
   };
 }
 
