@@ -65,6 +65,7 @@ export const OVERRIDE_LABEL: Record<OverrideCode, string> = {
   discretion_partial_refund: 'Discretion partial refund',
   discretion_exchange: 'Discretion offered exchange',
   discretion_store_credit: 'Discretion offered store credit',
+  agent_requested_by_customer: 'Customer requested an agent',
 };
 
 export function truncate(text: string, max: number): string {

@@ -1032,6 +1032,13 @@ function TurnView({
   if (turn.kind === 'storedAsk' || turn.kind === 'asked') {
     return <QuestionBubble turn={turn} chat={chat} />;
   }
+  if (turn.kind === 'shop') {
+    return (
+      <div className="bubble-ai shop-answer">
+        <p>{turn.shopAnswer.answer}</p>
+      </div>
+    );
+  }
   return <LiveDecisionBubble turn={turn} {...(onAppeal !== undefined ? { onAppeal } : {})} />;
 }
 

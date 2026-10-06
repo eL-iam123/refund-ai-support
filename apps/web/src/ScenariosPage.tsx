@@ -49,6 +49,12 @@ async function runScenario(
       );
       return;
     }
+    if ('shopAnswer' in reply) {
+      setRunning((previous) =>
+        previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: reply.shopAnswer.id } : row)),
+      );
+      return;
+    }
     const { request } = reply;
     setRunning((previous) =>
       previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: request.id } : row)),

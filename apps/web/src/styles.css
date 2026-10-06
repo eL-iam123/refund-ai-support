@@ -142,7 +142,13 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 
 .lines { margin: 14px 0; border-top: 1px solid var(--line); }
 .lines li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: .88rem; }
-.lines li.total { font-weight: 750; }
+  .lines li.total { font-weight: 750; }
+  .cart-line > span:first-child { display: grid; gap: 2px; min-width: 0; }
+  .cart-line-end { display: inline-flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .cart-remove { display: inline-grid; place-items: center; width: 24px; height: 24px; min-height: 24px; padding: 0; color: var(--ink-faint); background: transparent; border: 1px solid transparent; border-radius: 999px; font-size: 1.05rem; line-height: 1; }
+  .cart-remove:hover { color: var(--no); background: var(--no-soft); border-color: var(--no); }
+  .cart-remove:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
 /* The item picker reuses `.lines` for its rhythm but replaces the flex row with a
    three-column grid, so the checkbox sits on the left, the name takes the slack,
    and the price stays right-aligned like every other line. */

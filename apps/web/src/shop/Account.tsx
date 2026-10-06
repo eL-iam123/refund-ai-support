@@ -248,10 +248,12 @@ export function CartSummary({
   products,
   lines,
   totalCents,
+  onRemove,
 }: {
   products: readonly Product[];
   lines: readonly { productId: string; quantity: number }[];
   totalCents: number;
+  onRemove?: (productId: string) => void;
 }): ReactNode {
   if (lines.length === 0) {
     return <p className="muted">Your cart is empty.</p>;
@@ -261,12 +263,26 @@ export function CartSummary({
       {lines.map((line) => {
         const product = products.find((p) => p.id === line.productId);
         return (
-          <li key={line.productId}>
-            <span>
-              {product?.name ?? line.productId} &times; {line.quantity}
-            </span>
-            <span className="num">{money((product?.priceCents ?? 0) * line.quantity)}</span>
-          </li>
+  <li key={line.productId} className="cart-line">
+  <span>
+  <strong>{product?.name ?? line.productId}</strong>
+  <span className="muted small">Qty {line.quantity}</span>
+  </span>
+  <span className="cart-line-end">
+  <span className="num">{money((product?.priceCents ?? 0) * line.quantity)}</span>
+  {onRemove !== undefined && (
+    <button
+      type="button"
+      className="cart-remove"
+      aria-label={`Remove ${product?.name ?? line.productId} from cart`}
+      title="Remove from cart"
+      onClick={() => onRemove(line.productId)}
+    >
+      ×
+    </button>
+  )}
+  </span>
+  </li>
         );
       })}
       <li className="total">
