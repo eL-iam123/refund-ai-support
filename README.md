@@ -421,10 +421,18 @@ the pipeline.
 - **A live takeover.** `POST /api/staff/conversations/:customerId/take-over` is a
   *claim* — one handoff row at a time per customer, so a colleague who already saw
   the conversation gets the thread, and racing attempts are answered `409`. Only
-  the staff member who holds the row may message or hand it back. While the
-  handoff is live the pipeline is *paused*: a customer message is recorded to the
-  human thread, relayed to the open staff sockets, and answered by the agent —
-  never by the analyzer.
+  the staff member who holds the row may message or hand it back. A takeover
+  raised for a decided escalation is *scoped* to that case: follow-ups about it
+  go to the person, while anything else the customer says keeps flowing through
+  the pipeline — one escalation can no longer swallow their other orders. Status
+  questions are answered, not filed: "where is my order" gets a status answer
+  even with a person on the thread.
+- **Closing is permanent.** `POST /api/staff/conversations/:customerId/close`
+  locks the thread once nothing is owed: money settled, denial unappealed, or a
+  person having handled the case to its end — including an escalation they
+  resolved. Anything earlier is refused `409` with the reason. Closing is a
+  staff verb only: an automatic close would lock customers out of follow-ups
+  and appeals.
 - **The case file is built, not claimed.** Every takeover opens the same briefing,
   derived from the thread at read time: the customer's own words, the assistant's
   restatement of them, the questions it asked and the answers, the evidence it
@@ -536,6 +544,8 @@ Nothing else needs setting to run. Every variable below has a default.
 | `DATABASE_PATH` | `./data/refund.sqlite` | |
 | `CORS_ORIGIN` | localhost:5173,8080 | Comma-separated |
 | `API_PORT` / `API_HOST` / `LOG_LEVEL` / `NODE_ENV` | `4000` / `0.0.0.0` / `info` / `development` | |
+| `SEED_DEMO_DATA` | `false` | Synthetic shoppers, orders and live claims on boot. Reviewer convenience: refused in production even when set, and the passwordless demo routes do not exist there at all |
+| `ESCALATION_CEILING_CENTS` | `50000` | Order totals above this escalate for human review (R-15), before any amount is authorised |
 | `WEB_STATIC_DIR` | unset | Only for serving a built client from the API. Unset in dev, where Vite serves it |
 
 ### Two amounts, and only one of them is money
@@ -636,11 +646,15 @@ human instead. Neither setting can approve anything.
 | `POST` | `/api/admin/login` \| `/logout` \| `GET /session` | staff sign-in, session cookie, sign-out. `404` when no operator account is configured |
 | `GET` | `/api/admin/stats` | dashboard counters, staff only |
 | `GET` | `/api/shop/products` | the live catalogue |
-| `POST` | `/api/shop/register`, `/api/shop/login`, `/api/shop/demo-login` | accounts |
+| `POST` | `/api/shop/register`, `/api/shop/login`, `/api/shop/demo-login` | accounts; `demo-login` answers `404` in production |
 | `POST` | `/api/shop/logout`, `GET /api/shop/me` | session lifecycle |
 | `POST` | `/api/shop/checkout` | cart to order, transactionally |
 | `GET` | `/api/shop/orders` | the signed-in customer's own orders |
-| `GET` | `/api/shop/chat/history`, `/summary` | this customer's own conversation for an order |
+| `GET` | `/api/shop/chat/history`, `/summary` | this customer's own conversation for an order, plus its assistant answers |
+| `GET` | `/api/shop/assistant/history` | the shopping thread: browsing and order-status answers, no claims |
+| `GET` | `/api/shop/cases` | this customer's escalated cases currently with a person, newest first |
+| `GET` | `/api/shop/cases/:handoffId/messages` | one case's thread with its person, oldest first |
+| `POST` | `/api/shop/cases/:handoffId/message` | a follow-up filed on that thread, for the person on that case |
 | `GET` | `/api/shop/assistant-status` | whether a model is reachable, no customer data |
 | `GET`, `POST` | `/api/returns` | the signed-in customer's own returns; open one |
 | `GET` | `/api/returns/:id` | one of them, or `404` for anyone else's |
@@ -650,6 +664,7 @@ human instead. Neither setting can approve anything.
 | `POST` | `/api/staff/conversations/:customerId/take-over` | claim the thread; `409` if a colleague already holds it |
 | `POST` | `/api/staff/conversations/:customerId/message` | reply as the agent on behalf of the current holder |
 | `POST` | `/api/staff/conversations/:customerId/hand-back` | release the thread to the assistant; `409` if not held |
+| `POST` | `/api/staff/conversations/:customerId/close` | permanently close a finalised thread; `409` while it still owes the customer something |
 | `WS` | `/api/shop/chat/ws` \| `/api/staff/conversation/ws` | the customer's room and the staff room — notify only, bodies are re-read |
 
 ### Overriding the policy
