@@ -105,7 +105,7 @@ export function itemPickerOffer(input: {
   return { orderId: input.order.id, items: choices, suggested: suggestedIds(input.order, input.request) };
 }
 
-/** The lines a picker may show: those with nothing decided against them yet. */
+/** The lines a picker may show: every line, with decided ones marked. */
 function selectable(
   input: { readonly db: Db; readonly customerId: string },
   order: OrderRecord | null,
@@ -114,10 +114,13 @@ function selectable(
   if (order === null) {
     return [];
   }
+  // Shown, not hidden: a reported line renders disabled with its reason, so
+  // the customer can see the lamp and see why it is unavailable, rather than
+  // facing a list that silently omits what they bought. Hiding them turned
+  // the list into a claim about what is still available, which is a different
+  // thing from what the customer is choosing from.
   const reported = new Set(reportedItemIds(input.db, input.customerId, order.id));
-  const choices = order.items
-    .filter((item) => !reported.has(item.id))
-    .map((item) => toChoice(item, !reported.has(item.id)));
+  const choices = order.items.map((item) => toChoice(item, reported.has(item.id)));
   const nominated = new Set(request?.candidates ?? []);
   // When the model names candidates, those are what to put in front of the
   // customer: it read the message and knows which lines it could not tell apart.
@@ -156,20 +159,21 @@ function toChoice(item: OrderItemRecord, reported: boolean): ItemChoice {
 }
 
 /**
- * Lines already carrying a request or an open escalation.
+ * Lines already carrying a decided request.
  *
- * The same set the storefront derives from the thread's decided turns, read from
- * the same column, so the server's picker and the client's list of disabled
- * lines can never disagree about what is still available. What makes a line
- * unavailable is that a claim already exists against it - including one still
- * waiting on a person.
+ * Decided means no longer escalated: an open escalation is a case still
+ * waiting on a person, and marking its lines reported locks the customer out
+ * of following up on exactly the case the assistant just asked them about.
+ * Follow-ups route through the open-case and fork machinery instead of
+ * opening a second case, and genuinely new problems decide fresh - so the
+ * picker refusing them is a dead end with no way forward, not protection.
  */
 export function reportedItemIds(db: Db, customerId: string, orderId: string): readonly string[] {
   const rows = db
     .prepare(
       `SELECT claim_item_ids_json
          FROM refund_requests
-        WHERE order_id = ? AND customer_id = ?`,
+        WHERE order_id = ? AND customer_id = ? AND decision <> 'escalated'`,
     )
     .all(orderId, customerId) as { claim_item_ids_json: string }[];
   return [...new Set(rows.flatMap((row) => parseItemIds(row.claim_item_ids_json)))];

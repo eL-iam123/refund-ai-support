@@ -45,7 +45,7 @@ export interface NextQuestionInput {
    * resolution comes from `identifyOrder`, so it is a fact rather than a guess.
    */
   readonly resolvedItemIds: readonly string[];
-  /** Lines already carrying a request or an open escalation. */
+  /** Lines already carrying a decided request. Open escalations decide nothing. */
   readonly reportedItemIds: readonly string[];
   /** Everything the customer has said, oldest first, including the newest message. */
   readonly customerText: readonly string[];

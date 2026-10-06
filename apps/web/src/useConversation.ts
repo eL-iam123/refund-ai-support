@@ -569,19 +569,31 @@ export function useConversation(
 }
 
 /**
- * The duplicate-claim warning, when the customer ticked an already reported line.
+ * The duplicate-claim warning, when the customer ticked a decided line.
  *
  * A message scoped to a line with a decision would read as a second complaint
- * about the same problem, so the tick is refused with the reason stated.
+ * about the same problem, so the tick is refused with the reason stated. Lines
+ * with only an open escalation stay tickable: nothing has been decided about
+ * them, and the open-case and fork machinery routes the follow-up - refusing
+ * it here would lock the customer out of their own open case.
  */
 function reportedItemError(selectedIds: readonly string[], turns: readonly Turn[]): string | undefined {
-  const previouslyReported = new Set(
-    turns.flatMap((turn) => (turn.kind === 'replied' || turn.kind === 'stored' ? turn.result.itemIds ?? [] : [])),
-  );
+  const previouslyReported = new Set(turns.flatMap(decidedItemIds));
   if (selectedIds.some((id) => previouslyReported.has(id))) {
     return 'You have already reported that item in this chat. Please choose a different item from this order, or tell me about a different problem. I’m here to help with anything else.';
   }
   return undefined;
+}
+
+/** Item ids this turn decided about: escalations decide nothing, so they block nothing. */
+function decidedItemIds(turn: Turn): readonly string[] {
+  if (turn.kind !== 'replied' && turn.kind !== 'stored') {
+    return [];
+  }
+  if (turn.result.decision === 'escalated') {
+    return [];
+  }
+  return turn.result.itemIds ?? [];
 }
 
 /**

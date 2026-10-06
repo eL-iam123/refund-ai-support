@@ -73,6 +73,10 @@ export function ChatPage(): ReactNode {
   const [retrying, setRetrying] = useState(false);
   const showRetrying = useCallback(() => setRetrying(true), []);
   useShopSocket(customerId, chat.refresh, showRetrying);
+  // A fresh thread opens on a greeting with the customer's name in it when a
+  // model is available. Fetched only while the thread is empty: once anything
+  // is said the greeting has no place, and refetching it would flash it back.
+  const greeting = useThreadGreeting(customerId, shopping, context.chatOrderId, chat);
   // Forks live beside the thread: when this order's case is with a person, the
   // composer's wait text points at the side panel instead of a bare wait, and
   // names the case so a second escalation does not read as the first one again.
@@ -98,6 +102,7 @@ export function ChatPage(): ReactNode {
         claimScope={claimScope}
         retrying={retrying && chat.busy}
         shopping={shopping}
+        greeting={greeting}
       />
 
       <ForkPanel forks={forkState.forks} generation={forkState.generation} refresh={forkState.refresh} />
@@ -130,6 +135,66 @@ function chatWithForkNotice(
     ...chat,
     blocked: `${forkTitle(orderFork)} is with a person — write to them in the panel. Your other orders still work here.`,
   };
+}
+
+/**
+ * The model's greeting for a fresh thread, or null while it loads or fails.
+ *
+ * One fetch per empty thread, not a subscription: the greeting is read once
+ * for the moment, and nothing later invalidates it. A failure is not an
+ * error state - the static greeting covers it, so the page never waits on
+ * a sentence.
+ */
+function useAssistantGreeting(
+  customerId: string | null,
+  orderId: string | null,
+  shopping: boolean,
+  active: boolean,
+): string | null {
+  const [greeting, setGreeting] = useState<string | null>(null);
+  useEffect(() => {
+    if (!active || customerId === null) {
+      return;
+    }
+    let cancelled = false;
+    void shopApi.assistantGreeting(orderId, shopping).then(
+      (result) => {
+        if (!cancelled) {
+          setGreeting(result.greeting);
+        }
+      },
+      () => {
+        if (!cancelled) {
+          setGreeting(null);
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [customerId, orderId, shopping, active]);
+  return greeting;
+}
+
+/**
+ * The thread's greeting, read from the model while the thread is empty.
+ *
+ * Split out because the page is at its complexity budget: choosing the order
+ * and the moment inline would tip it over, and neither choice belongs to the
+ * page's own job of laying out the thread.
+ */
+function useThreadGreeting(
+  customerId: string | null,
+  shopping: boolean,
+  chatOrderId: string | null,
+  chat: Conversation,
+): string | null {
+  return useAssistantGreeting(
+    customerId,
+    shopping ? null : chatOrderId,
+    shopping,
+    chat.turns.length === 0 && !chat.loading,
+  );
 }
 
 /**
@@ -366,6 +431,7 @@ function ChatThread({
   claimScope,
   retrying,
   shopping,
+  greeting,
 }: {
   chat: Conversation;
   order: ShopOrder | null;
@@ -382,6 +448,8 @@ function ChatThread({
   retrying: boolean;
   /** Shopping mode: greeting starters and composer wording follow the toggle. */
   shopping: boolean;
+  /** The model's greeting for a fresh thread, or null while it loads or fails. */
+  greeting: string | null;
 }): ReactNode {
   const logRef = useScrollToBottom(chat.turns);
   const inHandoff = chat.turns.some((turn) => turn.kind === 'handoff');
@@ -399,7 +467,7 @@ function ChatThread({
             customer can already see makes the page look like it forgot them.
             While loading, both it and the thread are absent, so the emptiness is
             brief and states itself. */}
-        {chat.loading || chat.turns.length > 0 ? null : <Greeting onPick={chat.setDraft} shopping={shopping} />}
+        {chat.loading || chat.turns.length > 0 ? null : <Greeting onPick={chat.setDraft} shopping={shopping} greeting={greeting} />}
         {/* Announced, not just drawn: the customer is waiting, and the reason for
             the wait is the whole thing. */}
         <RetryingNotice visible={retrying} />
@@ -1056,11 +1124,14 @@ const GREETING = "Tell me what went wrong with this order and I'll check what th
 const SHOPPING_GREETING = 'Ask about an order, a return, or anything we sell.';
 const SHOPPING_STARTERS: readonly string[] = ['Where is my order?', 'How do I send something back?', 'Do you sell kettles?', 'What can you do?'];
 
-function Greeting({ onPick, shopping }: { onPick: (text: string) => void; shopping: boolean }): ReactNode {
+function Greeting({ onPick, shopping, greeting }: { onPick: (text: string) => void; shopping: boolean; greeting: string | null }): ReactNode {
+  // The model's line when it arrived, the static one otherwise: a greeting is
+  // for the moment, so a failed fetch degrades to the same page, not an error.
+  const line = greeting ?? (shopping ? SHOPPING_GREETING : GREETING);
   if (shopping) {
     return (
       <div className="bubble-them">
-        <p>{SHOPPING_GREETING}</p>
+        <p>{line}</p>
         <ul className="quick-actions">
           {SHOPPING_STARTERS.map((starter) => (
             <li key={starter}>
@@ -1075,7 +1146,7 @@ function Greeting({ onPick, shopping }: { onPick: (text: string) => void; shoppi
   }
   return (
     <div className="bubble-them">
-      <p>{GREETING}</p>
+      <p>{line}</p>
       <ul className="quick-actions">
         {REASONS.filter((reason) => reason.id !== 'other').map((reason) => (
           <li key={reason.id}>

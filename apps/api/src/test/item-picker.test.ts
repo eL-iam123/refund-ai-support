@@ -14,6 +14,8 @@ import type { CustomerRecord } from '../db/records.js';
 import type { ItemPickerConfig } from '../config/env.js';
 import { TEST_NOW } from './helpers.js';
 import { shopHarness, signIn } from './shop-helpers.js';
+import { insertRequest, type NewRequestRow } from '../db/requestRepository.js';
+import type { Decision } from '@refund/shared';
 
 interface Fixture {
   readonly db: Db;
@@ -224,6 +226,25 @@ describe('when the picker is offered', () => {
     // every turn teaches people to stop using the assistant.
     expect(offer()).toBeNull();
   });
+
+  it('offers lines with only an open escalation, and marks decided lines reported', () => {
+    // The lamp has an escalated case still waiting on a person; the mug has a
+    // denial. The lamp must stay choosing - picking it routes through the
+    // open-case machinery instead of opening a second case - while the denied
+    // mug is shown disabled with its reason rather than silently omitted.
+    insertRequest(f.db, storedRow(f.customerId, f.orderId, 'REQ-OPEN', 'escalated', [f.lampItemId]));
+    insertRequest(f.db, storedRow(f.customerId, f.orderId, 'REQ-DENIED', 'denied', [f.mugItemId]));
+
+    const result = offer();
+    expect(result?.items.find((item) => item.itemId === f.lampItemId)).toMatchObject({
+      name: LAMP,
+      reported: false,
+    });
+    expect(result?.items.find((item) => item.itemId === f.mugItemId)).toMatchObject({
+      name: MUG,
+      reported: true,
+    });
+  });
 });
 
 describe('the model may ask, and may be wrong', () => {
@@ -298,6 +319,45 @@ describe('a model-selected scope could never reach the money, because there is n
     expect(byHand.items.map((item) => item.name)).toEqual([MUG]);
   });
 });
+
+/** A stored request, so the test is about the picker and not about what decides. */
+function storedRow(
+  customerId: string,
+  orderId: string,
+  requestId: string,
+  decision: Decision,
+  claim: readonly string[],
+): NewRequestRow {
+  const at = TEST_NOW.toISOString();
+  return {
+    id: requestId,
+    createdAt: at,
+    customerId,
+    customerName: 'Picker Tester',
+    orderId,
+    message: 'fixture claim',
+    messageSha256: '0'.repeat(64),
+    messageFingerprint: '0'.repeat(64),
+    decision,
+    refundAmountCents: 0,
+    eligibleAmountCents: 0,
+    summary: 'fixture',
+    policyRef: 'REFUND_POLICY.md §5.1',
+    traceJson: '[]',
+    overridesJson: '[]',
+    eligibleItemIdsJson: JSON.stringify(claim),
+    claimItemIdsJson: JSON.stringify(claim),
+    blockedItemsJson: '[]',
+    responseText: 'fixture',
+    extractionJson: null,
+    groundingJson: null,
+    injectionJson: '{"detected":false,"signals":[],"obfuscationNoted":false}',
+    aiMode: 'fake',
+    llmCalled: false,
+    timingsJson: '[]',
+    scenarioId: null,
+  };
+}
 
 describe('end to end, through the pipeline', () => {
   /**

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ShopAnswerDto } from '@refund/shared';
 import type { Db } from '../db/connection.js';
-import { findOrder } from '../db/orderRepository.js';
+import { findCustomer, findOrder } from '../db/orderRepository.js';
 import type { OrderRecord } from '../db/records.js';
 import {
   recordShopTurn,
@@ -15,8 +15,8 @@ import type { Identification } from '../retrieval/identifyOrder.js';
 import { findProduct, listProducts, type Product } from './catalogue.js';
 import { searchProducts } from '../retrieval/catalogSearch.js';
 import { MAX_SHOP_PRODUCTS } from '../ai/schemas.js';
-import { GeneralReplySchema } from '../ai/schemas.js';
 import { isSafeGeneralReply } from '../ai/replyGuard.js';
+import { GeneralReplySchema } from '../ai/schemas.js';
 import type { DialogueLine, ProviderAttempt, ShopProduct } from '../ai/analyzer.js';
 import { POLICY_RULES } from '../policy/rules/index.js';
 import { listShopTurns } from '../db/shopAssistant.js';
@@ -275,6 +275,73 @@ function persist(db: Db, input: ShopTurnRequest, turnId: string, record: ShopAns
     record,
     now: input.now,
   });
+}
+
+/**
+ * Model greetings stay greetings: bounded like every other prose call.
+ */
+const MAX_GREETING_CHARS = 280;
+
+/**
+ * A greeting with the customer's name in it, when a model is available.
+ *
+ * Best-effort by the `converse` contract: null means "no reply", never an
+ * exception, and the caller shows its static greeting instead. The model text
+ * passes the same conversational guard as any other prose - no order facts,
+ * no amounts, no promises - so a greeting can never leak a status or invent
+ * one. Nothing is persisted: a greeting is for the moment it is read, and a
+ * reloaded thread should open on the conversation, not on last week's hello.
+ */
+export async function greetingFor(
+  db: Db,
+  pipeline: PipelineDeps,
+  input: { customerId: string; orderId: string | null; shopping: boolean; now: Date },
+): Promise<{ greeting: string | null }> {
+  const converse = pipeline.analyzer.converse?.bind(pipeline.analyzer);
+  if (converse === undefined) {
+    return { greeting: null };
+  }
+  const customer = findCustomer(db, input.customerId, input.now);
+  const firstName = customer?.name.split(' ')[0] ?? null;
+  const task = input.shopping
+    ? 'They opened the shopping assistant, which answers order-status, return and browsing questions.'
+    : 'They opened refund help, which looks into what went wrong with an order under the refund policy.';
+  try {
+    const text = await converse(
+      {
+        message:
+          `Greet ${firstName === null ? 'the shopper' : firstName} briefly in one or two sentences. ` +
+          `${task} Offer that help. Do not mention any specific order, amount, date or decision. ` +
+          `Plain text, no markdown.`,
+        history: [],
+        products: [],
+        policy: [],
+        style: { tone: 'friendly' },
+      },
+      () => {},
+    );
+    return { greeting: acceptGreeting(text) };
+  } catch {
+    return { greeting: null };
+  }
+}
+
+/**
+ * A model greeting the guard and the length bound both accept, or null.
+ *
+ * Split out because the call above already branches on availability, failure
+ * and absence: folding validation in would push it over the complexity the
+ * lint gate allows every function.
+ */
+function acceptGreeting(text: string | null): string | null {
+  if (text === null) {
+    return null;
+  }
+  const parsed = GeneralReplySchema.safeParse(text);
+  if (!parsed.success || parsed.data.length > MAX_GREETING_CHARS || !isSafeGeneralReply(parsed.data)) {
+    return null;
+  }
+  return parsed.data;
 }
 
 /**

@@ -348,5 +348,78 @@ describe('shopping assistant', () => {
         await app.close();
       }
     });
+
+    describe('assistant greeting', () => {
+      /**
+       * A fresh thread opens on a line with the customer's name in it when a
+       * model is available - and on the static greeting otherwise. The model
+       * text passes the same conversational guard as any other prose, so a
+       * greeting can never leak an order fact or invent one.
+       */
+      it('returns the safe model greeting', async () => {
+        const { app, cookie } = await stubHarness(
+          () => Promise.resolve({ productIds: [], model: 'stub-shop-v1' }),
+          'Hi Sam - looking for an order, a return, or something new?',
+        );
+        try {
+          const response = await app.inject({
+            method: 'GET',
+            url: '/api/shop/assistant/greeting?shopping=true',
+            headers: { cookie },
+          });
+          expect(response.statusCode).toBe(200);
+          expect(response.json<{ greeting: string | null }>().greeting).toBe(
+            'Hi Sam - looking for an order, a return, or something new?',
+          );
+        } finally {
+          await app.close();
+        }
+      });
+
+      it('falls back when the model greeting claims order facts', async () => {
+        const { app, cookie } = await stubHarness(
+          () => Promise.resolve({ productIds: [], model: 'stub-shop-v1' }),
+          'I checked your order, it shipped yesterday.',
+        );
+        try {
+          const response = await app.inject({
+            method: 'GET',
+            url: '/api/shop/assistant/greeting?shopping=true',
+            headers: { cookie },
+          });
+          expect(response.statusCode).toBe(200);
+          expect(response.json<{ greeting: string | null }>().greeting).toBeNull();
+        } finally {
+          await app.close();
+        }
+      });
+
+      it('falls back without a conversational model', async () => {
+        const { app, cookie } = await stubHarness(() =>
+          Promise.resolve({ productIds: [], model: 'stub-shop-v1' }),
+        );
+        try {
+          const response = await app.inject({
+            method: 'GET',
+            url: '/api/shop/assistant/greeting?shopping=true',
+            headers: { cookie },
+          });
+          expect(response.statusCode).toBe(200);
+          expect(response.json<{ greeting: string | null }>().greeting).toBeNull();
+        } finally {
+          await app.close();
+        }
+      });
+
+      it('refuses signed-out greeting reads', async () => {
+        const { app } = await stubHarness(() => Promise.resolve({ productIds: [], model: 'stub-shop-v1' }), 'Hi.');
+        try {
+          const response = await app.inject({ method: 'GET', url: '/api/shop/assistant/greeting?shopping=true' });
+          expect(response.statusCode).toBe(401);
+        } finally {
+          await app.close();
+        }
+      });
+    });
   });
 });

@@ -167,6 +167,19 @@ export const shopApi = {
     request('/api/shop/assistant/history'),
 
   /**
+   * A fresh thread's greeting, with the customer's name in it when a model is
+   * available. Null reads as the static greeting: an unreachable model
+   * degrades to the same page rather than an error.
+   */
+  assistantGreeting: (orderId: string | null, shopping: boolean): Promise<{ greeting: string | null }> => {
+    const search = new URLSearchParams({ shopping: shopping ? 'true' : 'false' });
+    if (orderId !== null && orderId.length > 0) {
+      search.set('orderId', orderId);
+    }
+    return request(`/api/shop/assistant/greeting?${search.toString()}`);
+  },
+
+  /**
    * Whether a model is actually behind the assistant right now.
    *
    * Public and free of customer data. It exists because a page that behaves

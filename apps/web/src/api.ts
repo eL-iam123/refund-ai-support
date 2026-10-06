@@ -31,9 +31,11 @@ import { ApiError, request, post } from './httpClient';
 /**
  * One line as the item picker offers it.
  *
- * `reported` means the line already has a request or an open escalation, so it is
- * shown disabled rather than hidden: a list that silently omits a line reads as a
- * list of everything the customer bought, which is not what it is.
+ * `reported` means the line already has a decided request, so it is shown
+ * disabled rather than hidden: a list that silently omits a line reads as a
+ * list of everything the customer bought, which is not what it is. Lines with
+ * only an open escalation stay enabled - nothing has been decided about them,
+ * and the follow-up routes through the open case.
  */
 export interface ItemChoice {
   readonly itemId: string;

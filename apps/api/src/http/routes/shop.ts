@@ -15,7 +15,7 @@ import {
 import { checkout, listOrdersForCustomer, listProducts, type Product, type ShopOrder } from '../../shop/catalogue.js';
 import { searchProducts } from '../../retrieval/catalogSearch.js';
 import { listShopTurns, listShopTurnsForOrder } from '../../db/shopAssistant.js';
-import { toShopAnswer } from '../../shop/assistant.js';
+import { greetingFor, toShopAnswer } from '../../shop/assistant.js';
 import { findRequestById, insertAuditEvent } from '../../db/requestRepository.js';
 import { findOrder } from '../../db/orderRepository.js';
 import { recordCustomerUpdate } from '../../db/customerUpdates.js';
@@ -101,6 +101,35 @@ const ProductSearchQuery = z.object({
 const AssistantHistoryQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
+
+/** Whose thread the greeting opens, and in which mode. Both optional. */
+const GreetingQuery = z.object({
+  orderId: z.string().trim().min(1).max(120).nullable().optional(),
+  shopping: z.coerce.boolean().optional(),
+});
+
+function handleAssistantGreeting(
+  request: FastifyRequest,
+  ctx: AppContext,
+): Promise<{ greeting: string | null }> {
+  const user = currentUser(request, ctx);
+  if (user === null) {
+    throw new UnauthorizedError('sign in to see your conversations');
+  }
+  const query = GreetingQuery.safeParse(request.query);
+  if (!query.success) {
+    throw badRequest(
+      'invalid greeting filter',
+      query.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  return greetingFor(ctx.db, ctx.pipeline, {
+    customerId: user.customerId,
+    orderId: query.data.orderId ?? null,
+    shopping: query.data.shopping ?? false,
+    now: ctx.now(),
+  });
+}
 
 /**
  * Why the customer thinks the refusal was wrong, as the person who reads it
@@ -560,6 +589,13 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext, hub: L
       })),
     };
   });
+
+  /**
+   * A fresh thread's greeting, with the customer's name in it when a model is
+   * available. Best-effort: null reads as the client's static greeting, so an
+   * unreachable model degrades to the same page rather than an error.
+   */
+  app.get('/api/shop/assistant/greeting', (request) => handleAssistantGreeting(request, ctx));
 }
 
 const ForkParams = z.object({

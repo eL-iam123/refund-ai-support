@@ -122,6 +122,8 @@ interface World {
   history: () => unknown;
   /** Overrides the shopping thread. */
   assistant: () => unknown;
+  /** Overrides the assistant greeting. */
+  greeting: () => unknown;
 }
 
 let world: World;
@@ -149,6 +151,7 @@ const STATIC_ROUTES: ReadonlyMap<string, () => unknown> = new Map<string, () => 
   ['/api/shop/orders', () => ({ orders: [ORDER] })],
   ['/api/shop/chat/summary', () => ({ counts: [{ orderId: ORDER_ID, count: 1 }] })],
   ['/api/shop/assistant/history', () => world.assistant()],
+  ['/api/shop/assistant/greeting', () => world.greeting()],
   ['/api/shop/assistant-status', () => ({ aiMode: 'fake (test)', aiAvailable: true, aiNote: '' })],
   ['/api/shop/products', () => ({ products: [] })],
   ['/api/shop/register', () => ({ user: USER })],
@@ -176,6 +179,7 @@ beforeEach(() => {
     reply: () => decidedReply(),
     history: () => ({ orderId: ORDER_ID, closed: false, awaitingPerson: false, turns: [], assistantTurns: [] }),
     assistant: () => ({ turns: [] }),
+    greeting: () => ({ greeting: null }),
   };
 
   vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -678,6 +682,16 @@ describe('assistant answers survive a reload', () => {
     await user.click(screen.getByRole('button', { name: 'Shopping help' }));
     await screen.findByPlaceholderText(/catalogue/i);
     expect(screen.queryByText(/delivered yesterday/i)).not.toBeInTheDocument();
+  });
+
+  it('opens on the model greeting when there is one, and the static one otherwise', async () => {
+    world.greeting = () => ({ greeting: 'Hi Test - looking for an order, a return, or something new?' });
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Hi Test - looking for an order/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Ask about an order, a return, or anything we sell/i)).not.toBeInTheDocument();
   });
 });
 
