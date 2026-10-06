@@ -43,8 +43,8 @@ export function LiveConversationsPage(): ReactNode {
     () => api.staffAnalytics().then((result) => result.analytics),
     ['live-analytics', version],
   );
-  // Hoisted out of the console because the case file renders in the sidebar and
-  // the thread in the console; one read feeds both.
+  // Hoisted out of the console because the case file renders above the thread
+  // while the thread renders below it; one read feeds both.
   const [forkOnly, setForkOnly] = useState(false);
   const { selected, forkHandoffId } = useOpenCase(open, conversations.data, forkOnly);
   const caseFile = useOpenCaseFile(open, forkHandoffId, version);
@@ -76,20 +76,18 @@ export function LiveConversationsPage(): ReactNode {
         needs it, and the heading stays in the document for screen readers.
       */}
       <h1 className="sr-only">Live</h1>
-      <div className={`live-layout ${selected === null ? 'rail-queue' : 'rail-case'}`}>
+      <div className="live-layout">
         <AnalyticsStrip analytics={analytics} />
 <Rail
           conversations={conversations}
           selected={selected}
           onSelect={toggleCase}
-          onClose={() => setOpen(null)}
-          detail={caseFile.data}
-          error={caseFile.error}
         />
         <section className="live-console">
           <ConsoleBody
             conversation={selected}
             detail={caseFile.data}
+            error={caseFile.error}
             forkScope={selected?.forkScope ?? null}
             forkOnly={forkOnly}
             onForkOnly={setForkOnly}
@@ -170,53 +168,26 @@ function useStaffConversationSocket(onChange: () => void): void {
 }
 
 /**
- * The rail: two panels, one column, one open at a time.
+ * The rail: the queue, always fully visible.
  *
- * Both panels are always rendered, so the rail reads as a pair of tabs rather
- * than as content that appears and vanishes. The open one is on top and fills the
- * rail; the closed one is a tab beneath it. They swap places as the selection
- * changes, so whichever panel is live is always the one at the top - the active
- * control never moves.
+ * It used to trade places with the case file - one open at a time - back when
+ * both lived in this column and competed for it. The file now sits above the
+ * thread in the console column, so the queue has nothing to compete with and
+ * stays open: an agent switching cases should not have to reopen the list
+ * between every two clicks.
  */
 function Rail({
   conversations,
   selected,
   onSelect,
-  onClose,
-  detail,
-  error,
 }: {
   conversations: { readonly data: readonly StaffConversation[] | null; readonly error: string | null };
   selected: StaffConversation | null;
   onSelect: (row: StaffConversation) => void;
-  onClose: () => void;
-  detail: CaseDetail | null;
-  error: string | null;
 }): ReactNode {
-  // The case file does not exist until a conversation is open. There is no
-  // "closed" state for it to sit in - an empty case file is not something an
-  // agent needs to look at, so it is not rendered at all.
-  if (selected === null || detail === null) {
-    return (
-      <aside className="live-rail">
-        <ConversationList conversations={conversations} selected={null} onSelect={onSelect} active />
-      </aside>
-    );
-  }
   return (
-    // With a case open the panels swap: the case file takes the rail's top slot
-    // and the queue becomes the tab beneath it. They are in this order in the
-    // markup, so the open panel is always first with no ordering rules.
     <aside className="live-rail">
-      <CaseBrief brief={detail.brief} />
-      <ConversationList
-        conversations={conversations}
-        selected={selected}
-        onSelect={onSelect}
-        onClose={onClose}
-        active={false}
-      />
-      {error !== null ? <p className="error">{error}</p> : null}
+      <ConversationList conversations={conversations} selected={selected} onSelect={onSelect} />
     </aside>
   );
 }
@@ -231,6 +202,7 @@ function Rail({
 function ConsoleBody({
   conversation,
   detail,
+  error,
   forkScope,
   forkOnly,
   onForkOnly,
@@ -238,6 +210,7 @@ function ConsoleBody({
 }: {
   conversation: StaffConversation | null;
   detail: CaseDetail | null;
+  error: string | null;
   forkScope: StaffConversation['forkScope'];
   forkOnly: boolean;
   onForkOnly: (only: boolean) => void;
@@ -258,19 +231,28 @@ function ConsoleBody({
     );
   }
   if (detail === null) {
-    return <Spinner />;
+    // A failed read is stated, not spun on: the rail used to carry this error
+    // beside the queue, and the console carrying it keeps it next to the case
+    // it belongs to.
+    return error === null ? <Spinner /> : <p className="error">{error}</p>;
   }
+  // The file above the thread: the briefing is what the agent reads before
+  // answering, so it sits directly over the conversation instead of across
+  // the page from it.
   return (
-    <TakeoverConsole
-      key={conversationKey(conversation)}
-      conversation={conversation}
-      thread={detail.thread}
-      brief={detail.brief}
-      forkScope={forkScope}
-      forkOnly={forkOnly}
-      onForkOnly={onForkOnly}
-      onChanged={onChanged}
-    />
+    <>
+      <CaseBrief brief={detail.brief} />
+      <TakeoverConsole
+        key={conversationKey(conversation)}
+        conversation={conversation}
+        thread={detail.thread}
+        brief={detail.brief}
+        forkScope={forkScope}
+        forkOnly={forkOnly}
+        onForkOnly={onForkOnly}
+        onChanged={onChanged}
+      />
+    </>
   );
 }
 
@@ -356,14 +338,10 @@ function ConversationList({
   conversations,
   selected,
   onSelect,
-  active,
-  onClose,
 }: {
   conversations: { readonly data: readonly StaffConversation[] | null; readonly error: string | null };
   selected: StaffConversation | null;
   onSelect: (row: StaffConversation) => void;
-  active: boolean;
-  onClose?: () => void;
 }): ReactNode {
   const title = (
     <span className="rail-tab-title">
@@ -371,24 +349,6 @@ function ConversationList({
     </span>
   );
   const note = conversations.data === null ? '' : `${conversations.data.length} open`;
-
-  if (!active) {
-    /*
-      Minimised, the queue is a plain button and not a disclosure. As a
-      `<details>` its own summary would expand the list on click while the case
-      file stayed open, putting both on screen - the exact thing this rail is
-      built to prevent. One control, one effect: put the case down and bring the
-      queue back up.
-    */
-    return (
-      <div className="live-panel live-panel-tab">
-        <button type="button" className="rail-tab rail-tab-button" onClick={onClose}>
-          {title}
-          <span className="rail-tab-note">{note}</span>
-        </button>
-      </div>
-    );
-  }
 
   return (
     <details className="live-panel panel" open>
