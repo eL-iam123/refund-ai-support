@@ -57,6 +57,9 @@ export {
   type ChatInput,
   type ChatReply,
   type ChatTool,
+  type ShopInput,
+  type ShopProduct,
+  type ShopSuggestion,
 } from './analyzer.js';
 export { parseJson } from './json.js';
 export { verifyGrounding } from './grounding.js';

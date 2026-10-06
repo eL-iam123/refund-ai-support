@@ -15,6 +15,7 @@ import type {
   Scenario,
   ReturnStatus,
   Carrier,
+  ShopAnswerDto,
 } from '@refund/shared';
 
 /**
@@ -278,12 +279,13 @@ export const api = {
   signOut: (): Promise<{ ok: boolean }> => post('/api/admin/logout', {}),
 
 /**
-   * Sends a message. Four possible replies, and they are not interchangeable: a
+   * Sends a message. Five possible replies, and they are not interchangeable: a
    * decision (`request`, with `duplicate` when the server recognised a repeat and
    * returned the earlier request instead of creating one - a 200 rather than a
-   * 201 in that case), the assistant's clarifying question (`question`), or
+   * 201 in that case), the assistant's clarifying question (`question`),
    * `received` - the thread was handed to a person, the pipeline is off, and the
-   * message was routed to them instead of being decided.
+   * message was routed to them instead of being decided - or a shopping answer
+   * (`shopAnswer`), which wrote a shopping thread row and no request.
    *
    * `itemIds` is what the customer ticked in the item picker. It narrows the
    * claim to those lines; the server checks every id against the order it
@@ -294,6 +296,7 @@ export const api = {
     orderId: string | null;
     message: string;
     itemIds?: readonly string[];
+    shopping?: boolean;
   }) =>
     post<
       | { request: RefundRequestDto; duplicate?: DuplicateNotice }
@@ -303,8 +306,11 @@ export const api = {
           picker: ItemPickerOffer | null;
           dialogueId: string;
           itemIds: readonly string[];
+          /** Where the pipeline stopped, for the pending bubble. */
+          progressStage: string | null;
         }
       | ({ received: true } & AgentRoutedReply)
+      | { shopAnswer: ShopAnswerDto }
     >('/api/chat/messages', input),
 
   listRequests: (params: RequestFilter = {}) =>

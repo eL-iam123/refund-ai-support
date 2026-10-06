@@ -57,6 +57,7 @@ export function buildPipelineDeps(env: Env, db: Db, notifyCustomer?: (customerId
     discretion: discretionConfig(env),
     itemPicker: itemPickerConfig(env),
     minConfidence: env.AI_MIN_CONFIDENCE,
+    escalationCeilingCents: env.ESCALATION_CEILING_CENTS,
     // Optional on the dependency, so absent rather than undefined when there is no
     // socket to publish to.
     ...(notifyCustomer === undefined ? {} : { notifyCustomer }),

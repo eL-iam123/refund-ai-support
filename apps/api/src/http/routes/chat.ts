@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { CreateRefundRequestSchema, type CreateRefundRequest, type RefundRequestDto } from '@refund/shared';
+import { CreateRefundRequestSchema, type CreateRefundRequest, type RefundRequestDto, type ShopAnswerDto, type Stage } from '@refund/shared';
 import type { AppContext } from '../context.js';
 import { processRefundRequest, type ProcessResult } from '../../orchestrator.js';
+import { answerShopTurn, toShopAnswer } from '../../shop/assistant.js';
 import type { ItemPickerOffer } from '../../retrieval/itemPicker.js';
 import { findRequestById } from '../../db/requestRepository.js';
 import type { PersistedRequest } from '../../db/records.js';
@@ -23,7 +24,7 @@ import { isChatClosed } from '../../db/chatClosures.js';
 import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
 import { findCustomer, findOrder } from '../../db/orderRepository.js';
-import { identifyOrder } from '../../retrieval/identifyOrder.js';
+import { identifyOrder, type Identification } from '../../retrieval/identifyOrder.js';
 import { conversationForOrder } from '../../retrieval/conversation.js';
 
 /**
@@ -58,15 +59,23 @@ async function handleChatMessage(
       notice: string | null;
       dialogueId: string;
       itemIds: readonly string[];
+      progressStage: Stage;
     }
   | { request: RefundRequestDto }
+  | { shopAnswer: ShopAnswerDto }
 > {
   const body = parseChatBody(request, ctx);
   const session = signedInSession(ctx, request);
   const resolved = withPendingItemScope(ctx, session.customerId, body);
   const now = ctx.now();
 
-  assertThreadOpen(ctx, resolved, now);
+  const customer = findCustomer(ctx.db, session.customerId, now);
+  const identification: Identification =
+    customer === null
+      ? { order: null, basis: 'unresolved', candidates: 0, items: [], evidence: 'customer not found' }
+      : identifyOrder(ctx.db, customer, resolved.orderId, resolved.message, now, resolved.itemIds ?? []);
+
+  assertThreadOpen(ctx, resolved, now, identification);
 
   const takeover = takeoverForEscalated(ctx.db, session.customerId, resolved.orderId, now);
   // Only a handoff a person has actually picked up takes the thread away from the
@@ -87,12 +96,30 @@ async function handleChatMessage(
     return chatDuringHandoff(ctx, hub, takeover, body.message, now);
   }
 
-  const duplicate = duplicateForSubmission(ctx, resolved, now);
+  // The shopping assistant answers order-status, return-logistics and
+  // browsing questions here, before duplicate suppression and the refund
+  // pipeline. A shop turn writes a `shop_assistant_turns` row and nothing
+  // else, so anything it handles can never become a decision. Null means the
+  // message could be a claim, and the pipeline below decides that instead.
+  const shopTurn = await answerShopTurn(ctx.db, ctx.pipeline, {
+    customerId: session.customerId,
+    orderId: resolved.orderId,
+    message: resolved.message,
+    shoppingMode: resolved.shopping,
+    identification,
+    now,
+  });
+  if (shopTurn !== null) {
+    reply.code(201);
+    return { shopAnswer: toShopAnswer(shopTurn) };
+  }
+
+  const duplicate = duplicateForSubmission(ctx, resolved, now, identification);
   if (duplicate !== null) {
     return suppressedDuplicate(ctx.db, duplicate, now);
   }
 
-  return await decideOrAsk(ctx, reply, resolved, now);
+  return await decideOrAsk(ctx, reply, resolved, now, identification);
 }
 
 /** The customer this message is from. Never the one in the body. */
@@ -136,6 +163,7 @@ async function decideOrAsk(
   reply: FastifyReply,
   resolved: CreateRefundRequest,
   now: Date,
+  identification: Identification,
 ): Promise<
   | {
       question: string;
@@ -143,6 +171,7 @@ async function decideOrAsk(
       notice: string | null;
       dialogueId: string;
       itemIds: readonly string[];
+      progressStage: Stage;
     }
   | { request: RefundRequestDto }
 > {
@@ -154,7 +183,7 @@ async function decideOrAsk(
     itemIds: resolved.itemIds ?? [],
     now,
   };
-  const result = await processRefundRequest(ctx.db, ctx.pipeline, input);
+  const result = await processRefundRequest(ctx.db, ctx.pipeline, { ...input, identification });
   if (result.stage === 'asked') {
     const turn = recordDialogueTurn(ctx.db, {
       customerId: input.customerId,
@@ -172,6 +201,9 @@ async function decideOrAsk(
       notice: result.notice,
       dialogueId: turn.id,
       itemIds: turn.itemIds,
+      // The conversation is at intake: a question is what intake returns, and there is
+      // no decided request to read a stage from yet.
+      progressStage: 'intake',
     };
   }
 
@@ -216,9 +248,8 @@ function parseChatBody(
  * writing, because they happened to leave the order dropdown blank. The check is
  * on the thread, not the request: the point of closing is that the case is over.
  */
-function assertThreadOpen(ctx: AppContext, input: CreateRefundRequest, now: Date): void {
-  const orderId =
-    input.orderId ?? inferOrderIdFromMessage(ctx, input.customerId, input.message, now, input.itemIds ?? []);
+function assertThreadOpen(ctx: AppContext, input: CreateRefundRequest, _now: Date, identification: Identification): void {
+  const orderId = input.orderId ?? identification.order?.id ?? null;
   if (orderId !== null && isChatClosed(ctx.db, input.customerId, orderId)) {
     throw new HttpError(
       409,
@@ -228,35 +259,16 @@ function assertThreadOpen(ctx: AppContext, input: CreateRefundRequest, now: Date
   }
 }
 
-/** The order this message is about, or null when it cannot be told. */
-function inferOrderIdFromMessage(
-  ctx: AppContext,
-  customerId: string,
-  message: string,
-  now: Date,
-  itemIds: readonly string[],
-): string | null {
-  const customer = findCustomer(ctx.db, customerId, now);
-  if (customer === null) {
-    return null;
-  }
-  return identifyOrder(ctx.db, customer, null, message, now, itemIds).order?.id ?? null;
-}
-
 function duplicateForSubmission(
   ctx: AppContext,
   input: CreateRefundRequest,
   now: Date,
+  identification: Identification,
 ): DuplicateReport | null {
-  const customer = findCustomer(ctx.db, input.customerId, now);
-  const identified =
-    customer === null
-      ? null
-      : identifyOrder(ctx.db, customer, input.orderId, input.message, now, input.itemIds ?? []);
   return findDuplicateReport(
     ctx.db,
     input.customerId,
-    identified?.order?.id ?? null,
+    identification.order?.id ?? null,
     input.message,
     now,
     ctx.env.DUPLICATE_WINDOW_HOURS,

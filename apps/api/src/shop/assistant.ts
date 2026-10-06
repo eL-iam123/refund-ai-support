@@ -150,7 +150,7 @@ async function nominateProducts(
     .slice(0, MAX_CATALOG_PRODUCTS)
     .map((item) => ({ id: item.id, name: item.name, priceCents: item.priceCents }));
   const observer = (attempt: ProviderAttempt): void => {
-    pipeline.recordAttempt(turnId, attempt.provider, attempt);
+    pipeline.recordAttempt(turnId, pipeline.analyzer.label, attempt);
   };
   // The optional call keeps the analyzer as the receiver: detaching the method
   // first would call it with no `this` and crash on `this.env`.

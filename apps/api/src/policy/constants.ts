@@ -12,6 +12,9 @@ export const EXTENDED_WINDOW_DAYS = 45;
 /** §4.1 Refunds above this amount require human review. */
 export const HUMAN_REVIEW_THRESHOLD_CENTS = 50_000;
 
+/** §6.5 Order total above this ceiling requires human review before any item is selected. */
+export const ESCALATION_CEILING_CENTS = 50_000;
+
 /** §2.3 Payment state that means the order has already been refunded. */
 export const FULLY_REFUNDED = 'refunded';
 

@@ -131,6 +131,40 @@ export type IntakeReply =
     };
 
 /**
+ * One catalogue row as the shopping model sees it.
+ *
+ * Id, name and price only: no stock totals, no order facts, no customer data.
+ * A model that can see takings can produce a plausible figure the customer
+ * never mentioned, so the catalogue snapshot is the minimum that still lets
+ * it match words to products.
+ */
+export interface ShopProduct {
+  readonly id: string;
+  readonly name: string;
+  readonly priceCents: number;
+}
+
+/** Input for shopping nomination: match the message to catalogue rows. */
+export interface ShopInput {
+  readonly message: string;
+  readonly history: readonly DialogueLine[];
+  readonly products: readonly ShopProduct[];
+}
+
+/**
+ * The model's product nomination.
+ *
+ * Advisory in the strong sense: ids, not products. The server re-resolves
+ * every id against the `products` table and drops what is not there, so a
+ * nomination can narrow what is shown and can never invent a price, a product
+ * or an order. An empty list is a valid answer and means "nothing matches".
+ */
+export interface ShopSuggestion {
+  readonly productIds: readonly string[];
+  readonly model: string;
+}
+
+/**
  * Input for chat mode (escalated conversations).
  *
  * The AI acts as a helpful conversational assistant with no monetary authority.
@@ -237,6 +271,17 @@ export interface AIAnalyzer {
    * agent that the customer is waiting/pushing).
    */
   chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply>;
+  /**
+   * Shopping nomination: which catalogue rows match the customer's words.
+   *
+   * Optional because not every analyzer nominates: the local matcher and the
+   * unavailable placeholder have nothing to rank with. Absence is a normal
+   * outcome, not an error - the caller answers from keyword search instead,
+   * the way it does when a provider call fails. Best-effort by the same
+   * contract as the case summary: null means "no nomination", never an
+   * exception, so a missing suggestion can never fail a conversation.
+   */
+  suggestProducts?(input: ShopInput, observer: AttemptObserver): Promise<ShopSuggestion | null>;
   /**
    * The agent-facing case summary: what the customer reported, and what it means.
    *

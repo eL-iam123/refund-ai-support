@@ -65,6 +65,22 @@ export const AskItemsSchema = z.object({
 export const IntakeOutputSchema = z.union([AskItemsSchema, AskSchema, CompleteSchema]);
 export type IntakeOutput = z.infer<typeof IntakeOutputSchema>;
 
+/** The most product cards one shop answer may carry. Bounded so the array cannot be a payload. */
+export const MAX_SHOP_PRODUCTS = 5;
+
+/**
+ * The model's product nomination.
+ *
+ * Ids only, copied from the catalogue block in the prompt. There is no price
+ * and no prose field, so there is nothing in this schema that could be
+ * mistaken for an offer: what the customer sees is rendered deterministically
+ * from database rows re-resolved by id.
+ */
+export const ShopSuggestionSchema = z.object({
+  productIds: z.array(z.string().min(1).max(64)).max(MAX_SHOP_PRODUCTS).default([]),
+});
+export type ShopSuggestionOutput = z.infer<typeof ShopSuggestionSchema>;
+
 /** Compact schema description for the prompt. Not enforced by the provider. */
 export function describeOutput(shape: z.ZodType): string {
   return JSON.stringify(z.toJSONSchema(shape), null, 2);

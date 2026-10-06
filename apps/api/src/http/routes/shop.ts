@@ -12,7 +12,10 @@ import {
   startSession,
   type ShopUser,
 } from '../../shop/auth.js';
-import { checkout, listOrdersForCustomer, listProducts, type ShopOrder } from '../../shop/catalogue.js';
+import { checkout, listOrdersForCustomer, listProducts, type Product, type ShopOrder } from '../../shop/catalogue.js';
+import { searchProducts } from '../../retrieval/catalogSearch.js';
+import { listShopTurns } from '../../db/shopAssistant.js';
+import { toShopAnswer } from '../../shop/assistant.js';
 import { findRequestById, insertAuditEvent } from '../../db/requestRepository.js';
 import { findOrder } from '../../db/orderRepository.js';
 import { recordCustomerUpdate } from '../../db/customerUpdates.js';
@@ -71,6 +74,31 @@ const CheckoutSchema = z.object({
     .array(z.object({ productId: z.string().min(1).max(100), quantity: z.number().int().min(1).max(10) }))
     .min(1)
     .max(25),
+});
+
+/**
+ * Catalogue search filters (ADR 0005).
+ *
+ * Every field is optional so a bare `GET` keeps its old shape. `inStock`
+ * arrives as a query string, so it is an enum rather than a coerced boolean:
+ * `Boolean("false")` is true, which would hide every out-of-stock item from
+ * nobody and show them to everybody who asked to hide them.
+ */
+const ProductSearchQuery = z.object({
+  q: z.string().trim().min(1).max(200).optional(),
+  inStock: z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional(),
+  maxPriceCents: z.coerce.number().int().min(0).max(10_000_000).optional(),
+  // Bounded so one catalogue cannot return an unbounded payload. Capped again
+  // inside searchProducts, where the retrieval bound lives with the query.
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
+/** The shopping thread read-back: the whole thread fits one bounded page. */
+const AssistantHistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
 /**
@@ -377,9 +405,39 @@ function handleCheckout(request: FastifyRequest, reply: FastifyReply, ctx: AppCo
   return { order };
 }
 
+/**
+ * The catalogue, optionally searched.
+ *
+ * Without filters this is the old full dump in `rowid` order. With any filter
+ * it is the FTS-backed search ordered by rank then name. Prices and stock are
+ * read from the database in both cases, so a suggestion can never carry a
+ * price the shop did not set.
+ */
+function handleProducts(request: FastifyRequest, ctx: AppContext): { products: readonly Product[] } {
+  const parsed = ProductSearchQuery.safeParse(request.query);
+  if (!parsed.success) {
+    throw badRequest(
+      'invalid product filter',
+      parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  const { q, inStock, maxPriceCents, limit } = parsed.data;
+  if (q === undefined && inStock === undefined && maxPriceCents === undefined) {
+    return { products: listProducts(ctx.db) };
+  }
+  return {
+    products: searchProducts(ctx.db, {
+      query: q ?? '',
+      inStockOnly: inStock ?? false,
+      maxPriceCents: maxPriceCents ?? null,
+      limit,
+    }),
+  };
+}
+
 export function registerShopRoutes(app: FastifyInstance, ctx: AppContext): void {
   // Public: the catalogue is browsable without an account, like a real shop.
-  app.get('/api/shop/products', () => ({ products: listProducts(ctx.db) }));
+  app.get('/api/shop/products', (request) => handleProducts(request, ctx));
 
   app.get('/api/shop/demo-accounts', () => ({ accounts: listDemoUsers(ctx.db) }));
 
@@ -443,5 +501,33 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext): void 
     }
     const counts = conversationCounts(ctx.db, user.customerId);
     return { counts: [...counts].map(([orderId, count]) => ({ orderId, count })) };
+  });
+
+  /**
+   * The customer's shopping thread with the assistant.
+   *
+   * Separate from the order thread above: these turns answered no claim and
+   * wrote no request, so they must not appear inside a conversation the
+   * policy transcript reads. Session-scoped like everything else on this
+   * table.
+   */
+  app.get('/api/shop/assistant/history', (request) => {
+    const user = currentUser(request, ctx);
+    if (user === null) {
+      throw new UnauthorizedError('sign in to see your conversations');
+    }
+    const query = AssistantHistoryQuery.safeParse(request.query);
+    if (!query.success) {
+      throw badRequest(
+        'invalid history filter',
+        query.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+      );
+    }
+    return {
+      turns: listShopTurns(ctx.db, user.customerId, query.data.limit).map((turn) => ({
+        message: turn.customerMessage,
+        shopAnswer: toShopAnswer(turn),
+      })),
+    };
   });
 }

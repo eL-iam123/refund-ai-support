@@ -30,7 +30,7 @@ export interface Product {
   readonly imageHue: number;
 }
 
-interface ProductRow {
+export interface ProductRow {
   id: string;
   name: string;
   blurb: string;
@@ -69,7 +69,8 @@ export interface ShopOrder {
 
 const MAX_QUANTITY = 10;
 
-function toProduct(row: ProductRow): Product {
+/** Maps a product row to the catalogue shape. Shared with catalog search. */
+export function toProduct(row: ProductRow): Product {
   return {
     id: row.id,
     name: row.name,

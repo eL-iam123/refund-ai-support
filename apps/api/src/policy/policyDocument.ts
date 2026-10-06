@@ -13,6 +13,7 @@
 import { ALLOWED_OUTCOMES, PRECEDENCE } from '@refund/shared';
 import { formatCents } from '../lib/money.js';
 import {
+  ESCALATION_CEILING_CENTS,
   EXTENDED_WINDOW_DAYS,
   FULLY_REFUNDED,
   HUMAN_REVIEW_THRESHOLD_CENTS,
@@ -204,6 +205,14 @@ const SECTIONS: readonly SectionSpec[] = [
       'A request naming an order that does not exist, or that belongs to a different customer, escalates. It is not denied: a mistyped or mistated reference is not an attempt to defraud, and a human can find the right order.',
     ],
     ruleId: 'R-13',
+  },
+  {
+    number: '6.5',
+    title: 'Order total above manual-review ceiling',
+    body: [
+      `When the total value of an order exceeds the configured ceiling (default ${formatCents(ESCALATION_CEILING_CENTS)}), the request is escalated to a person before any item is selected and before any model is called.`,
+    ],
+    ruleId: 'R-15',
   },
   {
     number: '7',

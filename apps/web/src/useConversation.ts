@@ -319,7 +319,7 @@ function useStoredThread(
  * The buckets outlive the selection, so switching away and back shows the same
  * thread rather than an empty one.
  */
-function useLiveTurns(orderId: string | null): {
+function useLiveTurns(orderKey: string): {
   readonly turns: readonly Turn[];
   readonly begin: (order: string, text: string, id: string) => void;
   readonly settle: (order: string, id: string, turn: Turn) => void;
@@ -352,7 +352,7 @@ function useLiveTurns(orderId: string | null): {
     [add],
   );
 
-  return { turns: orderId === null ? [] : (buckets[orderId] ?? []), begin, settle, abandon };
+  return { turns: buckets[orderKey] ?? [], begin, settle, abandon };
 }
 
 /**
@@ -381,9 +381,12 @@ export function useConversation(
   customerId: string | null,
   orderId: string | null,
   initialDraft = '',
+  shopping = false,
 ): Conversation {
-  const stored = useStoredThread(customerId, orderId);
-  const live = useLiveTurns(orderId);
+  const stored = useStoredThread(customerId, orderId, shopping);
+  // The shopping thread has no order, so its live turns bucket on the empty
+  // key. Support turns never land there: sending requires an order.
+  const live = useLiveTurns(orderId ?? '');
   // Seeded once, when the page mounts. The Orders page arrives with a reason
   // already chosen, and making the customer retype it is a small way of telling
   // them their click did not register.
@@ -394,12 +397,12 @@ export function useConversation(
   const [notice, setNotice] = useState<string | null>(null);
   const awaitingPerson = stored.awaitingPerson;
 
-  const blocked = blockedBecause(awaitingPerson, stored.closed, customerId, orderId);
+  const blocked = blockedBecause(awaitingPerson, stored.closed, customerId, orderId, shopping);
   const turns = merge(stored.turns, live.turns);
 
   const send = useCallback(async (selectedIds: readonly string[] = [], override?: string): Promise<void> => {
     const message = (override ?? draft).trim();
-    if (message.length === 0 || customerId === null || orderId === null || busy || stored.closed) {
+    if (message.length === 0 || customerId === null || (!shopping && orderId === null) || busy || stored.closed) {
       return;
     }
 
@@ -415,22 +418,23 @@ export function useConversation(
     // Provisional id, replaced by the real request id once there is one, so the
     // turn can be found again and de-duplicated against stored history.
     const localId = `local-${Date.now()}`;
+    const bucket = orderId ?? '';
     setDraft('');
     setError('');
     setNotice(null);
     setBusy(true);
-    live.begin(orderId, message, localId);
+    live.begin(bucket, message, localId);
 
     try {
-      const reply = await api.sendMessage({ customerId, orderId, message, itemIds: selectedIds });
-      settleReply(orderId, localId, message, selectedIds, reply, live);
+      const reply = await api.sendMessage({ customerId, orderId, message, itemIds: selectedIds, shopping });
+      settleReply(bucket, localId, message, selectedIds, reply, live);
     } catch (cause: unknown) {
       setError(describe(cause));
-      live.abandon(orderId, localId);
+      live.abandon(bucket, localId);
     } finally {
       setBusy(false);
     }
-  }, [busy, customerId, draft, live, orderId, stored.closed, turns]);
+  }, [busy, customerId, draft, live, orderId, shopping, stored.closed, turns]);
 
   return {
     turns,
@@ -488,6 +492,15 @@ function settleReply(
       createdAt: reply.message.createdAt,
       media: reply.message.media ?? null,
       waitingForPerson: !reply.agentConnected,
+    });
+    return;
+  }
+  if ('shopAnswer' in reply) {
+    live.settle(orderId, localId, {
+      kind: 'shop',
+      id: reply.shopAnswer.id,
+      text: message,
+      shopAnswer: reply.shopAnswer,
     });
     return;
   }
@@ -555,17 +568,24 @@ function toTurn(stored: StoredTurn): Turn {
   };
 }
 
+/** A stored shopping turn renders as `shop`, like a live one: both read the same frozen row. */
+function toShopTurn(stored: { message: string; shopAnswer: ShopAnswerDto }): Turn {
+  return { kind: 'shop', id: stored.shopAnswer.id, text: stored.message, shopAnswer: stored.shopAnswer };
+}
+
 /** Stored turns first, then live ones; a turn appearing in both is only drawn once. */
 function merge(stored: readonly Turn[], live: readonly Turn[]): readonly Turn[] {
   const seen = new Set(stored.map((turn) => turn.id));
   return [...stored, ...live.filter((turn) => !seen.has(turn.id))];
 }
 
-function reasonBlocked(customerId: string | null, orderId: string | null): string | null {
+function reasonBlocked(customerId: string | null, orderId: string | null, shopping: boolean): string | null {
   if (customerId === null) {
     return 'Sign in and the assistant can look up your orders.';
   }
-  if (orderId === null) {
+  // The shopping thread has no order: browsing, tracking and return questions
+  // need a signed-in customer, not a selected basket.
+  if (!shopping && orderId === null) {
     return 'Choose the order you are asking about.';
   }
   return null;

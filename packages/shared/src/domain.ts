@@ -99,6 +99,7 @@ export const RULE_IDS = [
   'R-12',
   'R-13',
   'R-14',
+  'R-15',
 ] as const;
 export type RuleId = (typeof RULE_IDS)[number];
 
@@ -203,6 +204,7 @@ export const OVERRIDE_CODES = [
   'ungrounded_reason_escalated',
   'untrusted_extraction_discarded',
   'low_confidence_claim_escalated',
+  'agent_requested_by_customer',
   'discretion_approve',
   'discretion_partial_refund',
   'discretion_exchange',

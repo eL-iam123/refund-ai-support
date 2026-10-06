@@ -338,6 +338,15 @@ const EnvSchema = z.object({
   ADMIN_API_SECRET: z.string().min(32, 'ADMIN_API_SECRET must be at least 32 characters').optional(),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_WINDOW: z.string().min(1).default('1 minute'),
+  /**
+   * Order-total ceiling above which every request is escalated to a person.
+   *
+   * A blunt, non-negotiable rule: any order whose total exceeds this value must
+   * not be decided automatically, regardless of how many items are in the basket
+   * or what each one costs. The check fires on the order's own totalCents, before
+   * the customer has selected items and before the model is called.
+   */
+  ESCALATION_CEILING_CENTS: z.coerce.number().int().positive().default(50_000),
 });
 
 /**
@@ -919,4 +928,14 @@ export function discretionConfig(env: Env): DiscretionConfig {
     minConfidence: env.DISCRETION_MIN_CONFIDENCE,
     nearMissQuote: env.DISCRETION_NEAR_MISS_QUOTE,
   };
+}
+
+/**
+ * Order-total ceiling above which every request is escalated to a person.
+ *
+ * Read in one place so the gate rule stays a pure function of its inputs and
+ * can be tested with no process env at all.
+ */
+export function escalationCeilingCents(env: Env): number {
+  return env.ESCALATION_CEILING_CENTS;
 }

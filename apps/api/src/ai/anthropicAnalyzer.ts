@@ -4,8 +4,8 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom, type AttemptOutcome } from './breaker.js';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildCaseSummaryUser, buildIntakeUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
-import { AskItemsSchema, CaseSummarySchema, CompleteSchema, IntakeOutputSchema, type IntakeOutput } from './schemas.js';
+import { buildCaseSummaryUser, buildIntakeUser, buildShopUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM, SHOP_SYSTEM } from './prompts.js';
+import { AskItemsSchema, CaseSummarySchema, CompleteSchema, IntakeOutputSchema, ShopSuggestionSchema, type IntakeOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
@@ -17,6 +17,8 @@ import {
   type AttemptObserver,
   type ChatInput,
   type ChatReply,
+  type ShopInput,
+  type ShopSuggestion,
 } from './analyzer.js';
 
 /**
@@ -71,6 +73,7 @@ const ASK_TOOL = 'ask_question';
 const DECIDE_TOOL = 'decide_claim';
 const ASK_ITEMS_TOOL = 'ask_which_items';
 const REMIND_TOOL = 'remind_admin';
+const SUGGEST_TOOL = 'suggest_products';
 
 interface MessageResponse {
   readonly content?: readonly {
@@ -170,6 +173,84 @@ export class AnthropicAnalyzer implements AIAnalyzer {
         ? `intake time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
         : `model output failed schema validation: ${complaints}`,
     );
+  }
+
+  /**
+   * Shopping nomination: which catalogue ids match, or null.
+   *
+   * Same contract as the other adapter: one pass, no repair, null on any
+   * failure. The model is forced through the single suggestion tool rather
+   * than asked for JSON, so a malformed nomination becomes a missing tool
+   * call instead of prose to parse.
+   */
+  async suggestProducts(input: ShopInput, observer: AttemptObserver): Promise<ShopSuggestion | null> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildShopUser(input.message, input.products, input.history);
+    const result = await runCandidates<ShopSuggestion>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'shop',
+      attempt: (model, attempt) => this.shopAttempt(model, attempt, user, budget, observer),
+    });
+    if (!result.ok) {
+      return null;
+    }
+    return result.value;
+  }
+
+  private async shopAttempt(
+    model: string,
+    attempt: number,
+    user: string,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<AttemptOutcome<ShopSuggestion>> {
+    const startedAt = Date.now();
+    try {
+      const response = await fetch(`${this.baseUrl}/messages`, {
+        method: 'POST',
+        signal: budget,
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': ANTHROPIC_VERSION,
+        },
+        body: JSON.stringify(shopRequestBody(model, user, this.env.AI_MAX_TOKENS)),
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new HttpStatusError(response.status, body);
+      }
+      const payload = (await response.json()) as MessageResponse;
+      const suggestion = shopSuggestion(payload, payload.model ?? model);
+      if (suggestion === null) {
+        return { ok: false, error: 'shop reply carried no suggestion tool call', retryable: false };
+      }
+      observer({
+        model: payload.model ?? model,
+        attempt,
+        ok: true,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: payload.usage?.input_tokens ?? null,
+        completionTokens: payload.usage?.output_tokens ?? null,
+        error: null,
+      });
+      return { ok: true, value: suggestion };
+    } catch (error: unknown) {
+      const failure = classify(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      return { ok: false, ...failure };
+    }
   }
 
   /**
@@ -508,12 +589,64 @@ function decideTool(): { name: string; description: string; input_schema: object
   };
 }
 
+/**
+ * The nomination tool.
+ *
+ * Ids only, re-checked against the database before anything is shown. The
+ * tool that is not offered cannot be called, so on this wire format a closed
+ * exit is closed rather than merely discouraged.
+ */
+function suggestTool(): { name: string; description: string; input_schema: object } {
+  return {
+    name: SUGGEST_TOOL,
+    description: 'Nominate the catalogue ids matching what the customer asked about, best match first.',
+    input_schema: z.toJSONSchema(ShopSuggestionSchema),
+  };
+}
+
 function remindTool(): { name: string; description: string; input_schema: object } {
   return {
     name: REMIND_TOOL,
     description: 'Notify the human agent that the customer is waiting or pushing for a response.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
   };
+}
+
+/**
+ * The Messages body for one nomination turn.
+ *
+ * `tool_choice: any` with a single tool, mirroring the intake adapter: the
+ * model must call the one tool it has, and the answer is read back off the
+ * call rather than parsed out of prose.
+ */
+function shopRequestBody(model: string, user: string, maxTokens: number): Record<string, unknown> {
+  return {
+    model,
+    max_tokens: maxTokens,
+    temperature: 0,
+    system: SHOP_SYSTEM,
+    tools: [suggestTool()],
+    tool_choice: { type: 'any' },
+    messages: [{ role: 'user', content: user }],
+  };
+}
+
+/**
+ * Reads the nomination off the tool call, validated and stripped.
+ *
+ * Null when the model called nothing usable, which the ladder treats as a
+ * miss worth another candidate rather than an answer. What comes back is the
+ * suggestion schema and nothing else.
+ */
+function shopSuggestion(payload: MessageResponse, model: string): ShopSuggestion | null {
+  for (const block of payload.content ?? []) {
+    if (block.type !== 'tool_use' || block.name !== SUGGEST_TOOL) {
+      continue;
+    }
+    const parsed = ShopSuggestionSchema.safeParse(block.input ?? {});
+    return parsed.success ? { productIds: parsed.data.productIds, model } : null;
+  }
+  return null;
 }
 
 /**

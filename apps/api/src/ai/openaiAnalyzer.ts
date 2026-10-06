@@ -5,8 +5,8 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom } from './breaker.js';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildCaseSummaryUser, buildIntakeUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM } from './prompts.js';
-import { CaseSummarySchema, IntakeOutputSchema, type IntakeOutput } from './schemas.js';
+import { buildCaseSummaryUser, buildIntakeUser, buildShopUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM, SHOP_SYSTEM } from './prompts.js';
+import { CaseSummarySchema, IntakeOutputSchema, ShopSuggestionSchema, type IntakeOutput } from './schemas.js';
 import type { AttemptOutcome } from './breaker.js';
 import { parseJson } from './json.js';
 import {
@@ -19,6 +19,8 @@ import {
   type AttemptObserver,
   type ChatInput,
   type ChatReply,
+  type ShopInput,
+  type ShopSuggestion,
 } from './analyzer.js';
 import type { OrderRecord } from '../db/records.js';
 
@@ -254,7 +256,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
           ? base
           : `${base}\n\nYour previous reply was rejected: ${complaints}. Reply with valid JSON only.`;
 
-      const completion = await this.complete(INTAKE_SYSTEM, user, budget, observer);
+      const completion = await this.complete(INTAKE_SYSTEM, user, budget, observer, 'intake');
       const parsed = IntakeOutputSchema.safeParse(parseJson(completion.text));
 
       if (parsed.success) {
@@ -282,6 +284,39 @@ export class OpenAiAnalyzer implements AIAnalyzer {
         ? `intake time budget of ${this.env.AI_TOTAL_BUDGET_MS}ms exhausted; last problem: ${complaints}`
         : `model output failed schema validation: ${complaints}`,
     );
+  }
+
+  /**
+   * Shopping nomination: which catalogue ids match, or null.
+   *
+   * One pass, no repair: keyword search is the repair. A nomination that
+   * fails validation is discarded and the caller answers from the FTS index,
+   * which is why this returns null instead of throwing - a missing suggestion
+   * must never fail a conversation.
+   */
+  async suggestProducts(input: ShopInput, observer: AttemptObserver): Promise<ShopSuggestion | null> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildShopUser(input.message, input.products, input.history);
+    let completion;
+    try {
+      completion = await this.complete(SHOP_SYSTEM, user, budget, observer, 'shop');
+    } catch {
+      return null;
+    }
+    const parsed = ShopSuggestionSchema.safeParse(parseJson(completion.text));
+    if (!parsed.success) {
+      observer({
+        model: completion.model,
+        attempt: 1,
+        ok: false,
+        latencyMs: 0,
+        promptTokens: completion.promptTokens,
+        completionTokens: completion.completionTokens,
+        error: 'shop suggestion rejected by validation',
+      });
+      return null;
+    }
+    return { productIds: parsed.data.productIds, model: completion.model };
   }
 
   /**
@@ -392,13 +427,14 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     user: string,
     budget: AbortSignal,
     observer: AttemptObserver,
+    purpose: string,
   ): Promise<Completion> {
     const result = await runCandidates<Completion>({
       candidates: this.candidates,
       maxAttempts: this.env.AI_MAX_ATTEMPTS,
       breaker: this.breaker,
       budget,
-      purpose: 'intake',
+      purpose,
       attempt: async (model, attempt) => {
         const outcome = await this.attempt(model, attempt, system, user, budget, observer);
         return outcome.ok ? { ok: true, value: outcome.completion } : outcome;

@@ -11,6 +11,7 @@ import type {
   RuleScope,
   Stage,
 } from '@refund/shared';
+import { FAULTY_REASONS } from '@refund/shared';
 import type { CustomerRecord, OrderItemRecord, OrderRecord } from '../db/records.js';
 import type { Db } from '../db/connection.js';
 
@@ -43,6 +44,11 @@ export interface PolicyContext {
   readonly blockedItems: readonly BlockedItem[];
   readonly eligibleAmountCents: number;
   readonly orderTotalCents: number;
+  /**
+   * The order-total ceiling above which R-15 escalates. Supplied by the
+   * orchestrator so the rule stays a pure function of its context.
+   */
+  readonly escalationCeilingCents: number;
 }
 
 export interface PolicyRule {
@@ -136,6 +142,6 @@ export function hasGroundedFault(context: PolicyContext): boolean {
   }
   return (
     extraction.intent === 'refund' &&
-    ['damaged', 'wrong_item', 'not_as_described'].includes(extraction.reason)
+    FAULTY_REASONS.includes(extraction.reason)
   );
 }

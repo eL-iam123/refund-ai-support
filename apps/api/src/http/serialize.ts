@@ -1,3 +1,4 @@
+import { STAGES } from '@refund/shared';
 import type {
   BlockedItemDto,
   ClaimExtractionDto,
@@ -9,6 +10,7 @@ import type {
   RefundRequestDto,
   RefundRequestSummaryDto,
   RuleEvaluationDto,
+  Stage,
   StageTiming,
 } from '@refund/shared';
 import type { PersistedRequest } from '../db/records.js';
@@ -56,6 +58,23 @@ export function toDecisionDto(row: PersistedRequest): RefundDecisionDto {
   };
 }
 
+/**
+ * The last stage a request reached, for a progress indicator.
+ *
+ * Derived from the stored timings rather than threaded through the pipeline result: the
+ * timings are what the record holds, so a stage that ran cannot drift from one that was
+ * reported.
+ */
+function lastStage(timingsJson: string): Stage {
+  try {
+    const timings = JSON.parse(timingsJson) as readonly { readonly stage?: unknown }[];
+    const last = timings.at(-1)?.stage;
+    return typeof last === 'string' && (STAGES as readonly string[]).includes(last) ? (last as Stage) : 'intake';
+  } catch {
+    return 'intake';
+  }
+}
+
 export function toRequestDto(row: PersistedRequest): RefundRequestDto {
   return {
     id: row.id,
@@ -77,6 +96,7 @@ export function toRequestDto(row: PersistedRequest): RefundRequestDto {
     overriddenBy: row.overriddenBy,
     overrideNote: row.overrideNote,
     caseSummary: row.caseSummary,
+    progressStage: lastStage(row.timingsJson),
   };
 }
 

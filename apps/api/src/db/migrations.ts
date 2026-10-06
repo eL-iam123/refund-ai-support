@@ -723,6 +723,67 @@ const MIGRATIONS: readonly Migration[] = [
       db.exec('ALTER TABLE refund_requests ADD COLUMN case_summary TEXT');
     },
   },
+  {
+    version: 21,
+    name: 'products FTS index',
+    up: (db) => {
+      // Literal keyword search over the catalogue for support lookups
+      // (ADR 0005). External-content FTS5, so the products table stays the
+      // source of truth and the index is rebuilt from it. Triggers keep the
+      // two in sync because insertProduct writes directly; without them a
+      // seeded or purchased catalogue would search stale copy.
+      if (!hasTable(db, 'products')) {
+        return;
+      }
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS products_fts USING fts5(
+          name, blurb, description, content='products', content_rowid='rowid',
+          tokenize='porter unicode61 remove_diacritics 1'
+        );
+        DROP TRIGGER IF EXISTS products_ai;
+        DROP TRIGGER IF EXISTS products_ad;
+        DROP TRIGGER IF EXISTS products_au;
+        CREATE TRIGGER products_ai AFTER INSERT ON products BEGIN
+          INSERT INTO products_fts(rowid, name, blurb, description)
+          VALUES (new.rowid, new.name, new.blurb, new.description);
+        END;
+        CREATE TRIGGER products_ad AFTER DELETE ON products BEGIN
+          INSERT INTO products_fts(products_fts, rowid, name, blurb, description)
+          VALUES ('delete', old.rowid, old.name, old.blurb, old.description);
+        END;
+        CREATE TRIGGER products_au AFTER UPDATE ON products BEGIN
+          INSERT INTO products_fts(products_fts, rowid, name, blurb, description)
+          VALUES ('delete', old.rowid, old.name, old.blurb, old.description);
+          INSERT INTO products_fts(rowid, name, blurb, description)
+          VALUES (new.rowid, new.name, new.blurb, new.description);
+        END;
+        INSERT INTO products_fts(products_fts) VALUES ('rebuild');
+      `);
+    },
+  },
+  {
+    version: 22,
+    name: 'shop_assistant_turns',
+    up: (db) => {
+      // The shopping assistant's thread (ADR 0005). Separate from
+      // `shop_dialogue`, which is the refund intake's record: mixing browsing
+      // answers into it would put product cards in front of the grounding
+      // check. `answer_json` freezes what was shown, so a replayed thread
+      // cannot disagree with what the customer acted on.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS shop_assistant_turns (
+          id               TEXT PRIMARY KEY,
+          created_at       TEXT NOT NULL,
+          customer_id      TEXT NOT NULL,
+          order_id         TEXT,
+          customer_message TEXT NOT NULL,
+          answer_json      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_shop_assistant_customer
+          ON shop_assistant_turns (customer_id, created_at);
+      `);
+    },
+  },
 ];
 
 /**

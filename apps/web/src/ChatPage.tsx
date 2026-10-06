@@ -4,7 +4,8 @@ import { Bot, Headset, Send, ShieldCheck } from 'lucide-react';
 import { ErrorNote } from './components';
 import { formatCents } from './format';
 import { useConversation, type Conversation, type ReplyBody, type Turn } from './useConversation';
-import { money, shopApi, type ShopOrder, describe } from './shop/api';
+import { money, shopApi, type Product, type ShopOrder, describe } from './shop/api';
+import { addToCart } from './shop/cartStore';
 import type { DuplicateNotice, ItemChoice, ItemPickerOffer } from './api';
 import { reasonFor, REASONS } from './shop/issueReasons';
 import { useAsyncData } from './shop/hooks';
@@ -43,15 +44,22 @@ export function ChatPage(): ReactNode {
   const orders = useAsyncData(() => shopApi.orders(), ['help-orders']);
   const orderList = useMemo(() => orders.data?.orders ?? [], [orders.data]);
   const selected = useSelectedOrder(orderList, handoff?.orderId ?? null);
+  // Support is the refund conversation about one order; shopping is order
+  // status, return logistics and browsing with no order selected. The server
+  // re-classifies every message either way, so the toggle is a lens for the
+  // customer rather than a promise about which pipeline answers.
+  const [mode, setMode] = useState<'support' | 'shopping'>('support');
+  const shopping = mode === 'shopping';
 
   const order = useMemo(
-    () => orderList.find((candidate) => candidate.id === selected.orderId) ?? null,
-    [orderList, selected.orderId],
+    () => (shopping ? null : (orderList.find((candidate) => candidate.id === selected.orderId) ?? null)),
+    [orderList, selected.orderId, shopping],
   );
   const chat = useConversation(
     customerId,
-    selected.orderId,
+    shopping ? null : selected.orderId,
     complaintFor(handoff?.issue ?? null),
+    shopping,
   );
   // Settled and awaiting are different things, and treating them as one cost the
   // customer the ability to talk about the item they had just complained about: an
@@ -67,14 +75,36 @@ export function ChatPage(): ReactNode {
   return (
     <div className="chat-layout">
       <aside className="chat-context">
-        <h1>Get help with this order</h1>
-        <OrderScope
-          orders={orderList}
-          loading={orders.data === null && orders.error === null}
-          selected={selected.orderId}
-          onSelect={selected.select}
-          order={order}
-        />
+        <h1>{shopping ? 'Shopping help' : 'Get help with this order'}</h1>
+        <div className="row" role="group" aria-label="Assistant mode">
+          <button
+            type="button"
+            className={shopping ? 'chip' : 'chip chip-active'}
+            aria-pressed={!shopping}
+            onClick={() => setMode('support')}
+          >
+            Refund help
+          </button>
+          <button
+            type="button"
+            className={shopping ? 'chip chip-active' : 'chip'}
+            aria-pressed={shopping}
+            onClick={() => setMode('shopping')}
+          >
+            Shopping help
+          </button>
+        </div>
+        {shopping ? (
+          <ShoppingPanel />
+        ) : (
+          <OrderScope
+            orders={orderList}
+            loading={orders.data === null && orders.error === null}
+            selected={selected.orderId}
+            onSelect={selected.select}
+            order={order}
+          />
+        )}
         <AssistantStatus />
         <PolicyNote />
       </aside>
@@ -731,6 +761,74 @@ function OrderScope({
         </select>
       </label>
       {order !== null ? <OrderFacts order={order} /> : null}
+    </div>
+  );
+}
+
+/**
+ * Catalogue search beside the shopping thread.
+ *
+ * A shortcut, not the assistant: typing here never sends a message, it only
+ * fills the cart. Anything needing words - tracking, returns, advice - goes
+ * through the composer so the answer is persisted in the thread.
+ */
+function ShoppingPanel(): ReactNode {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<readonly Product[]>([]);
+  const [error, setError] = useState('');
+
+  async function search(): Promise<void> {
+    const text = query.trim();
+    if (text.length === 0) {
+      return;
+    }
+    try {
+      const found = await shopApi.searchProducts(text, { limit: 6 });
+      setResults(found.products);
+      setError('');
+    } catch (cause: unknown) {
+      setError(describe(cause));
+    }
+  }
+
+  return (
+    <div className="order-scope">
+      <form
+        className="stack-sm"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void search();
+        }}
+      >
+        <label className="stack-sm">
+          <span className="label">Search the catalogue</span>
+          <input
+            value={query}
+            maxLength={200}
+            aria-label="Search the catalogue"
+            placeholder="Lamp, mug, kettle…"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <button type="submit" className="button-secondary small">
+          Search
+        </button>
+      </form>
+      {error.length > 0 ? <ErrorNote error={error} /> : null}
+      {results.length > 0 ? (
+        <ul className="lines">
+          {results.map((item) => (
+            <li key={item.id}>
+              <span>
+                {item.name} <span className="num">{money(item.priceCents)}</span>
+              </span>
+              <button type="button" className="chip" onClick={() => addToCart(item.id)}>
+                Add
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

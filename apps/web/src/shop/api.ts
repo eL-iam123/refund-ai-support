@@ -11,8 +11,9 @@
 
 import { request, post } from '../httpClient';
 import type { ItemPickerOffer } from '../api';
+import type { ShopAnswerDto } from '@refund/shared';
 
-export type { ItemPickerOffer };
+export type { ItemPickerOffer, ShopAnswerDto };
 
 export interface Product {
   readonly id: string;
@@ -82,6 +83,21 @@ export interface CartLineInput {
 export const shopApi = {
   products: (): Promise<{ products: readonly Product[] }> => request('/api/shop/products'),
 
+  /** Catalogue search: the same endpoint with a query, for the shopping panel. */
+  searchProducts: (q: string, opts: { inStock?: boolean; maxPriceCents?: number; limit?: number } = {}): Promise<{ products: readonly Product[] }> => {
+    const search = new URLSearchParams({ q });
+    if (opts.inStock !== undefined) {
+      search.set('inStock', opts.inStock ? 'true' : 'false');
+    }
+    if (opts.maxPriceCents !== undefined) {
+      search.set('maxPriceCents', String(opts.maxPriceCents));
+    }
+    if (opts.limit !== undefined) {
+      search.set('limit', String(opts.limit));
+    }
+    return request(`/api/shop/products?${search.toString()}`);
+  },
+
   demoAccounts: (): Promise<{ accounts: readonly ShopUser[] }> => request('/api/shop/demo-accounts'),
 
   me: (): Promise<{ user: ShopUser | null }> => request('/api/shop/me'),
@@ -137,6 +153,16 @@ export const shopApi = {
   /** Message counts per order, for the "3 messages" badge on the order picker. */
   chatSummary: (): Promise<{ counts: readonly { orderId: string; count: number }[] }> =>
     request('/api/shop/chat/summary'),
+
+  /**
+   * The customer's shopping thread with the assistant.
+   *
+   * Separate from the order thread: these turns answered no claim, so they
+   * are read here rather than through `chatHistory`, which feeds the policy
+   * transcript and must never see them.
+   */
+  assistantHistory: (): Promise<{ turns: readonly { message: string; shopAnswer: ShopAnswerDto }[] }> =>
+    request('/api/shop/assistant/history'),
 
   /**
    * Whether a model is actually behind the assistant right now.
