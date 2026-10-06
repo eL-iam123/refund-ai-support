@@ -68,9 +68,10 @@ ul { margin: 0; padding: 0; list-style: none; }
 .shopper-app:has(.chat-layout) .chat-layout { flex: 1; min-height: 0; }
 .admin-app:not(:has(.live-layout)) .main { padding-top: 16px; padding-bottom: 20px; }
 .admin-app:not(:has(.live-layout)) .admin-page { gap: 14px; }
-.footer p { display: flex; align-items: center; gap: 6px; }
-
-.stack { display: grid; gap: 22px; }
+  .footer p { display: flex; align-items: center; gap: 6px; }
+  .shopper-app > .footer > p.muted.small { display: block; max-width: 72ch; margin: 0 auto; padding: 0 12px; text-align: center; line-height: 1.45; }
+  
+  .stack { display: grid; gap: 22px; }
 .stack-sm { display: grid; gap: 4px; }
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .grow { flex: 1; min-width: 220px; }
