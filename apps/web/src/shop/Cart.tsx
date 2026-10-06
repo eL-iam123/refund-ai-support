@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { describe, money, shopApi, type Product, type ShopOrder } from './api';
 import { CartSummary } from './Account';
-import type { CartLine } from './cartStore';
+import { removeFromCart, type CartLine } from './cartStore';
 
 /**
  * Cart and checkout.
@@ -81,7 +81,12 @@ export function Cart({
   return (
     <section className="card wide">
       <h2>Your cart</h2>
-      <CartSummary products={products} lines={lines} totalCents={estimate} />
+      <CartSummary
+        products={products}
+        lines={lines}
+        totalCents={estimate}
+        onRemove={removeFromCart}
+      />
       {lines.length > 0 && (
         <p className="muted small">
           The order total is recalculated by the server at checkout; this figure is a preview.

@@ -18,6 +18,20 @@ import type { CartLine } from './cartStore';
  * delivery date, and pressed reload would arrive at a blank composer with no
  * explanation. A URL survives that, and can be pasted to a colleague.
  */
+export function OrderDetails({ order, onBack, onReport }: { order: ShopOrder; onBack: () => void; onReport: () => void }): ReactNode {
+  return (
+    <div className="order-detail-page">
+      <button type="button" className="btn-quiet order-back" onClick={onBack}>← Back to orders</button>
+      <header className="order-detail-heading"><div><p className="eyebrow">Order details</p><h1>{order.id}</h1><p className="lede">Placed {new Date(order.placedAt).toLocaleDateString()}</p></div><span className={`pill pill-${order.status}`}>{order.status.replace(/_/g, ' ')}</span></header>
+      <section className="order-detail-grid">
+        <div className="order-detail-card card"><p className="eyebrow">Delivery</p><h2>{order.trackingStatus.replace(/_/g, ' ')}</h2><p className="muted">Payment {order.paymentState}</p></div>
+        <div className="order-detail-card card"><p className="eyebrow">Total paid</p><h2 className="num">{money(order.totalCents)}</h2><p className="muted">All taxes and delivery included</p></div>
+      </section>
+      <section className="order-detail-card card"><div className="section-heading"><div><p className="eyebrow">Items</p><h2>What&apos;s in this order</h2></div><button type="button" className="btn-primary" onClick={onReport}>Get help</button></div><OrderLines items={order.items} /></section>
+    </div>
+  );
+}
+
 export function Orders({
   orders,
   signedIn,
@@ -57,16 +71,30 @@ export function Orders({
     );
   }
   return (
-    <div className="stack">
-      <h1>Your orders</h1>
+    <div className="orders-page">
+      <header className="orders-heading">
+        <div>
+          <p className="eyebrow">Account / Purchases</p>
+          <h1>Your orders</h1>
+          <p className="lede">Track deliveries, revisit purchases, or get help with an order.</p>
+        </div>
+        <div className="orders-summary"><strong>{orders.length}</strong><span>orders</span></div>
+      </header>
       {notice ? (
         <div className="response-toast" role="status" aria-live="polite">
           New reply for {notice.orderId}. Open the chat to see the latest update.
         </div>
       ) : null}
-      {orders.map((order) => (
-        <OrderCard key={order.id} order={order} messageCount={countMap.get(order.id) ?? 0} onRefill={onRefill} />
-      ))}
+      <div className="orders-toolbar">
+        <span className="muted small">Recent activity</span>
+        <span className="orders-toolbar-line" aria-hidden="true" />
+        <span className="muted small">Showing all orders</span>
+      </div>
+      <div className="orders-grid">
+        {orders.map((order) => (
+          <OrderCard key={order.id} order={order} messageCount={countMap.get(order.id) ?? 0} onRefill={onRefill} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -129,16 +157,6 @@ function firstCountIncrease(
   return null;
 }
 
-/** When it was bought and where it got to. Facts, not status vocabulary. */
-function OrderMeta({ order }: { order: ShopOrder }): ReactNode {
-  return (
-    <p className="muted small">
-      Placed {new Date(order.placedAt).toLocaleDateString()} · payment {order.paymentState} ·
-      delivery {order.trackingStatus}
-    </p>
-  );
-}
-
 function OrderCard({
   order,
   messageCount,
@@ -163,17 +181,16 @@ function OrderCard({
     );
 
   return (
-    <article className="card">
-      <header className="row">
+    <article className="order-card card" role="link" tabIndex={0} onClick={(event) => { if ((event.target as HTMLElement).closest('button')) return; void navigate(`/orders/${encodeURIComponent(order.id)}`); }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void navigate(`/orders/${encodeURIComponent(order.id)}`); } }}>
+      <header className="order-card-top">
         <div className="order-card-head">
           <span className={`pill pill-${order.status}`}>{order.status.replace(/_/g, ' ')}</span>
           {messageCount > 0 ? <span className="order-message-badge">{messageCount === 1 ? '1 new reply' : `${messageCount} messages`}</span> : null}
         </div>
-        <strong className="num">{money(order.totalCents)}</strong>
+        <span className="order-total"><strong className="num">{money(order.totalCents)}</strong><span>Total paid</span></span>
       </header>
-      <p className="mono small">{order.id}</p>
-      <OrderMeta order={order} />
-
+      <div className="order-card-id"><span>Order placed {new Date(order.placedAt).toLocaleDateString()}</span><span className="mono">{order.id}</span></div>
+      <div className="order-delivery"><span className="delivery-dot" aria-hidden="true" /><div><strong>{order.trackingStatus.replace(/_/g, ' ')}</strong><span>Payment {order.paymentState}</span></div></div>
       <OrderLines items={order.items} />
 
       <OrderActions

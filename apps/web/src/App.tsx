@@ -1,5 +1,5 @@
 import React, { useState, type ReactNode } from 'react';
-import { Route, Routes, useNavigate } from 'react-router-dom';
+import { Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { ChatPage } from './ChatPage';
 import { DashboardPage } from './DashboardPage';
 import { AdminLayout, ShopperLayout } from './layouts';
@@ -18,7 +18,7 @@ import { api } from './api';
 import { AccountPage } from './shop/Account';
 import { Cart } from './shop/Cart';
 import { Catalogue } from './shop/Catalogue';
-import { Orders } from './shop/Orders';
+import { OrderDetails, Orders } from './shop/Orders';
 
 /**
  * The shop and the staff console, in one bundle and two layouts.
@@ -42,6 +42,7 @@ export function App(): ReactNode {
         <Route path="/" element={<ShopRoute />} />
         <Route path="/cart" element={<CartRoute />} />
         <Route path="/orders" element={<OrdersRoute />} />
+        <Route path="/orders/:id" element={<OrderDetailRoute />} />
         <Route path="/account" element={<AccountRoute />} />
         <Route path="/help" element={<ChatPage />} />
         <Route path="*" element={<p className="empty">No such page.</p>} />
@@ -247,6 +248,16 @@ function OrdersRoute(): ReactNode {
       onBrowse={() => void navigate('/')}
     />
   );
+}
+
+function OrderDetailRoute(): ReactNode {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const orders = useAsyncData(() => shopApi.orders(), ['orders']);
+  const order = orders.data?.orders.find((candidate) => candidate.id === id);
+  if (orders.data === null) return <Spinner />;
+  if (order === undefined) return <p className="empty">Order not found.</p>;
+  return <OrderDetails order={order} onBack={() => void navigate('/orders')} onReport={() => void navigate(`/help?order=${encodeURIComponent(order.id)}`)} />;
 }
 
 function AccountRoute(): ReactNode {
