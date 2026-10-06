@@ -9,6 +9,7 @@ import {
   finalizedRequestId,
   isChatClosed,
 } from '../db/chatClosures.js';
+import { ESCALATION_AGENT } from '../db/handoffs.js';
 import { insertRequest, type NewRequestRow } from '../db/requestRepository.js';
 import { authoriseRefund, settleRefund } from '../db/refundLedger.js';
 import type { Decision } from '@refund/shared';
@@ -208,14 +209,10 @@ describe('an alternative outcome closes once an agent has handled the thread', (
    * without it these outcomes could never be closed at all, because the request is
    * resolved but the money question is moot.
    */
-  it.each(['exchange', 'store_credit'] as const)('holds a %s thread open until a handoff has ended', (decision) => {
+  it.each(['exchange', 'store_credit'] as const)('closes a %s thread its holder closes mid-conversation', (decision) => {
     const f = fixture();
     insertRequest(f.db, requestRow(f, decision, `REQ-ALT-${decision}`, 0));
-    insertHandoff(f, 'HAND-OPEN', 'agent@example.com', TEST_NOW, null);
-
-    expect(finalizedRequestId(f.db, f.customerId, f.orderId), 'while the handoff is running').toBeNull();
-
-    f.db.prepare('UPDATE handoffs SET ended_at = ? WHERE id = ?').run(TEST_NOW.toISOString(), 'HAND-OPEN');
+    insertHandoff(f, 'HAND-LIVE', 'agent@example.com', TEST_NOW, null);
 
     const closure = closeFinalizedChat(f.db, {
       customerId: f.customerId,
@@ -244,9 +241,33 @@ describe('an alternative outcome closes once an agent has handled the thread', (
     // No handoff at all: a person still owes this customer an answer.
     expect(finalizedRequestId(f.db, f.customerId, f.orderId)).toBeNull();
 
-    // A running handoff is not handling either: the person is still on it.
-    insertHandoff(f, 'HAND-RUNNING', 'agent@example.com', TEST_NOW, null);
+    // The automatic marker is not handling either: nobody is on it.
+    insertHandoff(f, 'HAND-WAITING', ESCALATION_AGENT, TEST_NOW, null);
     expect(finalizedRequestId(f.db, f.customerId, f.orderId)).toBeNull();
+    f.db.close();
+  });
+
+  it('closes an escalated thread its holder closes mid-conversation', () => {
+    // A person holding the case is handling it, ended handoff or not:
+    // closing ends their live takeover too, and requiring a hand-back first
+    // would add a round trip without adding any protection.
+    const f = fixture();
+    insertRequest(f.db, requestRow(f, 'escalated', 'REQ-HELD', 0));
+    insertHandoff(f, 'HAND-LIVE', 'agent@example.com', TEST_NOW, null);
+
+    const closure = closeFinalizedChat(f.db, {
+      customerId: f.customerId,
+      orderId: f.orderId,
+      closedBy: 'agent@example.com',
+      now: TEST_NOW,
+    });
+
+    expect(closure.finalState).toBe('escalated');
+    expect(isChatClosed(f.db, f.customerId, f.orderId)).toBe(true);
+    const live = f.db
+      .prepare('SELECT COUNT(*) AS n FROM handoffs WHERE id = ? AND ended_at IS NULL')
+      .get('HAND-LIVE') as { n: number };
+    expect(live.n).toBe(0);
     f.db.close();
   });
 

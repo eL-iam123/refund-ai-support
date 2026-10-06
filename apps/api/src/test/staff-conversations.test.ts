@@ -310,6 +310,61 @@ describe('the live takeover console', () => {
     expect(brief.state).not.toBe('ai');
   });
 
+  it('closes an escalation its holder closes mid-conversation, and locks the thread', async () => {
+    // The console's Close ticket button, end to end: claim the fork, close it
+    // while holding it, and the thread locks - while an unhandled escalation
+    // is still refused, because nobody has answered it yet.
+    harness = await appHarness();
+    seedShop(harness.db, TEST_NOW);
+    const app = harness.app;
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
+    expect(escalated.decision).toBe('escalated');
+
+    // Nobody holding it yet: closing refuses with the reason, not silence.
+    const premature = await app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${session.customerId}/close`,
+      headers: { authorization: agent() },
+      payload: { orderId: session.orderId },
+    });
+    expect(premature.statusCode).toBe(409);
+
+    const claim = await app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${session.customerId}/take-over`,
+      headers: { authorization: agent() },
+      payload: { orderId: session.orderId },
+    });
+    expect(claim.statusCode).toBe(200);
+
+    const closed = await app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${session.customerId}/close`,
+      headers: { authorization: agent() },
+      payload: { orderId: session.orderId },
+    });
+    expect(closed.statusCode).toBe(200);
+    expect(closed.json<{ closure: { finalState: string } }>().closure.finalState).toBe('escalated');
+
+    const history = await app.inject({
+      method: 'GET',
+      url: `/api/shop/chat/history?orderId=${encodeURIComponent(session.orderId)}`,
+      headers: { cookie: cookiesOf(session) },
+    });
+    expect(history.json<{ closed: boolean }>().closed).toBe(true);
+
+    const after = await app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId: session.orderId, message: 'hello?' },
+    });
+    expect(after.statusCode).toBe(409);
+    expect(after.json<{ error: string }>().error).toBe('chat_closed');
+  });
+
   it('does not fail a second order escalation when another order already has an unattended takeover', async () => {
     harness = await appHarness();
     seedShop(harness.db, TEST_NOW);

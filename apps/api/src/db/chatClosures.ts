@@ -3,7 +3,7 @@ import { MONEY_DECISIONS, type Decision } from '@refund/shared';
 import type { Db } from './connection.js';
 import { appendAuditEvent } from './auditChain.js';
 import { latestRequestForThread } from './requestRepository.js';
-import { activeHandoffForCustomer } from './handoffs.js';
+import { activeHandoffForCustomer, ESCALATION_AGENT } from './handoffs.js';
 
 export interface ChatClosure {
   readonly id: string;
@@ -72,10 +72,11 @@ export function isChatClosed(db: Db, customerId: string, orderId: string | null)
  *    ended. That is what makes the confirmation possible before the conversation
  *    ends, and it is why these outcomes are closable at all rather than stuck.
  *  - `escalated` on its own is never finalisable: it means a person still owes
- *    an answer. Once a person has taken the thread and handed it back, the
- *    answer has been given in person, and the thread finalises like any other
- *    handled one. Without this, a case a person resolved could never be
- *    closed, and every resolved escalation stayed open forever.
+ *    an answer. Once a person has taken the thread - holding it now or having
+ *    handed it back - the answer is being or has been given in person, and the
+ *    thread finalises like any other handled one. Without this, a case a
+ *    person resolved could never be closed, and every resolved escalation
+ *    stayed open forever.
  */
 export function finalizedRequestId(db: Db, customerId: string, orderId: string | null): string | null {
   const latest = latestRequestForThread(db, customerId, orderId);
@@ -101,21 +102,25 @@ export function finalizedRequestId(db: Db, customerId: string, orderId: string |
 }
 
 /**
- * Whether a person has taken this thread and handed it back.
+ * Whether a person has taken this thread.
  *
- * The closing detail and the confirmation the customer was promised both have to
- * have happened in the thread itself, so the signal is a handoff on this order
- * that is finished - not one still running, and not one on a different order.
+ * A finished handoff is the evidence it happened - but so is a live one held
+ * by a named agent: closing ends their takeover too, and requiring a hand-back
+ * first would add a round trip without adding any protection, since handing
+ * back resolves nothing either. The automatic escalation marker never counts,
+ * with or without an end date: nobody is on an unattended thread, so there is
+ * no one whose handling the closure could record.
  */
 function agentHasHandledThread(db: Db, customerId: string, orderId: string | null): boolean {
   const handled = db
     .prepare(
       `SELECT 1 AS present
          FROM handoffs
-        WHERE customer_id = ? AND order_id IS ? AND ended_at IS NOT NULL
+        WHERE customer_id = ? AND order_id IS ?
+          AND (ended_at IS NOT NULL OR agent_id <> ?)
         LIMIT 1`,
     )
-    .get(customerId, orderId);
+    .get(customerId, orderId, ESCALATION_AGENT);
   return handled !== undefined;
 }
 
