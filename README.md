@@ -71,44 +71,25 @@ policy engine owns the decision, and a person only reviews or overrides it.
 
 ## Quick start
 
-> **Running both at once?** `docker compose up` and `pnpm dev` both bind **4000**, so
-> the second one to start fails with `EADDRINUSE`. Stop the container
-> (`docker compose stop api`) or give the dev process its own port (`API_PORT=4001`) —
-> and note they read *different databases*: the container uses `/data/refund.sqlite`,
-> a local run uses `DATABASE_PATH` from `.env`. The API now says this itself when the
-> port is taken, rather than only printing a stack trace.
-
 
 ### One command, with Docker
 
 ```bash
+cp .env.example .env
+echo 'AI_API_KEY=paste_your_key_here' >> .env
 docker compose up --build   # http://localhost:4000 - API, console and shop
 ```
 
 That is the whole setup. The storefront items seed themselves on boot — the
-catalogue is the one thing that is, because it is the shop's stock rather than
-invented activity, and seeding it is idempotent and additive. There are **no**
-demo customers, orders or history: register an account and buy something to
-exercise the flow yourself, so what you see is what actually happened.
+catalogue is idempotent and additive — and the compose stack additionally seeds
+fifteen demo shoppers with orders and already-decided claims, so the console
+has something to look at on first run. Sign in passwordlessly as e.g.
+`sam@shop.demo` via the demo login, or register an account and buy something
+to exercise the flow yourself. To start empty instead, run once with seeding
+off and a fresh volume:
 
-To re-run the catalogue seed by hand (safe, and it picks up any item added
-since), it is the same code the boot path calls:
 
-```bash
-docker compose exec api node apps/api/dist/db/seed-cli.js
-```
 
-**To use a real model, paste your key into `.env` and restart.** That is the
-entire procedure:
-
-```bash
-cp .env.example .env
-echo 'AI_API_KEY=paste_your_key_here' >> .env
-docker compose up
-```
-
-The provider is worked out from the key, so any of them works with no other
-setting. None of them is required, and none is the default:
 
 | Your key starts with | Provider used |
 | --- | --- |
