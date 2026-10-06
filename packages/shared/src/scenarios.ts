@@ -75,6 +75,16 @@ export interface Scenario {
    */
   readonly expectsQuestion?: boolean;
   /**
+   * The request should end in the remedy confirmation rather than a decision.
+   *
+   * A wrong item leaves the remedy open - refund, replacement, or just reporting
+   * it - so a payable decision on one comes back as the confirmation question
+   * even when the policy would approve. S-19 is the case that asserts it: the
+   * customer stated a problem but never asked for money, and the engine must
+   * not assume the remedy.
+   */
+  readonly expectsConfirmation?: boolean;
+  /**
    * Rules that must appear in the trace but are not expected to decide
    * anything, e.g. R-03b, which only annotates that a threshold re-check
    * mattered. Kept separate so `expectedRules` means "these decided".
@@ -165,7 +175,7 @@ export const SCENARIOS: readonly Scenario[] = [
     orderId: 'ORD-1002',
     orders: [order('ORD-1002', 4, 3, [item('ITM-1002-A', 'Trail Shell Jacket', 20000)])],
     message:
-      "The thing I got isn't what I ordered and the box looked like someone had already opened it.",
+      "The thing I got isn't what I ordered and the box looked like someone had already opened it. Please refund me for it.",
     expectedDecision: 'approved',
     expectedAmountCents: 20000,
     expectedRules: ['R-04'],
@@ -570,6 +580,32 @@ export const SCENARIOS: readonly Scenario[] = [
     expectedRules: ['R-04'],
     expectsLlmCall: true,
     expectsClamp: true,
+  },
+  {
+    id: 'S-19',
+    name: 'Wrong item, no remedy asked',
+    goal: 'A wrong-item claim with no money ask ends in the confirmation question, not an approval: stating the problem chooses no remedy.',
+    customer: {
+      key: 'CUST-OWUSU',
+      name: 'Ama Owusu',
+      email: 'ama.owusu@example.com',
+      tier: 'standard',
+      accountAgeDays: 412,
+      priorRefundCount: 0,
+      refundRequestsLast30Days: 0,
+    },
+    orderId: 'ORD-1019',
+    orders: [order('ORD-1019', 6, 5, [item('ITM-1019-A', 'Terracotta Planter', 2800)])],
+    message: "The planter that arrived isn't what I ordered - they sent the wrong colour entirely.",
+    // Asked, not approved: the policy would approve under R-04, but the
+    // customer never asked for money, and a wrong item might mean a refund, a
+    // replacement, or just reporting it. The remedy is theirs to choose.
+    expectsConfirmation: true,
+    expectedDecision: 'approved',
+    expectedAmountCents: 2800,
+    expectedRules: ['R-04'],
+    expectsLlmCall: true,
+    expectsClamp: false,
   },
 ];
 

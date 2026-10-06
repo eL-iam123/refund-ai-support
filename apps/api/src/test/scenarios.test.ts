@@ -4,7 +4,7 @@ import { formatCents } from '../lib/money.js';
 import { scenarioHarness } from './helpers.js';
 
 /**
- * The conformance suite: 18 scenarios, each one an executable claim about the
+ * The conformance suite: 19 scenarios, each one an executable claim about the
  * policy engine.
  *
  * Beyond the decision itself, every scenario asserts the two properties that
@@ -28,6 +28,20 @@ async function run(scenario: Scenario) {
   if (scenario.expectsQuestion) {
     if (result.stage !== 'asked') {
       throw new Error(`${scenario.id} should have asked, but decided ${result.decision.decision}`);
+    }
+    return { ...result, extractionCalls: h.analyzerCalls() };
+  }
+
+  // A scenario may expect the remedy confirmation instead of a decision: a
+  // payable claim with no money ask comes back as the confirmation question.
+  // The marker is asserted rather than the full wording, because the wording
+  // names the amount and the contract here is that it asked at all.
+  if (scenario.expectsConfirmation) {
+    if (result.stage !== 'asked') {
+      throw new Error(`${scenario.id} should have confirmed, but decided ${result.decision.decision}`);
+    }
+    if (!result.question.includes('Before we refund anything:')) {
+      throw new Error(`${scenario.id} asked, but not the confirmation: ${result.question}`);
     }
     return { ...result, extractionCalls: h.analyzerCalls() };
   }
@@ -66,6 +80,16 @@ describe.each(SCENARIOS.map((scenario) => [scenario.id, scenario] as const))(
         if (result.stage === 'asked') {
           expect(result.question).toMatch(/what has gone wrong|which item|which order|condition/i);
           expect(result.question).not.toMatch(/tell me (a little )?more|anything else/i);
+        }
+        return;
+      }
+
+      if (scenario.expectsConfirmation) {
+        // The contract is the confirmation and nothing else: the claim stated a
+        // problem but no remedy, so the engine must ask rather than approve.
+        expect(result.stage, `${scenario.id} should have confirmed`).toBe('asked');
+        if (result.stage === 'asked') {
+          expect(result.question).toContain('Before we refund anything:');
         }
         return;
       }

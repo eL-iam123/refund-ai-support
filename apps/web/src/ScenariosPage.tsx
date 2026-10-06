@@ -73,7 +73,7 @@ async function runScenario(
     );
   } catch (cause: unknown) {
     // Surfaced on the row that failed rather than as a page-level error, so one
-    // bad scenario does not hide the other seventeen.
+    // bad scenario does not hide the other eighteen.
     setRunning((previous) => [...previous, { id: scenario.id, requestId: `error: ${describe(cause)}` }]);
   }
 }

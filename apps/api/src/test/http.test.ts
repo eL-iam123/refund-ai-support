@@ -975,6 +975,15 @@ describe('HTTP reproduces every scenario outcome', () => {
         return;
       }
 
+      // A scenario that expects the remedy confirmation gets that over HTTP
+      // too: a payable claim with no money ask is a 200 with the confirmation
+      // rather than a 201 with a stored decision.
+      if (fixture.expectsConfirmation) {
+        expect(response.statusCode, `${fixture.id} should have confirmed`).toBe(200);
+        expect(response.json<{ question?: string }>().question).toContain('Before we refund anything:');
+        return;
+      }
+
       expect(response.statusCode).toBe(201);
       const { request } = response.json<CreatedResponse>();
 
@@ -1032,9 +1041,9 @@ describe('read-only catalog', () => {
     expect(r08?.outcomes).toEqual(['escalate', 'pass']);
   });
 
-  it('serves the 18 scenarios as fixtures', async () => {
+  it('serves the 19 scenarios as fixtures', async () => {
     const { scenarios } = (await get('/api/scenarios')).json<{ scenarios: readonly { id: string }[] }>();
-    expect(scenarios).toHaveLength(18);
+    expect(scenarios).toHaveLength(19);
   });
 
   it('reports stats that count the requests just created', async () => {

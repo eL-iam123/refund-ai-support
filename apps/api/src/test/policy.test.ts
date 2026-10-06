@@ -95,12 +95,12 @@ describe('rule-class authority', () => {
     expect(() => assertOutcomeAllowed(evaluation({ outcome: 'deny' }))).toThrow(/forbids/);
   });
 
-  it('produced no denials from any risk-class rule across all 18 scenarios', async () => {
+  it('produced no denials from any risk-class rule across all 19 scenarios', async () => {
     for (const scenario of SCENARIOS) {
       // Scenarios that end in a question have no decision to inspect. Asking before
       // escalating is the intended behaviour for them, and manufacturing a decision
       // here would test the old contract instead of the new one.
-      if (scenario.expectsQuestion) {
+      if (scenario.expectsQuestion || scenario.expectsConfirmation) {
         continue;
       }
       const h = scenarioHarness();
@@ -334,7 +334,10 @@ describe('INJECTION_ACTION', () => {
       // A question authorises nothing by definition, which is the invariant this
       // sweep exists to protect - so it is asserted rather than skipped.
       if (run.stage === 'asked') {
-        expect(scenario.expectsQuestion, `${scenario.id} asked unexpectedly`).toBe(true);
+        expect(
+          scenario.expectsQuestion === true || scenario.expectsConfirmation === true,
+          `${scenario.id} asked unexpectedly`,
+        ).toBe(true);
         continue;
       }
       const { decision, refundAmountCents } = run.decision;

@@ -37,7 +37,7 @@ import { clarifySparseDamage } from './response/claimClarification.js';
 import { assistantLines, refineQuestion } from './response/questionGuard.js';
 import { nextMissingField, questionForField, type NextQuestionInput } from './response/nextQuestion.js';
 import { acknowledgementFor } from './response/acknowledge.js';
-import { asksForMoney, confirmsIntent, wantsAnAgent } from './response/intent.js';
+import { confirmsIntent, picksRefund, wantsAnAgent } from './response/intent.js';
 import { buildPhraseEnvelope } from './response/envelope.js';
 import { inferTone } from './response/tone.js';
 import { isSafePhrasedReply } from './ai/replyGuard.js';
@@ -378,13 +378,18 @@ async function afterGates(
 }
 
 /**
- * Asks before storing money on a preference with no stated fault or request.
+ * Asks before storing money the customer never asked for.
  *
- * The bar for moving money is not "we understood" but "they asked". A claim
- * the model assembled from a preference ("the colour is blue, I wanted red")
- * must not become a payment on inference alone, so a payable decision reached
- * without the customer's own money words, stated fault, or confirmation of
- * the question below comes back as a question instead of a stored decision.
+ * The bar for moving money is not "we understood" but "they asked". A payable
+ * decision comes back as a question instead of a stored decision unless the
+ * customer asked for money back in so many words, stated a fault whose remedy
+ * is unambiguous, or confirmed the question below one turn ago.
+ *
+ * Two deliberate narrowings. "Return" is logistics, not money: asking to send
+ * goods back is not asking to be paid, so only refund and money-back words
+ * count as the ask. And a wrong item is never unambiguous: "different from
+ * what I ordered" might mean a refund, a replacement, or just reporting it,
+ * so a problem statement there chooses nothing and the customer picks.
  *
  *  - **Only payable decisions are gated.** Anything else has no money to stop.
  *  - **A refusal is never gated.** Confirming a denial would ask a customer to
@@ -408,10 +413,12 @@ function consentCheck(
     .map((turn) => turn.text)
     .join('\n');
 
-  // Already answered, three ways: they asked for money back in so many words,
-  // they stated a problem in their own words (a statement, not an inference),
-  // or they agreed with this confirmation one turn ago.
-  if (asksForMoney(customerText) || detectedReason(customerText) !== null) {
+  // Already answered, three ways: money back in so many words, a stated fault
+  // whose remedy is unambiguous, or agreement with this confirmation one turn
+  // ago. A wrong item is excluded from the fault shortcut: refund, replacement
+  // and reporting are all live, so the statement chooses nothing.
+  const reason = detectedReason(customerText);
+  if (picksRefund(customerText) || (reason !== null && reason !== 'wrong_item')) {
     return null;
   }
   if (wasConfirmedJustNow(history, input.message)) {
