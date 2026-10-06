@@ -18,6 +18,20 @@ import type { CartLine } from './cartStore';
  * delivery date, and pressed reload would arrive at a blank composer with no
  * explanation. A URL survives that, and can be pasted to a colleague.
  */
+export function OrderDetails({ order, onBack, onReport }: { order: ShopOrder; onBack: () => void; onReport: () => void }): ReactNode {
+  return (
+    <div className="order-detail-page">
+      <button type="button" className="btn-quiet order-back" onClick={onBack}>← Back to orders</button>
+      <header className="order-detail-heading"><div><p className="eyebrow">Order details</p><h1>{order.id}</h1><p className="lede">Placed {new Date(order.placedAt).toLocaleDateString()}</p></div><span className={`pill pill-${order.status}`}>{order.status.replace(/_/g, ' ')}</span></header>
+      <section className="order-detail-grid">
+        <div className="order-detail-card card"><p className="eyebrow">Delivery</p><h2>{order.trackingStatus.replace(/_/g, ' ')}</h2><p className="muted">Payment {order.paymentState}</p></div>
+        <div className="order-detail-card card"><p className="eyebrow">Total paid</p><h2 className="num">{money(order.totalCents)}</h2><p className="muted">All taxes and delivery included</p></div>
+      </section>
+      <section className="order-detail-card card"><div className="section-heading"><div><p className="eyebrow">Items</p><h2>What&apos;s in this order</h2></div><button type="button" className="btn-primary" onClick={onReport}>Get help</button></div><OrderLines items={order.items} /></section>
+    </div>
+  );
+}
+
 export function Orders({
   orders,
   signedIn,
@@ -167,7 +181,7 @@ function OrderCard({
     );
 
   return (
-    <article className="order-card card">
+    <article className="order-card card" role="link" tabIndex={0} onClick={(event) => { if ((event.target as HTMLElement).closest('button')) return; void navigate(`/orders/${encodeURIComponent(order.id)}`); }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void navigate(`/orders/${encodeURIComponent(order.id)}`); } }}>
       <header className="order-card-top">
         <div className="order-card-head">
           <span className={`pill pill-${order.status}`}>{order.status.replace(/_/g, ' ')}</span>
