@@ -161,6 +161,31 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 /* A keyboard user arriving at the offer has to be able to see where they are. */
 .item-choice:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .orders { display: grid; gap: 16px; }
+.orders-page { display: grid; gap: 16px; }
+.orders-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 4px 2px 0; }
+.orders-heading .eyebrow { margin-bottom: 6px; }
+.orders-heading .lede { margin-top: 7px; font-size: .9rem; }
+.orders-summary { display: grid; justify-items: end; gap: 1px; padding: 8px 0 3px 28px; border-left: 1px solid var(--line); }
+.orders-summary strong { font-size: 1.8rem; line-height: 1; }
+.orders-summary span { color: var(--ink-faint); font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; }
+.orders-toolbar { display: flex; align-items: center; gap: 10px; min-height: 25px; }
+.orders-toolbar-line { width: 1px; height: 14px; background: var(--line-strong); }
+.orders-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.order-card { display: grid; gap: 12px; padding: 16px; }
+.order-card-top { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.order-card-id { display: flex; justify-content: space-between; gap: 12px; color: var(--ink-faint); font-size: .75rem; }
+.order-total { display: grid; justify-items: end; gap: 1px; }
+.order-total strong { font-size: 1.15rem; line-height: 1.1; }
+.order-total span { color: var(--ink-faint); font-size: .68rem; }
+.order-delivery { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border-radius: 6px; background: var(--surface-soft); }
+.delivery-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.order-delivery div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; width: 100%; }
+.order-delivery strong { font-size: .82rem; text-transform: capitalize; }
+.order-delivery span:last-child { color: var(--ink-faint); font-size: .72rem; }
+.order-card .lines { margin: 0; }
+.order-card .lines li { padding: 7px 0; font-size: .82rem; }
+.order-card .row { margin-top: 0; }
+.order-card .row button { min-height: 36px; }
 .issue-picker, .override-form { display: grid; gap: 12px; margin-top: 16px; padding: 16px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; }
 .issue-list { display: grid; gap: 7px; }
 .issue-option { display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 9px 11px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-size: .88rem; }
@@ -409,4 +434,14 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
   .shopper-app:has(.chat-layout) .chat-main { height: calc(100dvh - 290px); min-height: 360px; }
 }
 
+@media (max-width: 900px) {
+  .orders-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .orders-heading { align-items: start; }
+  .orders-heading .lede { max-width: 30ch; }
+  .orders-summary { padding-left: 14px; }
+  .order-card-id { align-items: start; flex-direction: column; gap: 3px; }
+  .order-delivery div { align-items: start; flex-direction: column; gap: 1px; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }

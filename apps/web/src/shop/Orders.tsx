@@ -57,16 +57,30 @@ export function Orders({
     );
   }
   return (
-    <div className="stack">
-      <h1>Your orders</h1>
+    <div className="orders-page">
+      <header className="orders-heading">
+        <div>
+          <p className="eyebrow">Account / Purchases</p>
+          <h1>Your orders</h1>
+          <p className="lede">Track deliveries, revisit purchases, or get help with an order.</p>
+        </div>
+        <div className="orders-summary"><strong>{orders.length}</strong><span>orders</span></div>
+      </header>
       {notice ? (
         <div className="response-toast" role="status" aria-live="polite">
           New reply for {notice.orderId}. Open the chat to see the latest update.
         </div>
       ) : null}
-      {orders.map((order) => (
-        <OrderCard key={order.id} order={order} messageCount={countMap.get(order.id) ?? 0} onRefill={onRefill} />
-      ))}
+      <div className="orders-toolbar">
+        <span className="muted small">Recent activity</span>
+        <span className="orders-toolbar-line" aria-hidden="true" />
+        <span className="muted small">Showing all orders</span>
+      </div>
+      <div className="orders-grid">
+        {orders.map((order) => (
+          <OrderCard key={order.id} order={order} messageCount={countMap.get(order.id) ?? 0} onRefill={onRefill} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -129,16 +143,6 @@ function firstCountIncrease(
   return null;
 }
 
-/** When it was bought and where it got to. Facts, not status vocabulary. */
-function OrderMeta({ order }: { order: ShopOrder }): ReactNode {
-  return (
-    <p className="muted small">
-      Placed {new Date(order.placedAt).toLocaleDateString()} · payment {order.paymentState} ·
-      delivery {order.trackingStatus}
-    </p>
-  );
-}
-
 function OrderCard({
   order,
   messageCount,
@@ -163,17 +167,16 @@ function OrderCard({
     );
 
   return (
-    <article className="card">
-      <header className="row">
+    <article className="order-card card">
+      <header className="order-card-top">
         <div className="order-card-head">
           <span className={`pill pill-${order.status}`}>{order.status.replace(/_/g, ' ')}</span>
           {messageCount > 0 ? <span className="order-message-badge">{messageCount === 1 ? '1 new reply' : `${messageCount} messages`}</span> : null}
         </div>
-        <strong className="num">{money(order.totalCents)}</strong>
+        <span className="order-total"><strong className="num">{money(order.totalCents)}</strong><span>Total paid</span></span>
       </header>
-      <p className="mono small">{order.id}</p>
-      <OrderMeta order={order} />
-
+      <div className="order-card-id"><span>Order placed {new Date(order.placedAt).toLocaleDateString()}</span><span className="mono">{order.id}</span></div>
+      <div className="order-delivery"><span className="delivery-dot" aria-hidden="true" /><div><strong>{order.trackingStatus.replace(/_/g, ' ')}</strong><span>Payment {order.paymentState}</span></div></div>
       <OrderLines items={order.items} />
 
       <OrderActions
