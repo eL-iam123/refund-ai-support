@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useCallback, useState, type ReactNode } from 'react';
 import { describe, money, shopApi, type Product, type ShopOrder } from './api';
 import { CartSummary } from './Account';
 import { removeFromCart, type CartLine } from './cartStore';
@@ -65,9 +65,11 @@ export function Cart({
   onClear: () => void;
   onPlaced: (order: ShopOrder) => void;
 }): ReactNode {
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [placed, setPlaced] = useState<ShopOrder | null>(null);
+  const checkout = useCheckout(lines, onClear, (order) => {
+    onPlaced(order);
+    setPlaced(order);
+  });
 
   const estimate = lines.reduce((sum, line) => {
     const product = products.find((p) => p.id === line.productId);
@@ -97,26 +99,38 @@ export function Cart({
       )}
       <CheckoutButton
         canPay={signedIn && lines.length > 0}
-        busy={busy}
+        busy={checkout.busy}
         estimateCents={estimate}
-        onPay={() => {
-          setBusy(true);
-          setError(null);
-          void shopApi
-            .checkout(lines)
-            .then((result) => {
-              onClear();
-              onPlaced(result.order);
-            })
-            .catch((cause: unknown) => setError(describe(cause)))
-            .finally(() => setBusy(false));
-        }}
+        onPay={checkout.pay}
       />
-      {error !== null && (
+      {checkout.error !== null && (
         <p className="error" role="alert">
-          {error}
+          {checkout.error}
         </p>
       )}
     </section>
   );
+}
+
+/** The checkout request with its busy/error states, so the page stays presentational. */
+function useCheckout(
+  lines: readonly CartLine[],
+  onClear: () => void,
+  onPlaced: (order: ShopOrder) => void,
+): { busy: boolean; error: string | null; pay: () => void } {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const pay = useCallback(() => {
+    setBusy(true);
+    setError(null);
+    void shopApi
+      .checkout(lines)
+      .then((result) => {
+        onClear();
+        onPlaced(result.order);
+      })
+      .catch((cause: unknown) => setError(describe(cause)))
+      .finally(() => setBusy(false));
+  }, [lines, onClear, onPlaced]);
+  return { busy, error, pay };
 }

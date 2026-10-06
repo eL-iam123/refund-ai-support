@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import type { RefundRequestDto, ShopAnswerDto } from '@refund/shared';
 import { api, describe } from './api';
-import { shopApi, type ChatTurn as StoredTurn, type ItemPickerOffer, type ShopAnswerDto } from './shop/api';
+import { shopApi, type ChatTurn as StoredTurn, type ItemPickerOffer } from './shop/api';
 
 /**
  * What the server says about a suppressed repeat.
@@ -47,12 +47,6 @@ export interface ReplyBody {
 /** One customer message and whatever came back for it. */
 export type Turn =
   | { readonly kind: 'pending'; readonly id: string; readonly text: string }
-  | {
-      readonly kind: 'shop';
-      readonly id: string;
-      readonly text: string;
-      readonly shopAnswer: ShopAnswerDto;
-    }
   | {
       readonly kind: 'replied';
       readonly id: string;
@@ -503,7 +497,7 @@ export function useConversation(
   initialDraft = '',
   shopping = false,
 ): Conversation {
-  const stored = useStoredThread(customerId, orderId);
+  const stored = useStoredThread(customerId, orderId, shopping);
   // The shopping thread has no order, so its live turns bucket on the empty
   // key. Support turns never land there: sending requires an order.
   const live = useLiveTurns(orderId ?? '');
@@ -744,6 +738,11 @@ function toTurn(stored: StoredTurn): Turn {
   };
 }
 
+
+/** A stored shopping turn renders as `shop`, like a live one: both read the same frozen row. */
+function toShopTurn(stored: { message: string; shopAnswer: ShopAnswerDto }): Turn {
+  return { kind: 'shop', id: stored.shopAnswer.id, text: stored.message, shopAnswer: stored.shopAnswer };
+}
 
 /** Stored turns first, then live ones; a turn appearing in both is only drawn once. */
 function merge(stored: readonly Turn[], live: readonly Turn[]): readonly Turn[] {

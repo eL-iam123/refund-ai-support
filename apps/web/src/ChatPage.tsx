@@ -1259,7 +1259,6 @@ function appealFor(
     return { onAppeal };
   }
   return {};
->>>>>>> Stashed changes
 }
 
 function PendingBubble({ text }: { text: string }): ReactNode {

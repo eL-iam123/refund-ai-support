@@ -48,27 +48,8 @@ export function Orders({
   const countMap = useMemo(() => new Map(counts.map((row) => [row.orderId, row.count])), [counts]);
   const notice = useNewReplyNotice(counts);
 
-  if (!signedIn) {
-    return (
-      <section className="card">
-        <h1>Your orders</h1>
-        <p className="muted">Sign in to see what you have bought.</p>
-        <button type="button" onClick={onBrowse}>
-          Back to the shop
-        </button>
-      </section>
-    );
-  }
-  if (orders.length === 0) {
-    return (
-      <section className="card">
-        <h1>Your orders</h1>
-        <p className="muted">Nothing yet.</p>
-        <button type="button" onClick={onBrowse}>
-          Start shopping
-        </button>
-      </section>
-    );
+  if (!signedIn || orders.length === 0) {
+    return <OrdersEmpty signedIn={signedIn} onBrowse={onBrowse} />;
   }
   return (
     <div className="orders-page">
@@ -100,6 +81,30 @@ export function Orders({
 }
 
 const NOTICE_MS = 7000;
+
+/** The two ways the orders page can have nothing to show. */
+function OrdersEmpty({ signedIn, onBrowse }: { signedIn: boolean; onBrowse: () => void }): ReactNode {
+  if (!signedIn) {
+    return (
+      <section className="card">
+        <h1>Your orders</h1>
+        <p className="muted">Sign in to see what you have bought.</p>
+        <button type="button" onClick={onBrowse}>
+          Back to the shop
+        </button>
+      </section>
+    );
+  }
+  return (
+    <section className="card">
+      <h1>Your orders</h1>
+      <p className="muted">Nothing yet.</p>
+      <button type="button" onClick={onBrowse}>
+        Start shopping
+      </button>
+    </section>
+  );
+}
 
 /**
  * Which order gained replies since the last time these counts arrived.
