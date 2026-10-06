@@ -146,57 +146,29 @@ function fillerOrders(): readonly OrderSpec[] {
 }
 
 /**
- * Run it, or do not.
+ * Run it, or do not - and re-run it freely.
  *
- * Refuses to run twice: a restart that doubled every order would be a worse surprise
- * than an empty queue, and the claims are expensive to produce for nothing.
- *
- * Per-fixture completion checks make interrupted seeding recoverable: each claim is
- * looked up by its deterministic request id before the pipeline is called, so a
- * partial run resumes from the first unprocessed fixture rather than redoing work
- * or skipping the rest.
+ * Every step is idempotent: shoppers are found by email, orders by id, claims
+ * by request id or dialogue row. A boot killed mid-seed - ten sequential model
+ * calls with no progress output is exactly the boot a reviewer interrupts -
+ * resumes on the next start instead of stranding a partial demo forever. The
+ * two states that used to refuse (demo users with no requests threw, demo
+ * users with some requests returned early) were the mechanism of that
+ * stranding, so both are gone: convergence beats cleverness.
  */
-export async function seedDemoData(db: Db, pipeline: PipelineDeps, now: Date): Promise<SeededDemo> {
-  const existing = db.prepare('SELECT COUNT(*) AS n FROM shop_users WHERE is_demo = 1').get() as { n: number };
-  if (existing.n > 0) {
-    const requestCount = db.prepare('SELECT COUNT(*) AS n FROM refund_requests').get() as { n: number };
-    if (requestCount.n === 0) {
-      throw new Error(
-        'demo seed interrupted: demo users exist but no refund_requests were persisted. ' +
-        'Remove the demo users or investigate the partial failure before reseeding.',
-      );
-    }
-    return recoverExistingSeed(db);
-  }
-
+export async function seedDemoData(
+  db: Db,
+  pipeline: PipelineDeps,
+  now: Date,
+  onClaim?: (index: number, total: number, orderId: string) => void,
+): Promise<SeededDemo> {
   const customerIds = createDemoShoppers(db, now);
   const specs = [...ORDERS, ...fillerOrders()];
   for (const spec of specs) {
     writeOrder(db, spec, customerIds, now);
   }
 
-  return seedClaims(db, pipeline, now, customerIds, specs);
-}
-
-function recoverExistingSeed(db: Db): SeededDemo {
-  const customers = db.prepare('SELECT COUNT(*) AS n FROM shop_users WHERE is_demo = 1').get() as { n: number };
-  const requests = db.prepare('SELECT COUNT(*) AS n FROM refund_requests').get() as { n: number };
-  const dialogues = db.prepare('SELECT COUNT(*) AS n FROM shop_dialogue').get() as { n: number };
-  const reservations = db
-    .prepare("SELECT COUNT(*) AS n FROM refunds WHERE status = 'pending_verification'")
-    .get() as { n: number };
-  const escalated = db
-    .prepare("SELECT COUNT(*) AS n FROM refund_requests WHERE decision = 'escalated'")
-    .get() as { n: number };
-  return {
-    customers: customers.n,
-    orders: 0,
-    requests: requests.n,
-    dialogues: dialogues.n,
-    reservations: reservations.n,
-    decided: requests.n - escalated.n,
-    escalated: escalated.n,
-  };
+  return seedClaims(db, pipeline, now, customerIds, specs, onClaim);
 }
 
 interface SeedClaimResult {
@@ -207,7 +179,14 @@ interface SeedClaimResult {
   readonly escalated: number;
 }
 
-async function seedClaims(db: Db, pipeline: PipelineDeps, now: Date, customerIds: readonly string[], specs: readonly OrderSpec[]): Promise<SeededDemo> {
+async function seedClaims(
+  db: Db,
+  pipeline: PipelineDeps,
+  now: Date,
+  customerIds: readonly string[],
+  specs: readonly OrderSpec[],
+  onClaim?: (index: number, total: number, orderId: string) => void,
+): Promise<SeededDemo> {
   let requests = 0;
   let dialogues = 0;
   let reservations = 0;
@@ -215,6 +194,9 @@ async function seedClaims(db: Db, pipeline: PipelineDeps, now: Date, customerIds
   let escalated = 0;
 
   for (const [index, claim] of CLAIMS.entries()) {
+    // Ten sequential model calls with no output is the boot a reviewer
+    // interrupts, so each claim announces itself before the pipeline runs.
+    onClaim?.(index + 1, CLAIMS.length, claim.order);
     const result = await processOneClaim(db, pipeline, now, customerIds, specs, claim, index);
     requests += result.requests;
     dialogues += result.dialogues;
@@ -358,6 +340,13 @@ function createDemoShoppers(db: Db, now: Date): readonly string[] {
   const ids: string[] = [];
   for (let i = 0; i < 15; i += 1) {
     const email = i === 0 ? DEMO_EMAIL : `demo${i}@shop.demo`;
+    const existing = db.prepare('SELECT customer_id FROM shop_users WHERE email = ?').get(email) as
+      | { customer_id: string }
+      | undefined;
+    if (existing !== undefined) {
+      ids.push(existing.customer_id);
+      continue;
+    }
     const user = createUser(
       db,
       { email, password: DEMO_PASSWORD, name: i === 0 ? 'Sam Okonkwo' : `Demo Shopper ${i}`, isDemo: true },
@@ -376,40 +365,49 @@ function createDemoShoppers(db: Db, now: Date): readonly string[] {
  * old, a subscription that renews. Each exists so one rule has a case that isolates it.
  */
 function writeOrder(db: Db, spec: OrderSpec, customerIds: readonly string[], now: Date): void {
+  const exists = db.prepare('SELECT 1 AS present FROM orders WHERE id = ?').get(spec.id);
+  if (exists !== undefined) {
+    return;
+  }
   const customerId = customerIds[spec.customer % customerIds.length] as string;
   const placedAt = new Date(now.getTime() - spec.daysAgo * 86_400_000).toISOString();
-  db.prepare(
-    `INSERT INTO orders (
-       id, customer_id, placed_at, delivered_at, status, payment_state, refunded_cents,
-       is_subscription, tracking_status, signed_by_customer, condition_at_delivery
-     ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL)`,
-  ).run(
-    spec.id,
-    customerId,
-    placedAt,
-    spec.subscription === true ? null : placedAt,
-    spec.subscription === true ? 'active' : 'delivered',
-    'settled',
-    spec.subscription === true ? 1 : 0,
-    spec.subscription === true ? 'not_shipped' : 'delivered',
-    spec.subscription === true ? 0 : 1,
-  );
-
-  for (const line of spec.lines) {
+  // One transaction: a kill between the order and its lines must not leave a
+  // lineless order behind, because the resume check reads the order id alone.
+  const write = db.transaction(() => {
     db.prepare(
-      `INSERT INTO order_items (
-         id, order_id, product_id, name, unit_price_cents, quantity,
-         final_sale, digital, downloaded, is_subscription
-       ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 0, ?)`,
+      `INSERT INTO orders (
+         id, customer_id, placed_at, delivered_at, status, payment_state, refunded_cents,
+         is_subscription, tracking_status, signed_by_customer, condition_at_delivery
+       ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL)`,
     ).run(
-      `ITM-${spec.id}-${line.productId}`,
       spec.id,
-      line.productId,
-      line.name,
-      line.priceCents,
-      line.finalSale ? 1 : 0,
-      line.productId === 'PRD-GUIDE-01' ? 1 : 0,
+      customerId,
+      placedAt,
+      spec.subscription === true ? null : placedAt,
+      spec.subscription === true ? 'active' : 'delivered',
+      'settled',
       spec.subscription === true ? 1 : 0,
+      spec.subscription === true ? 'not_shipped' : 'delivered',
+      spec.subscription === true ? 0 : 1,
     );
-  }
+
+    for (const line of spec.lines) {
+      db.prepare(
+        `INSERT INTO order_items (
+           id, order_id, product_id, name, unit_price_cents, quantity,
+           final_sale, digital, downloaded, is_subscription
+         ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 0, ?)`,
+      ).run(
+        `ITM-${spec.id}-${line.productId}`,
+        spec.id,
+        line.productId,
+        line.name,
+        line.priceCents,
+        line.finalSale ? 1 : 0,
+        line.productId === 'PRD-GUIDE-01' ? 1 : 0,
+        spec.subscription === true ? 1 : 0,
+      );
+    }
+  });
+  write();
 }

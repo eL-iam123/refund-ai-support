@@ -189,7 +189,9 @@ async function seedDemoIfAsked(
     return null;
   }
   try {
-    const seeded = await seedDemoData(db, pipeline, new Date());
+    const seeded = await seedDemoData(db, pipeline, new Date(), (index, total, orderId) =>
+      log.info({ claim: `${index}/${total}`, orderId }, 'demo.seeding.claim'),
+    );
     if (seeded.requests > 0 && !pipeline.analyzer.available) {
       log.warn(
         { ...seeded },

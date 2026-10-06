@@ -40,4 +40,30 @@ describe('demo seeding', () => {
     expect(redialogued.n).toBe(seeded.dialogues);
     harness.db.close();
   });
+
+  it('resumes a killed run instead of stranding a partial demo', async () => {
+    // The boot a reviewer interrupts: shoppers and some traces written, the
+    // rest missing. The next boot must converge to the full demo, not report
+    // the partial counts forever and never touch the missing claims.
+    const harness = scenarioHarness({ kind: 'heuristic' });
+    seedCatalogue(harness.db);
+    await seedDemoData(harness.db, harness, TEST_NOW);
+
+    harness.db.prepare("DELETE FROM refund_requests WHERE id IN ('REQ-DEMO-6', 'REQ-DEMO-9')").run();
+    harness.db
+      .prepare("DELETE FROM shop_dialogue WHERE customer_message LIKE 'My mug is chipped%'")
+      .run();
+    const partial = harness.db.prepare('SELECT COUNT(*) AS n FROM refund_requests').get() as { n: number };
+    expect(partial.n).toBeLessThan(6);
+
+    const resumed = await seedDemoData(harness.db, harness, TEST_NOW);
+    expect(resumed.requests + resumed.dialogues).toBe(10);
+    const restored = harness.db.prepare('SELECT COUNT(*) AS n FROM refund_requests').get() as { n: number };
+    expect(restored.n).toBe(6);
+    const ids = harness.db
+      .prepare('SELECT id, COUNT(*) AS n FROM refund_requests GROUP BY id HAVING n > 1')
+      .all();
+    expect(ids).toEqual([]);
+    harness.db.close();
+  });
 });
