@@ -33,6 +33,25 @@ export function returnHelpAnswer(): string {
   );
 }
 
+/** A courtesy for a message that asked for nothing. No model, no row of consequence. */
+export function greetingAnswer(message: string): string {
+  if (/\bthank\b|\bthanks\b/i.test(message)) {
+    return "You're welcome - anything else I can help with, an order, a return, or browsing the catalogue?";
+  }
+  if (/\bbye\b|\bgoodbye\b|\bgood\s?night\b/i.test(message)) {
+    return "Goodbye - I'm here if anything comes up with an order.";
+  }
+  return 'Hi - what can I help with today? An order, a return, or browsing the catalogue?';
+}
+
+/** What a customer without a model behind the assistant still gets told. */
+export function fallbackGeneralAnswer(): string {
+  return (
+    'I can help with orders, returns, refunds, and browsing the catalogue. ' +
+    'Tell me what you need - for anything about money, the written refund policy decides, not me.'
+  );
+}
+
 /** What matched a browsing question, with prices from the catalogue rows. */
 export function productAnswer(products: readonly Product[]): string {
   if (products.length === 0) {

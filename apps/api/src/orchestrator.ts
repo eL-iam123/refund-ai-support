@@ -29,6 +29,7 @@ import { DEFAULT_DISCRETION } from './policy/discretion.js';
 import { R14RequestIntegrity } from './policy/rules/R-14-request-integrity.js';
 import { rulesForStage } from './policy/rules/index.js';
 import { resolve } from './policy/resolver.js';
+import { ESCALATION_CEILING_CENTS } from './policy/constants.js';
 import type { PolicyContext } from './policy/types.js';
 import { composeDeterministicResponse } from './response/compose.js';
 import { isNoComplaint, noComplaintQuestion, NO_COMPLAINT_MODEL } from './response/noComplaint.js';
@@ -36,6 +37,11 @@ import { clarifySparseDamage } from './response/claimClarification.js';
 import { assistantLines, refineQuestion } from './response/questionGuard.js';
 import { nextMissingField, questionForField, type NextQuestionInput } from './response/nextQuestion.js';
 import { acknowledgementFor } from './response/acknowledge.js';
+import { asksForMoney, confirmsIntent, wantsAnAgent } from './response/intent.js';
+import { buildPhraseEnvelope } from './response/envelope.js';
+import { inferTone } from './response/tone.js';
+import { isSafePhrasedReply } from './ai/replyGuard.js';
+import { detectedReason } from './ai/reasonVocabulary.js';
 import { formatCents } from './lib/money.js';
 
 /**
@@ -100,6 +106,14 @@ export interface PipelineDeps {
    */
   readonly minConfidence?: number;
   /**
+   * The order-total ceiling above which R-15 escalates to a person.
+   *
+   * Optional, defaulting to the `ESCALATION_CEILING_CENTS` schema default. It
+   * can only ever escalate a request that names a large order, never approve
+   * one, so omitting it cannot widen what is paid.
+   */
+  readonly escalationCeilingCents?: number;
+  /**
    * Tell the customer something, mid-request.
    *
    * Used once: to say "I could not read that, trying once more" before the soft
@@ -117,6 +131,14 @@ export interface ProcessInput {
   readonly message: string;
   readonly itemIds: readonly string[];
   readonly now: Date;
+  /**
+   * Order identification the caller already ran.
+   *
+   * Optional so older callers keep working: when absent the retrieve stage
+   * runs it itself. The chat route passes its own result down so one request
+   * does not identify the same order twice with possibly different answers.
+   */
+  readonly identification?: Identification | undefined;
 }
 
 export type ProcessResult =
@@ -206,7 +228,7 @@ export async function processRefundRequest(
   const log = new StageLog();
   const observer = attemptObserver(deps, input.requestId);
 
-  const intake = runIntake(db, input, deps.injectionAction, log);
+  const intake = runIntake(db, input, deps.injectionAction, deps.escalationCeilingCents ?? ESCALATION_CEILING_CENTS, log);
   const retrieval = retrieveOrder(db, input, intake, log);
 
   if (retrieval.order !== null) {
@@ -231,41 +253,76 @@ export async function processRefundRequest(
   );
 
   if (gates.terminal) {
-    const decision = resolveDecision(
-      db,
-      retrieval.found,
-      gates,
-      intake.evaluations,
-      [],
-      { extraction: null, grounding: null, proposal: null },
-      intake.customer,
-      deps.discretion ?? DEFAULT_DISCRETION,
-      // No claim was read, so the floor has nothing to apply to.
-      undefined,
-    );
-    log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
-    // Decided by a rule, without the model: the claim was never read, so the ladder
-    // had nothing to do and there is nothing to explain to the customer.
-    return {
-      stage: 'decided',
-      customer: intake.customer,
-      order: retrieval.order,
-      decision,
-      extraction: null,
-      grounding: null,
-      injection: intake.injection,
-      responseText: composeReply(decision, retrieval.order, input.message, log),
-      notice: null,
-      llmCalled: false,
-      aiMode: mode,
-      timings: log.all(),
-      resolvedOrderId: retrieval.order?.id ?? null,
-      itemIds: retrieval.found.items.map((item) => item.id),
-      caseSummary: null,
-    };
+    return decidedByGates(db, deps, input, gates, retrieval, intake, mode, log, observer);
   }
 
   return await afterGates(db, deps, input, gates, retrieval, intake, observer, log, mode);
+}
+
+/**
+ * A request the fact gates ended, decided without the model.
+ *
+ * The claim was never read, so the ladder had nothing to do and there is
+ * nothing to explain to the customer. Split out because the entry point owns
+ * the stage ordering, not any one outcome: seven stages are already one
+ * function too many to hold in a reader's head.
+ */
+async function decidedByGates(
+  db: Db,
+  deps: PipelineDeps,
+  input: ProcessInput,
+  gates: GateResult,
+  retrieval: Retrieval,
+  intake: Intake,
+  mode: string,
+  log: StageLog,
+  observer: AttemptObserver,
+): Promise<Extract<ProcessResult, { stage: 'decided' }>> {
+  const customerRequestedAgent = wantsAnAgent(input.message);
+  if (customerRequestedAgent) {
+    log.record('intake', 'the customer asked to speak to an agent');
+  }
+  const decision = resolveDecision(
+    db,
+    retrieval.found,
+    gates,
+    intake.evaluations,
+    [],
+    { extraction: null, grounding: null, proposal: null },
+    intake.customer,
+    deps.discretion ?? DEFAULT_DISCRETION,
+    // No claim was read, so the floor has nothing to apply to.
+    undefined,
+    customerRequestedAgent,
+  );
+  log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
+  // Decided by a rule, without the model: the claim was never read, so the ladder
+  // had nothing to do and there is nothing to explain to the customer.
+  return {
+    stage: 'decided',
+    customer: intake.customer,
+    order: retrieval.order,
+    decision,
+    extraction: null,
+    grounding: null,
+    injection: intake.injection,
+    responseText: await phraseReply(deps, observer, db, {
+      customerId: input.customerId,
+      customerName: intake.customer.name,
+      message: input.message,
+      now: input.now,
+      order: retrieval.order,
+      decision,
+      verifiedQuotes: [],
+    }, log),
+    notice: null,
+    llmCalled: false,
+    aiMode: mode,
+    timings: log.all(),
+    resolvedOrderId: retrieval.order?.id ?? null,
+    itemIds: retrieval.found.items.map((item) => item.id),
+    caseSummary: null,
+  };
 }
 
 async function afterGates(
@@ -288,6 +345,10 @@ async function afterGates(
   }
 
   const reasonEvaluations = runReasonRules(retrieval.context, gates, analysis, log);
+  const customerRequestedAgent = wantsAnAgent(input.message);
+  if (customerRequestedAgent) {
+    log.record('intake', 'the customer asked to speak to an agent');
+  }
   const decision = resolveDecision(
     db,
     retrieval.found,
@@ -298,6 +359,7 @@ async function afterGates(
     intake.customer,
     deps.discretion ?? DEFAULT_DISCRETION,
     deps.minConfidence,
+    customerRequestedAgent,
   );
   log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
 
@@ -306,8 +368,122 @@ async function afterGates(
     return askedResult(question, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log);
   }
 
-  return await decidedResult(input.message, analysis, decision, retrieval, intake, mode, log, deps, observer);
+  const history = transcriptForOrder(db, input.customerId, orderIdFor(retrieval.order), input.now, HISTORY_LIMIT);
+  const consent = consentCheck(input, history, decision);
+  if (consent !== null) {
+    return askedResult(consent, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log);
+  }
+
+  return await decidedResult(db, input, analysis, decision, retrieval, intake, mode, log, deps, observer);
 }
+
+/**
+ * Asks before storing money on a preference with no stated fault or request.
+ *
+ * The bar for moving money is not "we understood" but "they asked". A claim
+ * the model assembled from a preference ("the colour is blue, I wanted red")
+ * must not become a payment on inference alone, so a payable decision reached
+ * without the customer's own money words, stated fault, or confirmation of
+ * the question below comes back as a question instead of a stored decision.
+ *
+ *  - **Only payable decisions are gated.** Anything else has no money to stop.
+ *  - **A refusal is never gated.** Confirming a denial would ask a customer to
+ *    agree to being refused, which is theatre.
+ *
+ * The confirmation is recognised on the next turn by its own text, so a
+ * customer who simply says "yes" is confirmed without restating anything.
+ */
+function consentCheck(
+  input: ProcessInput,
+  history: readonly DialogueLine[],
+  decision: RefundDecision,
+): string | null {
+  const pays = decision.decision === 'approved' || decision.decision === 'partial_refund';
+  if (!pays) {
+    return null;
+  }
+
+  const customerText = [...history, { role: 'customer' as const, text: input.message }]
+    .filter((turn) => turn.role === 'customer')
+    .map((turn) => turn.text)
+    .join('\n');
+
+  // Already answered, three ways: they asked for money back in so many words,
+  // they stated a problem in their own words (a statement, not an inference),
+  // or they agreed with this confirmation one turn ago.
+  if (asksForMoney(customerText) || detectedReason(customerText) !== null) {
+    return null;
+  }
+  if (wasConfirmedJustNow(history, input.message)) {
+    return null;
+  }
+
+  return confirmationQuestion(customerText, decision);
+}
+
+/**
+ * Did the customer agree with the confirmation asked one turn ago?
+ *
+ * The transcript ends where the current message begins, so the agreement is
+ * read off the request and the question off the last history line. Only the
+ * *immediately* preceding question counts: an affirmative to a question about
+ * which item is not consent to a refund, and treating it as consent is the
+ * failure this whole feature exists to prevent.
+ */
+function wasConfirmedJustNow(history: readonly DialogueLine[], message: string): boolean {
+  const asked = history.at(-1);
+  if (asked === undefined || asked.role !== 'assistant') {
+    return false;
+  }
+  return asked.text.includes(CONFIRMATION_MARK) && confirmsIntent(message);
+}
+
+/**
+ * The options, assembled from what the policy would actually do.
+ *
+ * Not a yes/no and not a fixed menu: an acknowledgement in the customer's own
+ * words, then the outcomes this order can really reach, then the person.
+ * Offering something the policy will refuse is worse than offering nothing. So
+ * the refund is offered only when a refund is what would happen, and "speak to
+ * an agent" is always offered - the one option that is never refused.
+ */
+function confirmationQuestion(customerText: string, decision: RefundDecision): string {
+  const said = lastLine(customerText);
+  const options: string[] = [];
+  if (decision.decision === 'approved' || decision.decision === 'partial_refund') {
+    options.push(`a refund of ${formatCents(decision.refundAmountCents)}`);
+  }
+  if (decision.decision === 'exchange' || decision.decision === 'store_credit') {
+    options.push(decision.decision === 'exchange' ? 'a replacement item' : 'store credit');
+  }
+  options.push('to speak to an agent');
+
+  const offer =
+    options.length > 1
+      ? `Our policy would allow ${options.slice(0, -1).join(' or ')} here - or `
+      : 'The options our policy allows here are ';
+  return (
+    `${CONFIRMATION_MARK} Thank you - you have told us "${said.length <= 120 ? said : `${said.slice(0, 119)}…`}". ` +
+    `Before we do anything: ${offer}${options[options.length - 1]}. ` +
+    `Nothing will be refunded or arranged until you tell us which you want. ` +
+    `If the problem is something else, just describe it and we will look again.`
+  );
+}
+
+/** The most recent thing they said, which is the part being answered. */
+function lastLine(customerText: string): string {
+  const lines = customerText.trim().split('\n').filter((line) => line.trim().length > 0);
+  return lines[lines.length - 1]?.trim() ?? '';
+}
+
+/**
+ * A stable marker, so the next turn can recognise the question it is answering.
+ *
+ * A phrase rather than a flag in the database: it has to survive a page reload,
+ * a second device and a resumed conversation, and the thread already stores
+ * what was asked.
+ */
+const CONFIRMATION_MARK = 'Before we refund anything:';
 
 /**
  * Asks the question that might make the escalation unnecessary.
@@ -384,7 +560,8 @@ function unreadableFollowUp(
  * the stage body.
  */
 async function decidedResult(
-  message: string,
+  db: Db,
+  input: ProcessInput,
   analysis: Extract<AnalyseOutcome, { outcome: 'claim' }>,
   decision: RefundDecision,
   retrieval: Retrieval,
@@ -402,14 +579,22 @@ async function decidedResult(
     extraction: analysis.extraction,
     grounding: analysis.grounding,
     injection: intake.injection,
-    responseText: composeReply(decision, retrieval.order, message, log),
+    responseText: await phraseReply(deps, observer, db, {
+      customerId: input.customerId,
+      customerName: intake.customer.name,
+      message: input.message,
+      now: input.now,
+      order: retrieval.order,
+      decision,
+      verifiedQuotes: analysis.grounding?.verifiedQuotes ?? [],
+    }, log),
     notice: analysis.notice ?? null,
     llmCalled: true,
     aiMode: mode,
     timings: log.all(),
     resolvedOrderId: retrieval.order?.id ?? null,
     itemIds: retrieval.found.items.map((item) => item.id),
-    caseSummary: await caseSummary(deps, observer, message, decision, analysis, log),
+    caseSummary: await caseSummary(deps, observer, input.message, decision, analysis, log),
   };
 }
 
@@ -477,6 +662,7 @@ function runIntake(
   db: Db,
   input: ProcessInput,
   injectionAction: InjectionAction,
+  escalationCeilingCents: number,
   log: StageLog,
 ): Intake {
   const injection = scanForInjection(input.message);
@@ -504,6 +690,7 @@ function runIntake(
     blockedItems: [],
     eligibleAmountCents: 0,
     orderTotalCents: 0,
+    escalationCeilingCents,
   };
 
   return {
@@ -521,7 +708,9 @@ interface Retrieval {
 }
 
 function retrieveOrder(db: Db, input: ProcessInput, intake: Intake, log: StageLog): Retrieval {
-  const found = identifyOrder(db, intake.customer, input.orderId, input.message, input.now, input.itemIds);
+  const found =
+    input.identification ??
+    identifyOrder(db, intake.customer, input.orderId, input.message, input.now, input.itemIds);
   const order = found.order;
   const duplicateSibling = order === null ? null : findDuplicateSibling(db, order, input.now);
 
@@ -1195,6 +1384,7 @@ function resolveDecision(
   customer: CustomerRecord,
   discretion: DiscretionConfig,
   minConfidence: number | undefined,
+  customerRequestedAgent: boolean = false,
 ): RefundDecision {
   const order = found.order;
   return resolve({
@@ -1212,13 +1402,71 @@ function resolveDecision(
     customer,
     discretion,
     minConfidence,
+    customerRequestedAgent,
   });
 }
 
-function composeReply(decision: RefundDecision, order: OrderRecord | null, message: string, log: StageLog): string {
-  const text = composeDeterministicResponse(decision, order, message);
-  log.record('respond', 'composed from the decision, no model in this path');
-  return text;
+/** Everything the writer may know: the closed envelope plus the customer's own words. */
+interface PhraseRequest {
+  readonly customerId: string;
+  readonly customerName: string;
+  readonly message: string;
+  readonly now: Date;
+  readonly order: OrderRecord | null;
+  readonly decision: RefundDecision;
+  readonly verifiedQuotes: readonly string[];
+}
+
+/**
+ * The reply in the customer's language: model phrasing over a fixed envelope,
+ * deterministic text when anything about the model path fails.
+ *
+ * The ordering is the safety property, mirroring the case summary below:
+ * `decision` is already fixed, the envelope is built from it
+ * deterministically, and the model's prose is validated against that envelope
+ * before it can reach a customer. Nothing here flows back into the resolver -
+ * the writer's only influence is which sentence goes first.
+ */
+async function phraseReply(
+  deps: PipelineDeps,
+  observer: AttemptObserver,
+  db: Db,
+  request: PhraseRequest,
+  log: StageLog,
+): Promise<string> {
+  const fallback = (): string => {
+    const text = composeDeterministicResponse(request.decision, request.order, request.message);
+    log.record('respond', 'deterministic reply (phrasing unavailable or rejected)');
+    return text;
+  };
+  if (deps.analyzer.phrase === undefined) {
+    return fallback();
+  }
+  const envelope = buildPhraseEnvelope(request.decision, request.order);
+  const history = transcriptForOrder(db, request.customerId, orderIdFor(request.order), request.now, HISTORY_LIMIT);
+  const profile = inferTone(history);
+  try {
+    const text = await deps.analyzer.phrase(
+      {
+        envelope,
+        customerName: request.customerName,
+        message: request.message,
+        quote: request.verifiedQuotes[0] ?? null,
+        history,
+        style: { tone: profile.tone },
+      },
+      observer,
+    );
+    if (text !== null && isSafePhrasedReply(text, envelope)) {
+      log.record('respond', 'model phrasing accepted against the envelope');
+      return text;
+    }
+    log.record('respond', 'model phrasing rejected by envelope check; deterministic fallback');
+    return fallback();
+  } catch (error: unknown) {
+    log.record('respond', `model phrasing unavailable (${truncate(error instanceof Error ? error.message : String(error), 80)}); deterministic fallback`);
+    return fallback();
+  }
 }
 
 export { DEFAULT_DISCRETION };

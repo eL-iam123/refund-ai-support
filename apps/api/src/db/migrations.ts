@@ -784,6 +784,23 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 23,
+    name: 'handoffs.request_id',
+    up: (db) => {
+      // Which escalated case a takeover is a fork of. Null means the takeover
+      // predates forks, or a person took over with no decided case behind it -
+      // both keep the old whole-thread reach rather than gaining a scope nobody
+      // recorded. A forked takeover answers only for its own case; everything
+      // else on the customer's threads keeps flowing through the pipeline, so
+      // one escalation can no longer swallow the customer's other items.
+      if (!hasTable(db, 'handoffs') || hasColumn(db, 'handoffs', 'request_id')) {
+        return;
+      }
+      db.exec('ALTER TABLE handoffs ADD COLUMN request_id TEXT REFERENCES refund_requests(id)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_handoffs_request ON handoffs(request_id)');
+    },
+  },
 ];
 
 /**

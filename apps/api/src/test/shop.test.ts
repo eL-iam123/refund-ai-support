@@ -208,6 +208,34 @@ describe('storefront', () => {
 
       expect(a).not.toBe(b);
     });
+
+    it('serves no passwordless entry in production, even with demo rows present', async () => {
+      // Seeded first, on purpose: the gate must hold against pre-existing
+      // demo data, not just against an empty database.
+      const production = await appHarness({ kind: 'heuristic' }, testEnv({ NODE_ENV: 'production' }));
+      seedShop(production.db, TEST_NOW);
+      try {
+        const listed = await production.app.inject({ method: 'GET', url: '/api/shop/demo-accounts' });
+        expect(listed.statusCode).toBe(404);
+
+        const login = await production.app.inject({
+          method: 'POST',
+          url: '/api/shop/demo-login',
+          payload: { email: 'sam@shop.demo' },
+        });
+        expect(login.statusCode).toBe(404);
+
+        // Ordinary signup is not demo entry, and keeps working.
+        const signup = await production.app.inject({
+          method: 'POST',
+          url: '/api/shop/register',
+          payload: { email: 'real@shop.test', password: 'a-good-password', name: 'Test Shopper' },
+        });
+        expect(signup.statusCode).toBe(201);
+      } finally {
+        await production.app.close();
+      }
+    });
   });
 
   describe('catalogue and checkout', () => {

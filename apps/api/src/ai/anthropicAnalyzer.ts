@@ -4,8 +4,8 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom, type AttemptOutcome } from './breaker.js';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildCaseSummaryUser, buildIntakeUser, buildShopUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM, SHOP_SYSTEM } from './prompts.js';
-import { AskItemsSchema, CaseSummarySchema, CompleteSchema, IntakeOutputSchema, ShopSuggestionSchema, type IntakeOutput } from './schemas.js';
+import { buildCaseSummaryUser, buildIntakeUser, buildShopUser, buildGeneralUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, GENERAL_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM, SHOP_SYSTEM } from './prompts.js';
+import { AskItemsSchema, CaseSummarySchema, CompleteSchema, IntakeOutputSchema, PhraseReplySchema, ShopSuggestionSchema, type IntakeOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
@@ -17,6 +17,8 @@ import {
   type AttemptObserver,
   type ChatInput,
   type ChatReply,
+  type ConverseInput,
+  type PhraseInput,
   type ShopInput,
   type ShopSuggestion,
 } from './analyzer.js';
@@ -55,6 +57,8 @@ const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 529]);
 const MAX_REPAIRS = 1;
 /** A case note is a paragraph. Asking for more spends the customer's latency on prose. */
 const CASE_SUMMARY_TOKENS = 220;
+/** A chat answer is a few sentences. Longer is not friendlier, only slower. */
+const GENERAL_TOKENS = 300;
 
 function isNothingToAdd(text: string): boolean {
   return text.toLowerCase() === 'nothing further to add.';
@@ -238,6 +242,135 @@ export class AnthropicAnalyzer implements AIAnalyzer {
         error: null,
       });
       return { ok: true, value: suggestion };
+    } catch (error: unknown) {
+      const failure = classify(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      return { ok: false, ...failure };
+    }
+  }
+
+  /**
+   * General conversation: small talk, help, and abstract policy questions.
+   *
+   * Same contract as the other adapter: prose validated by the caller, one
+   * candidate walk, null on any failure. No tools here - the intake tools
+   * would let a general answer smuggle a claim-shaped object past the reader.
+   */
+  async converse(input: ConverseInput, observer: AttemptObserver): Promise<string | null> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildGeneralUser(input.message, input.products, input.policy, input.history, input.style);
+    const result = await runCandidates<string>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'general',
+      attempt: (model, attempt) => this.converseAttempt(model, attempt, user, budget, observer),
+    });
+    if (!result.ok) {
+      return null;
+    }
+    return result.value;
+  }
+
+  /**
+   * Phrases a decided outcome into customer-facing prose.
+   *
+   * Same contract as the other adapter: prose validated by the caller against
+   * the envelope, one candidate walk, null on any failure. No tools for the
+   * same reason as general conversation - a tool call here would be a
+   * claim-shaped object smuggled past the reader.
+   */
+  async phrase(input: PhraseInput, observer: AttemptObserver): Promise<string | null> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildPhraseUser(input);
+    const result = await runCandidates<string>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'phrase',
+      attempt: (model, attempt) => this.phraseAttempt(model, attempt, user, budget, observer),
+    });
+    if (!result.ok) {
+      return null;
+    }
+    return result.value;
+  }
+
+  private async phraseAttempt(
+    model: string,
+    attempt: number,
+    user: string,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<AttemptOutcome<string>> {
+    const startedAt = Date.now();
+    try {
+      const posted = await postProseMessage(this.baseUrl, this.apiKey, model, user, budget, this.env.AI_MAX_TOKENS, PHRASE_SYSTEM);
+      if (posted.text.length === 0) {
+        return { ok: false, error: 'phrase reply was empty', retryable: false };
+      }
+      const parsed = PhraseReplySchema.safeParse(posted.text);
+      if (!parsed.success) {
+        return { ok: false, error: 'phrase reply rejected by validation', retryable: false };
+      }
+      observer({
+        model: posted.model,
+        attempt,
+        ok: true,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: posted.promptTokens,
+        completionTokens: posted.completionTokens,
+        error: null,
+      });
+      return { ok: true, value: parsed.data };
+    } catch (error: unknown) {
+      const failure = classify(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      return { ok: false, ...failure };
+    }
+  }
+
+  private async converseAttempt(
+    model: string,
+    attempt: number,
+    user: string,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<AttemptOutcome<string>> {
+    const startedAt = Date.now();
+    try {
+      const posted = await postProseMessage(this.baseUrl, this.apiKey, model, user, budget, this.env.AI_MAX_TOKENS, GENERAL_SYSTEM);
+      if (posted.text.length === 0) {
+        return { ok: false, error: 'general reply was empty', retryable: false };
+      }
+      observer({
+        model: posted.model,
+        attempt,
+        ok: true,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: posted.promptTokens,
+        completionTokens: posted.completionTokens,
+        error: null,
+      });
+      return { ok: true, value: posted.text };
     } catch (error: unknown) {
       const failure = classify(error);
       observer({
@@ -647,6 +780,60 @@ function shopSuggestion(payload: MessageResponse, model: string): ShopSuggestion
     return parsed.success ? { productIds: parsed.data.productIds, model } : null;
   }
   return null;
+}
+
+/**
+ * One prose Messages call, read down to text.
+ *
+ * No tools: prose is what the caller validates, and a tool call here would be
+ * a claim-shaped object smuggled past the reader. Split out because the
+ * attempt above owns retries and reporting, not wire shapes. The system prompt
+ * is a parameter rather than a constant because conversing and phrasing share
+ * the wire and differ only in instructions.
+ */
+async function postProseMessage(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  user: string,
+  budget: AbortSignal,
+  maxTokens: number,
+  system: string,
+): Promise<{ text: string; model: string; promptTokens: number | null; completionTokens: number | null }> {
+  const response = await fetch(`${baseUrl}/messages`, {
+    method: 'POST',
+    signal: budget,
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': ANTHROPIC_VERSION,
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: Math.min(maxTokens, GENERAL_TOKENS),
+      temperature: 0.7,
+      system,
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new HttpStatusError(response.status, body);
+  }
+  const payload = (await response.json()) as MessageResponse;
+  const usage = payload.usage;
+  return {
+    text: readConverseText(payload),
+    model: payload.model ?? model,
+    promptTokens: usage?.input_tokens ?? null,
+    completionTokens: usage?.output_tokens ?? null,
+  };
+}
+
+/** The prose block, or empty when the model sent none. */
+function readConverseText(payload: MessageResponse): string {
+  const text = (payload.content ?? []).find((block) => block.type === 'text')?.text;
+  return text?.trim() ?? '';
 }
 
 /**

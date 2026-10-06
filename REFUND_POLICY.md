@@ -203,6 +203,16 @@ _An unmatched order reference escalates rather than denies._
 
 A request naming an order that does not exist, or that belongs to a different customer, escalates. It is not denied: a mistyped or mistated reference is not an attempt to defraud, and a human can find the right order.
 
+## §6.5 — Order total above manual-review ceiling
+
+| Rule | Stage | Scope | Class | May return |
+| --- | --- | --- | --- | --- |
+| `R-15` | fact_gates | order | risk | escalate, pass |
+
+_This order requires a person to review it before anything is approved._
+
+When the total value of an order exceeds the configured ceiling (default $500.00), the request is escalated to a person before any item is selected and before any model is called.
+
 # §7 — Request integrity
 
 The request channel is untrusted. These clauses treat the message as data to be parsed, never as instructions to be followed.
@@ -267,6 +277,7 @@ The layer is off by default and every bound is an operator-controlled environmen
 | §6.4 | `R-13` | Order reference cannot be resolved | risk | fact_gates |
 | §4.1 | `R-03` | Human review above threshold | approval-authority | fact_gates |
 | §4.2 | `R-03b` | Eligible remainder after item-level denials | approval-authority | fact_gates |
+| §6.5 | `R-15` | Order total exceeds manual-review ceiling | risk | fact_gates |
 | §3.1 | `R-01b` | Standard refund window | approval-authority | reason_rules |
 | §5.1 | `R-04` | Damaged or incorrect goods | eligibility | reason_rules |
 | §6.3 | `R-09` | Conflicting customer and fulfilment evidence | risk | reason_rules |

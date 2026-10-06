@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { useConversation } from '../useConversation';
 import { ChatPage } from '../ChatPage';
 import { FulfilOutcome, OverrideForm } from '../detail/OverrideForm';
+import { cartLines, clearCart } from '../shop/cartStore';
 
 /**
  * The storefront, driven like a customer.
@@ -119,6 +120,8 @@ interface World {
   reply: (message: string) => unknown;
   /** Overrides the thread history. */
   history: () => unknown;
+  /** Overrides the shopping thread. */
+  assistant: () => unknown;
 }
 
 let world: World;
@@ -145,6 +148,7 @@ const STATIC_ROUTES: ReadonlyMap<string, () => unknown> = new Map<string, () => 
   ['/api/shop/me', () => ({ user: USER })],
   ['/api/shop/orders', () => ({ orders: [ORDER] })],
   ['/api/shop/chat/summary', () => ({ counts: [{ orderId: ORDER_ID, count: 1 }] })],
+  ['/api/shop/assistant/history', () => world.assistant()],
   ['/api/shop/assistant-status', () => ({ aiMode: 'fake (test)', aiAvailable: true, aiNote: '' })],
   ['/api/shop/products', () => ({ products: [] })],
   ['/api/shop/register', () => ({ user: USER })],
@@ -170,7 +174,8 @@ beforeEach(() => {
     sent: [],
     requested: [],
     reply: () => decidedReply(),
-    history: () => ({ orderId: ORDER_ID, closed: false, awaitingPerson: false, turns: [] }),
+    history: () => ({ orderId: ORDER_ID, closed: false, awaitingPerson: false, turns: [], assistantTurns: [] }),
+    assistant: () => ({ turns: [] }),
   };
 
   vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -311,6 +316,7 @@ describe('what the thread shows', () => {
       turns: [
         { kind: 'request', id: 'REQ-1', message: 'The mug arrived broken', responseText: 'Your refund of $24.00 has been approved.', itemIds: [MUG_ITEM], createdAt: '2026-01-02T00:00:00.000Z' },
       ],
+      assistantTurns: [],
     });
 
     renderPage();
@@ -327,6 +333,7 @@ describe('what the thread shows', () => {
       // A named agent has the thread and has not answered yet.
       awaitingPerson: true,
       turns: [],
+      assistantTurns: [],
     });
 
     renderPage();
@@ -408,6 +415,7 @@ describe('what the line chips say about a line with a person', () => {
           createdAt: '2026-01-02T00:00:00.000Z',
         },
       ],
+      assistantTurns: [],
     });
 
     renderPage();
@@ -436,6 +444,7 @@ describe('what the line chips say about a line with a person', () => {
           createdAt: '2026-01-02T00:00:00.000Z',
         },
       ],
+      assistantTurns: [],
     });
 
     renderPage();
@@ -606,5 +615,180 @@ describe('and an alternative outcome can be carried out', () => {
   it('shows no fulfilment control on a money decision', () => {
     render(<FulfilOutcome request={decidedRequest('approved', 10_000) as never} onFulfilled={() => {}} />);
     expect(screen.queryByRole('button', { name: 'Record it' })).not.toBeInTheDocument();
+  });
+});
+
+/** One shopping-assistant answer, shaped exactly as the route does. */
+function shopReply(): unknown {
+  return {
+    shopAnswer: {
+      id: 'SHOP-1',
+      kind: 'product_help',
+      answer: 'Here is what matches: Harbour Stoneware Mug at $24.00. Tap Add on anything to put it in your cart.',
+      products: [{ id: 'PRD-MUG-01', name: 'Harbour Stoneware Mug', priceCents: 2_400, stock: 150 }],
+      orderStatus: null,
+      orderId: null,
+      createdAt: '2026-01-02T00:00:00.000Z',
+    },
+  };
+}
+
+/** A status answer given about this order, as the order thread reloads it. */
+function statusAnswer(): { message: string; shopAnswer: unknown } {
+  return {
+    message: 'where is my order?',
+    shopAnswer: {
+      id: 'SHOP-STATUS-1',
+      kind: 'order_status',
+      answer: 'Your order was delivered yesterday.',
+      products: [],
+      orderStatus: null,
+      orderId: ORDER_ID,
+      createdAt: '2026-01-02T00:00:00.000Z',
+    },
+  };
+}
+
+describe('assistant answers survive a reload', () => {
+  /**
+   * The order thread used to load only the refund tables, so an order-status
+   * answer read once vanished on reload while its row sat in the database.
+   * A customer who got an answer and refreshes must see the same answer.
+   */
+  it('replays the order status answer on its order thread', async () => {
+    world.history = () => ({
+      orderId: ORDER_ID,
+      closed: false,
+      awaitingPerson: false,
+      turns: [],
+      assistantTurns: [statusAnswer()],
+    });
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/delivered yesterday/i)).toBeInTheDocument();
+    });
+  });
+
+  it('keeps order answers out of the shopping thread', async () => {
+    world.assistant = () => ({ turns: [statusAnswer()] });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole('button', { name: 'Shopping help' }));
+    await screen.findByPlaceholderText(/catalogue/i);
+    expect(screen.queryByText(/delivered yesterday/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('shopping help', () => {
+  /**
+   * The mode toggle, driven like a customer who has no claim.
+   *
+   * The failure this guards is the composer staying gated on an order in a
+   * mode that has no order, and the answer rendering as nothing because the
+   * thread only knows decision and question bubbles. Both are invisible to
+   * any assertion about the request that was sent.
+   */
+  it('answers in shopping mode without an order and adds the card to the cart', async () => {
+    clearCart();
+    world.reply = () => shopReply();
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole('button', { name: 'Shopping help' }));
+
+    const box = await screen.findByPlaceholderText(/catalogue/i);
+    await user.type(box, 'mugs');
+    await user.click(screen.getByLabelText('Send'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/here is what matches/i)).toBeInTheDocument();
+    });
+    expect(world.sent).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: 'Add Harbour Stoneware Mug to cart' }));
+    expect(cartLines()).toContainEqual({ productId: 'PRD-MUG-01', quantity: 1 });
+  });
+
+  it('sends shopping mode on the wire so the server can route it', async () => {
+    world.reply = () => shopReply();
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole('button', { name: 'Shopping help' }));
+    await user.type(await screen.findByPlaceholderText(/catalogue/i), 'mugs');
+    await user.click(screen.getByLabelText('Send'));
+
+    await waitFor(() => {
+      expect(world.sent).toHaveLength(1);
+    });
+    expect((world.sent[0]?.body as { shopping?: boolean }).shopping).toBe(true);
+  });
+});
+
+describe('shopping help cart and search states', () => {
+  /**
+   * The thread and the panel share one add-to-cart button, so a tap in either
+   * place must read the same afterwards. What bit before: the tap went through
+   * silently and the button kept saying "Add", which reads as "tap again".
+   */
+  it('renames the card button once its product is in the cart', async () => {
+    clearCart();
+    world.reply = () => shopReply();
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole('button', { name: 'Shopping help' }));
+    await user.type(await screen.findByPlaceholderText(/catalogue/i), 'mugs');
+    await user.click(screen.getByLabelText('Send'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/here is what matches/i)).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: 'Add Harbour Stoneware Mug to cart' }));
+
+    // The catalogue page reads "Add another (N in cart)"; the thread card must
+    // speak the same way, or one tap reads as two different promises.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Add Harbour Stoneware Mug to cart' })).toHaveTextContent(
+        'Add another (1 in cart)',
+      );
+    });
+  });
+
+  it('says so when the catalogue search finds nothing', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole('button', { name: 'Shopping help' }));
+    // The stub catalogue is empty, so any search ends with no results: the
+    // panel must say that rather than sitting blank as if it never searched.
+    await user.type(await screen.findByLabelText('Search the catalogue'), 'left-handed kettle');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/no products match/i)).toBeInTheDocument();
+    });
+  });
+
+  it('disables the card button for an out-of-stock product', async () => {
+    world.reply = () => ({
+      shopAnswer: {
+        ...(shopReply() as { shopAnswer: Record<string, unknown> }).shopAnswer,
+        products: [{ id: 'PRD-MUG-01', name: 'Harbour Stoneware Mug', priceCents: 2_400, stock: 0 }],
+      },
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole('button', { name: 'Shopping help' }));
+    await user.type(await screen.findByPlaceholderText(/catalogue/i), 'mugs');
+    await user.click(screen.getByLabelText('Send'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/out of stock/i)).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'Add Harbour Stoneware Mug to cart' })).toBeDisabled();
   });
 });

@@ -25,7 +25,6 @@ describe('classifyShopIntent', () => {
     { message: 'I was charged twice', shopping: false, want: 'refund' },
     // The default is the pipeline: an unclear message escalates, never shops.
     { message: 'the lamp is too dim', shopping: false, want: 'refund' },
-    { message: 'hello', shopping: false, want: 'refund' },
     // Status checks.
     { message: 'where is my order?', shopping: false, want: 'order_status' },
     { message: 'has my order shipped yet?', shopping: false, want: 'order_status' },
@@ -42,8 +41,29 @@ describe('classifyShopIntent', () => {
     { message: 'how much is the mug?', shopping: false, want: 'product_help' },
     // Shopping mode turns an unclear message into browsing, but never overrules
     // the rows above.
-    { message: 'hello', shopping: true, want: 'product_help' },
+    { message: 'hello', shopping: true, want: 'greeting' },
     { message: 'show me something nice', shopping: true, want: 'product_help' },
+    // Courtesy only: anything claim-shaped still belongs to the pipeline.
+    { message: 'hello', shopping: false, want: 'greeting' },
+    { message: 'hi!', shopping: false, want: 'greeting' },
+    { message: 'thanks', shopping: false, want: 'greeting' },
+    { message: 'thank you so much', shopping: false, want: 'refund' },
+    { message: 'bye', shopping: false, want: 'greeting' },
+    { message: '', shopping: false, want: 'greeting' },
+    { message: '   ', shopping: true, want: 'greeting' },
+    { message: '...', shopping: false, want: 'greeting' },
+    { message: 'hi, the mug is broken', shopping: false, want: 'refund' },
+    { message: 'hi, where is my order?', shopping: false, want: 'order_status' },
+    // Explicitly general questions get a conversational answer, never a claim.
+    { message: 'what can you do?', shopping: false, want: 'general' },
+    { message: 'how does this shop work?', shopping: false, want: 'general' },
+    { message: 'what is your return policy?', shopping: false, want: 'general' },
+    { message: 'what is your return policy?', shopping: true, want: 'general' },
+    { message: 'how long do I have to return?', shopping: false, want: 'general' },
+    { message: 'do you ship internationally?', shopping: false, want: 'general' },
+    // Claim-shaped policy wording stays with the pipeline.
+    { message: 'can I return this mug?', shopping: false, want: 'refund' },
+    { message: 'help', shopping: false, want: 'refund' },
   ];
 
   for (const turn of cases) {

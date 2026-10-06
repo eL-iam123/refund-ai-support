@@ -47,8 +47,12 @@ export interface PolicyContext {
   /**
    * The order-total ceiling above which R-15 escalates. Supplied by the
    * orchestrator so the rule stays a pure function of its context.
+   *
+   * Optional so contexts built by hand - tests, scripts - keep working: absent
+   * means the schema default, and a ceiling can only ever escalate, so omitting
+   * it cannot widen what is paid.
    */
-  readonly escalationCeilingCents: number;
+  readonly escalationCeilingCents?: number;
 }
 
 export interface PolicyRule {

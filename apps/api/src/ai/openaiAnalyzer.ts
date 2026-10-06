@@ -5,8 +5,8 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom } from './breaker.js';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildCaseSummaryUser, buildIntakeUser, buildShopUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, INTAKE_SYSTEM, SHOP_SYSTEM } from './prompts.js';
-import { CaseSummarySchema, IntakeOutputSchema, ShopSuggestionSchema, type IntakeOutput } from './schemas.js';
+import { buildCaseSummaryUser, buildIntakeUser, buildShopUser, buildGeneralUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, GENERAL_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM, SHOP_SYSTEM } from './prompts.js';
+import { CaseSummarySchema, IntakeOutputSchema, PhraseReplySchema, ShopSuggestionSchema, type IntakeOutput } from './schemas.js';
 import type { AttemptOutcome } from './breaker.js';
 import { parseJson } from './json.js';
 import {
@@ -19,6 +19,8 @@ import {
   type AttemptObserver,
   type ChatInput,
   type ChatReply,
+  type ConverseInput,
+  type PhraseInput,
   type ShopInput,
   type ShopSuggestion,
 } from './analyzer.js';
@@ -69,6 +71,8 @@ type CompletionReply = Omit<
 const MAX_REPAIRS = 1;
 /** A case note is a paragraph. Asking for more spends the customer's latency on prose. */
 const CASE_SUMMARY_TOKENS = 220;
+/** A chat answer is a few sentences. Longer is not friendlier, only slower. */
+const GENERAL_TOKENS = 300;
 
 /**
  * The documented "nothing worth adding".
@@ -317,6 +321,147 @@ export class OpenAiAnalyzer implements AIAnalyzer {
       return null;
     }
     return { productIds: parsed.data.productIds, model: completion.model };
+  }
+
+  /**
+   * General conversation: small talk, help, and abstract policy questions.
+   *
+   * Prose, not a tool call: the answer is sentences, and the caller validates
+   * them before anyone reads them. One candidate walk like everything else;
+   * every failure path returns null, because a missing sentence must never
+   * fail a conversation.
+   */
+  async converse(input: ConverseInput, observer: AttemptObserver): Promise<string | null> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildGeneralUser(input.message, input.products, input.policy, input.history, input.style);
+    const result = await runCandidates<string>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'general',
+      attempt: async (model, attempt) => this.converseAttempt(model, attempt, user, budget, observer),
+    });
+    if (!result.ok) {
+      return null;
+    }
+    return result.value;
+  }
+
+  /**
+   * Phrases a decided outcome into customer-facing prose.
+   *
+   * Same transport contract as every other prose call: one candidate walk,
+   * schema-bounded length, null on any failure. Content safety is the
+   * caller's job (envelope-match validation), not the transport's - this
+   * method cannot tell a good phrasing from a lying one, it can only tell an
+   * empty or overlong one.
+   */
+  async phrase(input: PhraseInput, observer: AttemptObserver): Promise<string | null> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildPhraseUser(input);
+    const result = await runCandidates<string>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'phrase',
+      attempt: async (model, attempt) => this.phraseAttempt(model, attempt, user, budget, observer),
+    });
+    if (!result.ok) {
+      return null;
+    }
+    return result.value;
+  }
+
+  private async phraseAttempt(
+    model: string,
+    attempt: number,
+    user: string,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<AttemptOutcome<string>> {
+    const startedAt = Date.now();
+    try {
+      const completion = await this.createCompletion(
+        {
+          model,
+          temperature: 0.7,
+          max_tokens: Math.min(this.env.AI_MAX_TOKENS, GENERAL_TOKENS),
+          messages: [
+            { role: 'system', content: PHRASE_SYSTEM },
+            { role: 'user', content: user },
+          ],
+        },
+        budget,
+      );
+      const text = firstMessage(completion).trim();
+      if (text.length === 0) {
+        return { ok: false, error: 'phrase reply was empty', retryable: false };
+      }
+      const parsed = PhraseReplySchema.safeParse(text);
+      if (!parsed.success) {
+        return { ok: false, error: 'phrase reply rejected by validation', retryable: false };
+      }
+      const usage = readUsage(completion.usage);
+      observer({ model, attempt, ok: true, latencyMs: Date.now() - startedAt, ...usage, error: null });
+      return { ok: true, value: parsed.data };
+    } catch (error: unknown) {
+      const failure = classifyProviderFailure(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      return { ok: false, ...failure };
+    }
+  }
+
+  private async converseAttempt(
+    model: string,
+    attempt: number,
+    user: string,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<AttemptOutcome<string>> {
+    const startedAt = Date.now();
+    try {
+      const completion = await this.createCompletion(
+        {
+          model,
+          temperature: 0.7,
+          max_tokens: Math.min(this.env.AI_MAX_TOKENS, GENERAL_TOKENS),
+          messages: [
+            { role: 'system', content: GENERAL_SYSTEM },
+            { role: 'user', content: user },
+          ],
+        },
+        budget,
+      );
+      const text = firstMessage(completion).trim();
+      if (text.length === 0) {
+        return { ok: false, error: 'general reply was empty', retryable: false };
+      }
+      const usage = readUsage(completion.usage);
+      observer({ model, attempt, ok: true, latencyMs: Date.now() - startedAt, ...usage, error: null });
+      return { ok: true, value: text };
+    } catch (error: unknown) {
+      const failure = classifyProviderFailure(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      return { ok: false, ...failure };
+    }
   }
 
   /**

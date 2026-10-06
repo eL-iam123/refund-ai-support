@@ -201,11 +201,15 @@ const REASON_BY_RULE: Readonly<Record<string, string>> = {
 /**
  * The sentence for whichever rule reached a conclusion.
  *
+ * Exported because the phrasing envelope needs the same words: the customer
+ * must always hear *why* their case was escalated, and two sources for that
+ * sentence would drift into two different reasons.
+ *
  * "Whichever reached a conclusion" rather than "the first": on a clean request no rule
  * concluded anything, which is the ordinary "nothing objected, but nothing concluded"
  * escalation. Saying so is the truth, and a vague reassurance would be a small lie.
  */
-function reasonFor(decision: RefundDecision): string {
+export function reasonFor(decision: RefundDecision): string {
   const deciding = decision.trace.find((rule) => rule.outcome !== 'pass');
   const sentence = deciding === undefined ? undefined : REASON_BY_RULE[deciding.ruleId];
   return sentence ?? 'it needs a person to decide rather than a rule.';

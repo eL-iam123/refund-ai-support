@@ -178,6 +178,13 @@ async function seedDemoIfAsked(
   pipeline: PipelineDeps,
   log: { info: (fields: object, message: string) => void; warn: (fields: object, message: string) => void },
 ): Promise<SeededDemo | null> {
+  if (env.NODE_ENV === 'production') {
+    // Belt and braces next to the SEED_DEMO_DATA flag: a production database
+    // must never gain invented claims, even when the flag is set by a compose
+    // file written for reviewers. The flag keeps working everywhere else.
+    log.warn({}, 'demo.seed.refused: SEED_DEMO_DATA is ignored in production');
+    return null;
+  }
   if (!env.SEED_DEMO_DATA) {
     return null;
   }

@@ -71,8 +71,11 @@ export function isChatClosed(db: Db, customerId: string, orderId: string | null)
  *    has actually handled the thread - a handoff on this order has been taken and
  *    ended. That is what makes the confirmation possible before the conversation
  *    ends, and it is why these outcomes are closable at all rather than stuck.
- *  - `escalated` is never finalisable here. It is the one state that means a person
- *    is still owed an answer.
+ *  - `escalated` on its own is never finalisable: it means a person still owes
+ *    an answer. Once a person has taken the thread and handed it back, the
+ *    answer has been given in person, and the thread finalises like any other
+ *    handled one. Without this, a case a person resolved could never be
+ *    closed, and every resolved escalation stayed open forever.
  */
 export function finalizedRequestId(db: Db, customerId: string, orderId: string | null): string | null {
   const latest = latestRequestForThread(db, customerId, orderId);
@@ -91,10 +94,10 @@ export function finalizedRequestId(db: Db, customerId: string, orderId: string |
     ).get(latest.id);
     return completedRefund === undefined ? null : latest.id;
   }
-  if (latest.decision === 'exchange' || latest.decision === 'store_credit') {
-    return agentHasHandledThread(db, latest.customerId, orderId) ? latest.id : null;
-  }
-  return null;
+  // Anything else finalises once a person has owned the thread to its end.
+  // Money waits above regardless of who handled it, and a denial under appeal
+  // waits too; the rest is a conversation a human has finished having.
+  return agentHasHandledThread(db, latest.customerId, orderId) ? latest.id : null;
 }
 
 /**

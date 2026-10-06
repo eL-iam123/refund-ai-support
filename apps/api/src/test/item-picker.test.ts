@@ -370,8 +370,10 @@ describe('end to end, through the pipeline', () => {
       ).toMatchObject({ n: 0 });
 
       // 2. The customer taps the mug. Their tap is the scope, exactly as a tick
-      //    sent with a message is - the offer contributed nothing to it.
-      const decided = await app.inject({
+      //    sent with a message is - the offer contributed nothing to it. But a tap
+      //    states no fault and asks for no money, so the consent gate holds the
+      //    payable decision for one confirmation rather than inferring one.
+      const confirm = await app.inject({
         method: 'POST',
         url: '/api/chat/messages',
         headers: { cookie: session.cookie },
@@ -379,6 +381,27 @@ describe('end to end, through the pipeline', () => {
           customerId: session.customerId,
           orderId: order.id,
           message: `It is about the ${mug.name}`,
+          itemIds: [mug.itemId],
+        },
+      });
+      expect(confirm.statusCode).toBe(200);
+      const confirmBody = confirm.json<{ question: string }>();
+      expect(confirmBody.question).toContain('Before we refund anything:');
+      expect(confirmBody.question).toContain('a refund of');
+      expect(
+        h.db.prepare('SELECT COUNT(*) AS n FROM refund_requests').get(),
+      ).toMatchObject({ n: 0 });
+
+      // 2b. "Yes" to the confirmation is consent, recognised by the question's
+      //     own marker rather than by restating anything.
+      const decided = await app.inject({
+        method: 'POST',
+        url: '/api/chat/messages',
+        headers: { cookie: session.cookie },
+        payload: {
+          customerId: session.customerId,
+          orderId: order.id,
+          message: 'yes',
           itemIds: [mug.itemId],
         },
       });

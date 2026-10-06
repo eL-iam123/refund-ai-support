@@ -33,7 +33,7 @@ export interface ShopOrderSnapshot {
 }
 
 export interface ShopAnswerRecord {
-  readonly kind: 'order_status' | 'return_help' | 'product_help';
+  readonly kind: 'order_status' | 'return_help' | 'product_help' | 'general';
   readonly answer: string;
   readonly products: readonly ShopCard[];
   readonly orderStatus: ShopOrderSnapshot | null;
@@ -97,6 +97,32 @@ export function listShopTurns(db: Db, customerId: string, limit: number): readon
     customerId,
     limit,
   );
+  return collectTurns(rows);
+}
+
+/**
+ * One order's answers, oldest first: what reloads an order thread's status
+ * answers. Same rows as the shopping thread, narrowed to the order the
+ * question was asked about, so an answer given on one order does not replay
+ * on another.
+ */
+export function listShopTurnsForOrder(db: Db, customerId: string, orderId: string, limit: number): readonly ShopTurn[] {
+  const rows = queryAll<ShopTurnRow>(
+    db.prepare(
+      `SELECT id, created_at, customer_id, order_id, customer_message, answer_json
+         FROM shop_assistant_turns
+        WHERE customer_id = ? AND order_id IS ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?`,
+    ),
+    customerId,
+    orderId,
+    limit,
+  );
+  return collectTurns(rows);
+}
+
+function collectTurns(rows: readonly ShopTurnRow[]): readonly ShopTurn[] {
   const turns: ShopTurn[] = [];
   for (const row of rows) {
     const record = parseRecord(row.answer_json);
@@ -123,7 +149,10 @@ function parseRecord(json: string): ShopAnswerRecord | null {
     }
     const record = parsed as { kind?: unknown; answer?: unknown; products?: unknown; orderStatus?: unknown };
     if (
-      (record.kind !== 'order_status' && record.kind !== 'return_help' && record.kind !== 'product_help') ||
+      (record.kind !== 'order_status' &&
+        record.kind !== 'return_help' &&
+        record.kind !== 'product_help' &&
+        record.kind !== 'general') ||
       typeof record.answer !== 'string'
     ) {
       return null;
@@ -165,33 +194,46 @@ function parseSnapshot(value: unknown): ShopOrderSnapshot | null {
   if (typeof value !== 'object' || value === null) {
     return null;
   }
+  const header = parseSnapshotHeader(value);
+  if (header === null) {
+    return null;
+  }
+  const raw = value as { items?: unknown };
+  if (!Array.isArray(raw.items)) {
+    return null;
+  }
+  const items: { readonly name: string; readonly quantity: number; readonly unitPriceCents: number }[] = [];
+  for (const entry of raw.items) {
+    const line = parseSnapshotItem(entry);
+    if (line !== null) {
+      items.push(line);
+    }
+  }
+  return { ...header, items };
+}
+
+function parseSnapshotHeader(value: object): {
+  readonly orderId: string;
+  readonly status: string;
+  readonly paymentState: string;
+  readonly trackingStatus: string;
+  readonly totalCents: number;
+} | null {
   const snapshot = value as {
     orderId?: unknown;
     status?: unknown;
     paymentState?: unknown;
     trackingStatus?: unknown;
     totalCents?: unknown;
-    items?: unknown;
   };
   if (
     typeof snapshot.orderId !== 'string' ||
     typeof snapshot.status !== 'string' ||
     typeof snapshot.paymentState !== 'string' ||
     typeof snapshot.trackingStatus !== 'string' ||
-    typeof snapshot.totalCents !== 'number' ||
-    !Array.isArray(snapshot.items)
+    typeof snapshot.totalCents !== 'number'
   ) {
     return null;
-  }
-  const items: { readonly name: string; readonly quantity: number; readonly unitPriceCents: number }[] = [];
-  for (const entry of snapshot.items) {
-    if (typeof entry !== 'object' || entry === null) {
-      continue;
-    }
-    const line = entry as { name?: unknown; quantity?: unknown; unitPriceCents?: unknown };
-    if (typeof line.name === 'string' && typeof line.quantity === 'number' && typeof line.unitPriceCents === 'number') {
-      items.push({ name: line.name, quantity: line.quantity, unitPriceCents: line.unitPriceCents });
-    }
   }
   return {
     orderId: snapshot.orderId,
@@ -199,6 +241,20 @@ function parseSnapshot(value: unknown): ShopOrderSnapshot | null {
     paymentState: snapshot.paymentState,
     trackingStatus: snapshot.trackingStatus,
     totalCents: snapshot.totalCents,
-    items,
   };
+}
+
+function parseSnapshotItem(entry: unknown): {
+  readonly name: string;
+  readonly quantity: number;
+  readonly unitPriceCents: number;
+} | null {
+  if (typeof entry !== 'object' || entry === null) {
+    return null;
+  }
+  const line = entry as { name?: unknown; quantity?: unknown; unitPriceCents?: unknown };
+  if (typeof line.name !== 'string' || typeof line.quantity !== 'number' || typeof line.unitPriceCents !== 'number') {
+    return null;
+  }
+  return { name: line.name, quantity: line.quantity, unitPriceCents: line.unitPriceCents };
 }

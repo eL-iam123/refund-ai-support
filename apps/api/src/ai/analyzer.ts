@@ -164,6 +164,65 @@ export interface ShopSuggestion {
   readonly model: string;
 }
 
+/** One public catalogue name the conversational model may mention. */
+export interface ConverseProduct {
+  readonly name: string;
+}
+
+/** One public policy point the conversational model may cite. */
+export interface ConversePolicy {
+  readonly title: string;
+  readonly summary: string;
+}
+
+/** How to talk: inferred from the customer's own turns, never stored. */
+export interface ConverseStyle {
+  readonly tone: 'concise' | 'friendly' | 'detailed';
+}
+
+/** Input for general conversation: small talk, help, and policy questions. */
+export interface ConverseInput {
+  readonly message: string;
+  readonly history: readonly DialogueLine[];
+  /** Public context only: catalogue names and policy summaries. Never an order. */
+  readonly products: readonly ConverseProduct[];
+  readonly policy: readonly ConversePolicy[];
+  readonly style: ConverseStyle;
+}
+
+/**
+ * The fixed facts a reply may state, and nothing else.
+ *
+ * Built deterministically from the resolver's decision - never by a model -
+ * so the set of claimable facts is closed before any prose exists. Amounts
+ * are pre-rendered in every form the reply is allowed to use, because the
+ * validator matches strings, not arithmetic: "twenty-four" is not a string
+ * the envelope contains, so it is not a string the reply may contain.
+ */
+export interface PhraseEnvelope {
+  readonly outcome: 'approved' | 'denied' | 'escalated' | 'partial_refund' | 'exchange' | 'store_credit';
+  readonly amountCents: number;
+  /** Every amount rendering the reply may use, e.g. ['$24', '$24.00']. Empty means no figure may appear. */
+  readonly allowedAmounts: readonly string[];
+  /** Product names the reply may mention, resolved from the order. */
+  readonly itemNames: readonly string[];
+  /** The deciding reason in plain words, for the model to echo - never a rule id. */
+  readonly reasonSummary: string;
+  /** Sentences the reply must contain verbatim: timing and next step. */
+  readonly mustSay: readonly string[];
+}
+
+/** Input for phrasing a decided outcome into customer-facing prose. */
+export interface PhraseInput {
+  readonly envelope: PhraseEnvelope;
+  readonly customerName: string;
+  readonly message: string;
+  /** A verified customer quote to echo, when grounding secured one. Never invented. */
+  readonly quote: string | null;
+  readonly history: readonly DialogueLine[];
+  readonly style: ConverseStyle;
+}
+
 /**
  * Input for chat mode (escalated conversations).
  *
@@ -282,6 +341,30 @@ export interface AIAnalyzer {
    * exception, so a missing suggestion can never fail a conversation.
    */
   suggestProducts?(input: ShopInput, observer: AttemptObserver): Promise<ShopSuggestion | null>;
+  /**
+   * General conversation: small talk, help, and abstract policy questions.
+   *
+   * Optional like nomination, for the same reason: absence is a normal outcome
+   * and the caller answers deterministically instead. Best-effort by contract:
+   * null means "no reply", never an exception. The reply is prose, so the
+   * caller validates it before anyone reads it - no money language, no order
+   * facts, no promises - and falls back when it fails. A missing sentence must
+   * never fail a conversation.
+   */
+  converse?(input: ConverseInput, observer: AttemptObserver): Promise<string | null>;
+  /**
+   * Phrases a decided outcome into customer-facing prose.
+   *
+   * The reader/writer split made explicit: this method runs strictly after the
+   * resolver has fixed the decision, receives only the deterministic envelope
+   * plus the customer's own words, and returns prose that the caller validates
+   * against the envelope before anyone reads it. It cannot decide, price, or
+   * promise anything - the envelope has no field for that, and the validator
+   * rejects anything outside it. Optional like its siblings: absence means the
+   * deterministic composer answers instead. Best-effort by contract: null
+   * means "no phrasing", never an exception.
+   */
+  phrase?(input: PhraseInput, observer: AttemptObserver): Promise<string | null>;
   /**
    * The agent-facing case summary: what the customer reported, and what it means.
    *

@@ -11,6 +11,7 @@ import {
   activeHandoffForCustomer,
   endHandoff,
   claimUnattendedHandoff,
+  handoffById,
   listConversationCandidates,
   recordAgentMessage,
   startHandoff,
@@ -20,6 +21,7 @@ import {
   type AgentMessage,
   type ConversationCandidate,
 } from '../../db/handoffs.js';
+import type { Db } from '../../db/connection.js';
 import { threadForStaff } from '../../retrieval/conversation.js';
 import { buildHandoffBrief } from '../../report/handoffBrief.js';
 import { ChatNotFinalizedError, closeFinalizedChat } from '../../db/chatClosures.js';
@@ -54,6 +56,10 @@ const StaffMessageSchema = z.object({
 const ConversationQuerySchema = z.object({
   customerId: z.string().min(1),
   orderId: z.string().min(1).nullable().optional(),
+  // One fork's thread: the agent-message stream narrows to this takeover while
+  // the case context around it stays, so the person on a case reads their own
+  // back-and-forth instead of every word ever exchanged on the order.
+  handoffId: z.string().min(1).max(120).optional(),
 });
 
 const CloseChatSchema = z.object({
@@ -103,10 +109,27 @@ function openConversation(
   if (findCustomer(ctx.db, customerId, ctx.now()) === null) {
     throw new NotFoundError('customer', customerId);
   }
+  const handoffId = forkThreadForStaff(ctx.db, customerId, query.data.handoffId);
   return {
-    thread: threadForStaff(ctx.db, customerId, orderId ?? null, 200),
+    thread: threadForStaff(ctx.db, customerId, orderId ?? null, 200, handoffId),
     brief: buildHandoffBrief(ctx.db, customerId, orderId ?? null),
   };
+}
+
+/**
+ * The fork thread the console asked for, or null for the whole order thread.
+ * A handoff id that is missing or belongs to another customer is not found —
+ * the console keys on customers, and an id alone must never widen that.
+ */
+function forkThreadForStaff(db: Db, customerId: string, handoffId: string | undefined): string | null {
+  if (handoffId === undefined) {
+    return null;
+  }
+  const handoff = handoffById(db, handoffId);
+  if (handoff === null || handoff.customerId !== customerId) {
+    throw new NotFoundError('handoff', handoffId);
+  }
+  return handoff.id;
 }
 
 function takeOver(
@@ -146,6 +169,9 @@ function takeOver(
       orderId: body.data.orderId,
       agentId,
       now: ctx.now(),
+      // Staff-initiated with no decided case behind it: no fork scope, so the
+      // takeover keeps the old whole-thread reach.
+      requestId: null,
     });
   } catch (error) {
     if (error instanceof HandoffAlreadyActiveError) {

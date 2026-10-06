@@ -58,6 +58,16 @@ export interface ResolveInput {
    * guard, and only ever to stop a *paid* decision.
    */
   readonly minConfidence?: number | undefined;
+  /**
+   * The customer asked for a person in their own words.
+   *
+   * Read only by the agent gate, and only ever to hand a payable decision to a
+   * person: being handled by someone is not a refund question, and the engine
+   * must not argue the customer out of it with an approval. A denial stands -
+   * refusing is not deciding for them, and the appeal path is how a person
+   * still hears it.
+   */
+  readonly customerRequestedAgent?: boolean | undefined;
 }
 
 /**
@@ -110,13 +120,17 @@ export function resolve(input: ResolveInput): RefundDecision {
   // refund, on a claim the model does not stand behind.
   const gated = confidenceGate(baseDecision, concluded, input);
   const softened = applyDiscretion(gated.decision, gated.winner, evaluations, input);
-  const decision = softened.decision;
+  // After discretion, not before it: a handoff to a person is not something
+  // the softening layer may convert back into a payment.
+  const agentHeld = agentGate(softened.decision, input);
+  const decision = agentHeld.decision;
   const requested = amountFor(decision, input, softened.partialAmountCents);
   const { decision: payable, amount, balanceNote, balanceWhy } = settledAgainstBalance(decision, requested, input);
   const ceiling = ceilingOverride(input, amount);
   const overrides = [
     ...softened.overrides,
     ...gated.overrides,
+    ...agentHeld.overrides,
     ...balanceNote,
     ...reconcile(input, payable, amount, evaluations),
     ...ceiling,
@@ -603,6 +617,37 @@ function lowConfidenceRecord(
     detail: `the model read this claim at ${confidence.toFixed(2)} confidence, below the ${floor.toFixed(2)} floor; a person decides instead`,
     aiProposal: input.aiProposal,
   };
+}
+
+/**
+ * Hands a payable decision to the person the customer asked for.
+ *
+ * Mirrors the confidence gate: it can only ever escalate, and a denial stands
+ * untouched - refusing authorises nothing, and the appeal path is how a person
+ * still hears a refusal. Runs after discretion so the softening layer cannot
+ * convert the handoff back into a payment, and records even an already
+ * escalated decision, because "the customer asked for a person" is a separate
+ * event from "the policy had nothing to approve".
+ */
+function agentGate(
+  decision: Decision,
+  input: ResolveInput,
+): { decision: Decision; overrides: readonly OverrideRecord[] } {
+  if (input.customerRequestedAgent !== true) {
+    return { decision, overrides: [] };
+  }
+  const record: OverrideRecord = {
+    code: 'agent_requested_by_customer',
+    detail: 'the customer asked for a person in their own words; a person decides instead',
+    aiProposal: input.aiProposal,
+  };
+  if (decision === 'approved' || decision === 'partial_refund') {
+    return { decision: 'escalated', overrides: [record] };
+  }
+  if (decision === 'escalated') {
+    return { decision, overrides: [record] };
+  }
+  return { decision, overrides: [] };
 }
 
 /**

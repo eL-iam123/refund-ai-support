@@ -81,6 +81,23 @@ export const ShopSuggestionSchema = z.object({
 });
 export type ShopSuggestionOutput = z.infer<typeof ShopSuggestionSchema>;
 
+/** The longest a conversational reply may be. Bounded so verbosity is a choice, not a bill. */
+export const MAX_GENERAL_CHARS = 600;
+
+/** A conversational reply, bounded. Content rules live in `replyGuard.ts`. */
+export const GeneralReplySchema = z.string().trim().min(1).max(MAX_GENERAL_CHARS);
+export type GeneralReplyOutput = z.infer<typeof GeneralReplySchema>;
+
+/**
+ * A phrased decision reply, bounded like any other prose.
+ *
+ * Length is the schema's whole job: what the reply may *say* is the
+ * validator's (`isSafePhrasedReply`), because allowlists over an envelope
+ * cannot be expressed as a shape.
+ */
+export const PhraseReplySchema = z.string().trim().min(1).max(MAX_GENERAL_CHARS);
+export type PhraseReplyOutput = z.infer<typeof PhraseReplySchema>;
+
 /** Compact schema description for the prompt. Not enforced by the provider. */
 export function describeOutput(shape: z.ZodType): string {
   return JSON.stringify(z.toJSONSchema(shape), null, 2);

@@ -52,6 +52,7 @@ export const OVERRIDE_LABEL: Record<OverrideCode, string> = {
   ai_proposal_rejected: 'AI proposal rejected',
   ai_proposed_approve_clamped_to_deny: 'Approve clamped to deny',
   ai_proposed_approve_clamped_to_escalate: 'Approve clamped to escalate',
+  agent_requested_by_customer: 'Customer asked for a person',
   amount_clamped_to_order_value: 'Amount clamped to order value',
   amount_limited_to_remaining_balance: 'Capped to remaining balance',
   amount_limited_to_disputed_items: 'Limited to disputed items',

@@ -4,7 +4,7 @@ import { findOrder } from '../db/orderRepository.js';
 import { listUpdatesForOrder } from '../db/customerUpdates.js';
 import { listDialogueForOrder } from '../db/dialogue.js';
 import type { ItemPickerOffer } from './itemPicker.js';
-import { ESCALATION_AGENT, activeHandoffForCustomer, isThreadOf, listAgentMessagesForOrder } from '../db/handoffs.js';
+import { ESCALATION_AGENT, activeHandoffForCustomer, isThreadOf, listAgentMessagesForOrder, messagesForHandoff } from '../db/handoffs.js';
 import { NotFoundError } from '../http/errors.js';
 import type { DialogueLine } from '../ai/analyzer.js';
 
@@ -171,8 +171,9 @@ export function threadForStaff(
   customerId: string,
   orderId: string | null,
   limit: number,
+  handoffId: string | null = null,
 ): readonly ChatTurn[] {
-  return thread(db, customerId, orderId, limit);
+  return thread(db, customerId, orderId, limit, handoffId);
 }
 
 /** One candidate in the interleave, ranked so same-instant ties read in order. */
@@ -182,12 +183,18 @@ interface Entry {
 }
 
 /** The shared merge behind both views. */
-function thread(db: Db, customerId: string, orderId: string | null, limit: number): readonly ChatTurn[] {
+function thread(
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  limit: number,
+  handoffId: string | null = null,
+): readonly ChatTurn[] {
   const entries: Entry[] = [];
   pushRequests(entries, db, customerId, orderId, limit);
   pushDialogue(entries, db, customerId, orderId, limit);
   pushUpdates(entries, db, customerId, orderId, limit);
-  pushAgentMessages(entries, db, customerId, orderId, limit);
+  pushAgentMessages(entries, db, customerId, orderId, limit, handoffId);
   pushHandoffNotice(entries, db, customerId, orderId);
   return sort(entries);
 }
@@ -278,11 +285,20 @@ function pushAgentMessages(
   customerId: string,
   orderId: string | null,
   limit: number,
+  handoffId: string | null = null,
 ): void {
   // The words exchanged with a person. Tied later than the notice below it on a
   // same-instant race: a message and the takeover it follows share a millisecond
   // in a fixed-clock test, so the ordering has to say whose turn is whose.
-  for (const message of listAgentMessagesForOrder(db, customerId, orderId, limit)) {
+  //
+  // A handoff id narrows the stream to one fork's thread: the person on that
+  // case reads their own back-and-forth with the case context around it, not
+  // every word ever exchanged with a person on this order.
+  const messages =
+    handoffId === null
+      ? listAgentMessagesForOrder(db, customerId, orderId, limit)
+      : messagesForHandoff(db, handoffId, limit);
+  for (const message of messages) {
     entries.push({
       turn: {
         kind: 'agent',

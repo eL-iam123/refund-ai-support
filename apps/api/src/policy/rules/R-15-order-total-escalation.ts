@@ -1,4 +1,5 @@
 import { escalate, pass, type PolicyRule } from '../types.js';
+import { ESCALATION_CEILING_CENTS } from '../constants.js';
 import { formatCents } from '../../lib/money.js';
 
 /**
@@ -24,7 +25,8 @@ export const R15OrderTotalEscalation: PolicyRule = {
   summary: 'This order requires a person to review it before anything is approved.',
   evaluate(context) {
     const total = context.order?.totalCents ?? 0;
-    if (total > context.escalationCeilingCents) {
+    const ceiling = context.escalationCeilingCents ?? ESCALATION_CEILING_CENTS;
+    if (total > ceiling) {
       return escalate(this, `order total ${formatCents(total)} exceeds the manual-review ceiling`);
     }
     return pass(this, `order total ${formatCents(total)} is within the manual-review ceiling`);

@@ -299,7 +299,7 @@ decision.
 | Intake loop | **reads** a reason + quotes, or asks one question; never decides |
 | Reason rules | whether the reason the model read justifies a refund |
 | Resolver | **the only writer of a decision and of the amount** |
-| Response | deterministic text; the model never writes the reply |
+| Response | model phrasing over a fixed envelope, envelope-match validated, deterministic fallback (ADR 0007) |
 
 ### When the provider is down
 

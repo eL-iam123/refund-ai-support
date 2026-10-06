@@ -125,7 +125,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerChatRoutes(app, ctx, hub);
   registerRequestRoutes(app, ctx);
   registerCatalogRoutes(app, ctx);
-  registerShopRoutes(app, ctx);
+  registerShopRoutes(app, ctx, hub);
   registerRefundRoutes(app, ctx);
   registerReturnsRoutes(app, ctx);
   registerStaffConversationRoutes(app, ctx, hub);

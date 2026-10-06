@@ -17,6 +17,7 @@ import { R11DuplicateCharge } from './R-11-duplicate-charge.js';
 import { R12AmbiguousRequest } from './R-12-ambiguous.js';
 import { R13UnresolvableOrder } from './R-13-unresolvable-order.js';
 import { R14RequestIntegrity } from './R-14-request-integrity.js';
+import { R15OrderTotalEscalation } from './R-15-order-total-escalation.js';
 
 /**
  * The policy, as one literal ordered list.
@@ -45,6 +46,7 @@ export const POLICY_RULES: readonly PolicyRule[] = [
   R13UnresolvableOrder,
   R03AmountAuthority,
   R03bThresholdRecheck,
+  R15OrderTotalEscalation,
 
   // Reason rules - require the extracted claim.
   R01bStandardWindow,

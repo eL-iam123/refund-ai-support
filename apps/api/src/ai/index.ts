@@ -60,6 +60,10 @@ export {
   type ShopInput,
   type ShopProduct,
   type ShopSuggestion,
+  type ConverseInput,
+  type ConverseProduct,
+  type ConversePolicy,
+  type ConverseStyle,
 } from './analyzer.js';
 export { parseJson } from './json.js';
 export { verifyGrounding } from './grounding.js';

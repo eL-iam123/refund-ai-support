@@ -212,9 +212,21 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .demo { width: 100%; justify-content: flex-start; }
 
 .chat-layout { display: grid; grid-template-columns: 278px minmax(0, 1fr); gap: 14px; align-items: stretch; }
+/* A third column only while a fork panel exists: one escalation with a person
+   must not permanently narrow the thread for everyone else. */
+.chat-layout:has(.fork-panel) { grid-template-columns: 278px minmax(0, 1fr) 320px; }
 .chat-context { position: sticky; top: 82px; display: grid; align-content: start; gap: 10px; min-height: 0; padding: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow-y: auto; }
 .chat-context .error-note { overflow-wrap: anywhere; font-size: .76rem; line-height: 1.35; }
 .chat-main { display: flex; flex-direction: column; min-height: 0; padding: 14px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius); }
+.fork-panel { position: sticky; top: 82px; display: grid; align-content: start; gap: 10px; min-height: 0; padding: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow-y: auto; }
+.fork-panel h2 { font-size: 1rem; }
+.fork-thread { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+.fork-thread:first-of-type { border-top: 0; padding-top: 0; }
+.fork-case { font-weight: 600; font-size: .88rem; }
+.fork-waiting { font-size: .82rem; color: var(--ink-soft); }
+.fork-log { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
+.fork-composer { display: flex; gap: 8px; }
+.fork-composer input { flex: 1; min-width: 0; }
 .chat-log { display: flex; flex: 1; flex-direction: column; gap: 12px; min-height: 0; padding: 4px 4px 18px; overflow-y: auto; }
 .bubble-me, .bubble-them { max-width: min(76%, 620px); padding: 11px 13px; border-radius: 7px; font-size: .9rem; white-space: pre-wrap; }
 .bubble-me { align-self: flex-end; color: #4b2100; background: var(--brand-soft); border: 1px solid #ffd3b5; }

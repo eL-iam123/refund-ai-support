@@ -5,7 +5,7 @@ import type { AppContext } from '../context.js';
 import { processRefundRequest, type ProcessResult } from '../../orchestrator.js';
 import { answerShopTurn, toShopAnswer } from '../../shop/assistant.js';
 import type { ItemPickerOffer } from '../../retrieval/itemPicker.js';
-import { findRequestById } from '../../db/requestRepository.js';
+import { findRequestById, latestRequestForThread, insertAuditEvent } from '../../db/requestRepository.js';
 import type { PersistedRequest } from '../../db/records.js';
 import { persistDecision } from '../../db/persistDecision.js';
 import { rowFromDecision } from '../../db/requestRow.js';
@@ -19,11 +19,14 @@ import {
 import { toRequestDto } from '../serialize.js';
 import { HttpError, badRequest } from '../errors.js';
 import { resolveShopSession, SESSION_COOKIE, type ShopUser } from '../../shop/auth.js';
-import { ESCALATION_AGENT, recordAgentMessage, takeoverForEscalated, type ActiveHandoff, type AgentMessage } from '../../db/handoffs.js';
+import { ESCALATION_AGENT, forkForMessage, recordAgentMessage, takeoverForEscalated, type ActiveHandoff, type AgentMessage } from '../../db/handoffs.js';
 import { isChatClosed } from '../../db/chatClosures.js';
 import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
 import { findCustomer, findOrder } from '../../db/orderRepository.js';
+import { asksForMoney, wantsAnAgent } from '../../response/intent.js';
+import { detectedReason } from '../../ai/reasonVocabulary.js';
+import { scanForInjection } from '../../security/injection.js';
 import { identifyOrder, type Identification } from '../../retrieval/identifyOrder.js';
 import { conversationForOrder } from '../../retrieval/conversation.js';
 
@@ -63,6 +66,7 @@ async function handleChatMessage(
     }
   | { request: RefundRequestDto }
   | { shopAnswer: ShopAnswerDto }
+  | { status: string; requestId: string }
 > {
   const body = parseChatBody(request, ctx);
   const session = signedInSession(ctx, request);
@@ -92,8 +96,10 @@ async function handleChatMessage(
   // So the person is still told, and the customer still gets an answer. Escalation
   // is meant to *add* a person to a conversation that the assistant is still having.
   if (takeover !== null && takeover.agentId !== ESCALATION_AGENT) {
-    reply.code(201);
-    return chatDuringHandoff(ctx, hub, takeover, body.message, now);
+    const forkReply = await claimedTakeoverReply(ctx, reply, hub, takeover, resolved, identification, now);
+    if (forkReply !== null) {
+      return forkReply;
+    }
   }
 
   // The shopping assistant answers order-status, return-logistics and
@@ -119,7 +125,64 @@ async function handleChatMessage(
     return suppressedDuplicate(ctx.db, duplicate, now);
   }
 
+  // A follow-up on a thread whose case is already open must not open a second
+  // one: without this, every "thanks" or "you said it was escalated" after a
+  // hand-back runs a fresh pipeline, persists a fresh escalation, and raises a
+  // fresh takeover for the same complaint.
+  const openCase = openCaseStatus(ctx.db, session.customerId, resolved, now, identification);
+  if (openCase !== null) {
+    reply.code(200);
+    return openCase;
+  }
+
   return await decideOrAsk(ctx, reply, resolved, now, identification);
+}
+
+/**
+ * Answers a message that arrived while a person has the thread.
+ *
+ * Two gates before the message lands on the agent thread. First the shopping
+ * assistant: "where is my refund" over an escalated order needs a status
+ * answer, not a silent filing on a thread nobody may be reading yet. Then the
+ * fork scope: a takeover forked from a decided escalation answers only for
+ * its own case's follow-ups, so a message about anything else falls through
+ * (null) to the pipeline below and starts its own case. A pre-fork takeover
+ * has no recorded scope and keeps the old whole-thread reach.
+ */
+async function claimedTakeoverReply(
+  ctx: AppContext,
+  reply: FastifyReply,
+  hub: LiveHub,
+  takeover: ActiveHandoff,
+  resolved: CreateRefundRequest,
+  identification: Identification,
+  now: Date,
+): Promise<HandoffBody | { shopAnswer: ShopAnswerDto } | null> {
+  const shopTurn = await answerShopTurn(ctx.db, ctx.pipeline, {
+    customerId: resolved.customerId,
+    orderId: resolved.orderId,
+    message: resolved.message,
+    shoppingMode: resolved.shopping,
+    identification,
+    now,
+  });
+  if (shopTurn !== null) {
+    reply.code(201);
+    return { shopAnswer: toShopAnswer(shopTurn) };
+  }
+  if (takeover.requestId === null) {
+    reply.code(201);
+    return chatDuringHandoff(ctx, hub, takeover, resolved.message, now);
+  }
+  const fork = forkForMessage(ctx.db, takeover.customerId, {
+    orderId: resolved.orderId ?? identification.order?.id ?? null,
+    itemIds: resolved.itemIds ?? [],
+  });
+  if (fork !== null && fork.handoff.id === takeover.id) {
+    reply.code(201);
+    return chatDuringHandoff(ctx, hub, takeover, resolved.message, now);
+  }
+  return null;
 }
 
 /** The customer this message is from. Never the one in the body. */
@@ -272,6 +335,74 @@ function duplicateForSubmission(
     input.message,
     now,
     ctx.env.DUPLICATE_WINDOW_HOURS,
+  );
+}
+
+/**
+ * What the customer is told when they write back on a thread whose case is
+ * already open.
+ *
+ * Worded to match the escalation it refers to: the case is open, nobody needs
+ * anything from them, and new information still has somewhere to go.
+ */
+const OPEN_CASE_STATUS =
+  'A person is still reviewing your request — nothing further is needed from you. ' +
+  'If something new has gone wrong, just describe it here.';
+
+/**
+ * Answers a follow-up from the open case instead of opening a second one.
+ *
+ * Returns null unless all three hold: the thread's latest request is an
+ * escalation nobody has overridden, and the message states no new claim.
+ * Anything else — a fault described, money asked, a person requested, an
+ * injection probe — runs the full pipeline, because that message may be a new
+ * case wearing a familiar thread.
+ *
+ * Nothing is persisted except an audit event on the open request, so there is
+ * no second decision row and no second takeover for staff to triage. A 200,
+ * like the duplicate path: nothing was created.
+ */
+function openCaseStatus(
+  db: Db,
+  customerId: string,
+  input: CreateRefundRequest,
+  now: Date,
+  identification: Identification,
+): { status: string; requestId: string } | null {
+  const orderId = input.orderId ?? identification.order?.id ?? null;
+  if (orderId === null) {
+    return null;
+  }
+  const latest = latestRequestForThread(db, customerId, orderId);
+  if (latest === null || latest.decision !== 'escalated' || latest.overriddenBy !== null) {
+    return null;
+  }
+  if (statesNewClaim(input.message)) {
+    return null;
+  }
+  insertAuditEvent(
+    db,
+    latest.id,
+    now.toISOString(),
+    'followup_on_open_case',
+    JSON.stringify({ message: input.message.slice(0, 200) }),
+  );
+  return { status: OPEN_CASE_STATUS, requestId: latest.id };
+}
+
+/**
+ * Whether the message could be a new claim rather than talk about the open one.
+ *
+ * Deliberately the same signals the pipeline itself treats as claim-shaped: a
+ * stated fault, a money ask, a person request, or an injection probe (which
+ * R-14 must still see and record rather than have answered away quietly).
+ */
+function statesNewClaim(message: string): boolean {
+  return (
+    detectedReason(message) !== null ||
+    asksForMoney(message) ||
+    wantsAnAgent(message) ||
+    scanForInjection(message).detected
   );
 }
 

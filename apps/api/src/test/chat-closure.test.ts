@@ -237,12 +237,36 @@ describe('an alternative outcome closes once an agent has handled the thread', (
     f.db.close();
   });
 
-  it('still refuses an escalated thread, because a person is owed an answer', () => {
+  it('still refuses an escalated thread while nobody has handled it', () => {
     const f = fixture();
     insertRequest(f.db, requestRow(f, 'escalated', 'REQ-STILL-OPEN', 0));
+
+    // No handoff at all: a person still owes this customer an answer.
+    expect(finalizedRequestId(f.db, f.customerId, f.orderId)).toBeNull();
+
+    // A running handoff is not handling either: the person is still on it.
+    insertHandoff(f, 'HAND-RUNNING', 'agent@example.com', TEST_NOW, null);
+    expect(finalizedRequestId(f.db, f.customerId, f.orderId)).toBeNull();
+    f.db.close();
+  });
+
+  it('closes an escalated thread once a person has handled it', () => {
+    // The escalation was the person being owed an answer; an ended handoff is
+    // the answer having been given. Without this, a case a person resolved
+    // could never be closed, and every resolved escalation stayed open forever.
+    const f = fixture();
+    insertRequest(f.db, requestRow(f, 'escalated', 'REQ-HANDLED', 0));
     insertHandoff(f, 'HAND-DONE', 'agent@example.com', TEST_NOW, TEST_NOW);
 
-    expect(finalizedRequestId(f.db, f.customerId, f.orderId)).toBeNull();
+    const closure = closeFinalizedChat(f.db, {
+      customerId: f.customerId,
+      orderId: f.orderId,
+      closedBy: 'agent@example.com',
+      now: TEST_NOW,
+    });
+
+    expect(closure.finalState).toBe('escalated');
+    expect(isChatClosed(f.db, f.customerId, f.orderId)).toBe(true);
     f.db.close();
   });
 });

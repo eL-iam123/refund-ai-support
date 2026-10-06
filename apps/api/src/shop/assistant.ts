@@ -15,9 +15,14 @@ import type { Identification } from '../retrieval/identifyOrder.js';
 import { findProduct, listProducts, type Product } from './catalogue.js';
 import { searchProducts } from '../retrieval/catalogSearch.js';
 import { MAX_SHOP_PRODUCTS } from '../ai/schemas.js';
-import type { ProviderAttempt, ShopProduct } from '../ai/analyzer.js';
+import { GeneralReplySchema } from '../ai/schemas.js';
+import { isSafeGeneralReply } from '../ai/replyGuard.js';
+import type { DialogueLine, ProviderAttempt, ShopProduct } from '../ai/analyzer.js';
+import { POLICY_RULES } from '../policy/rules/index.js';
+import { listShopTurns } from '../db/shopAssistant.js';
+import { inferTone } from '../response/tone.js';
 import { classifyShopIntent } from '../response/shopIntent.js';
-import { productAnswer, returnHelpAnswer, statusAnswer } from '../response/shopCompose.js';
+import { fallbackGeneralAnswer, greetingAnswer, productAnswer, returnHelpAnswer, statusAnswer } from '../response/shopCompose.js';
 
 /**
  * The shopping assistant: order status, return logistics, product browsing.
@@ -30,6 +35,9 @@ import { productAnswer, returnHelpAnswer, statusAnswer } from '../response/shopC
 
 /** How many catalogue rows the model may rank. Bounded so the prompt cannot grow with the shop. */
 const MAX_CATALOG_PRODUCTS = 50;
+
+/** How many recent turns set the tone and ground the conversation. Bounded like every loop. */
+const MAX_GENERAL_HISTORY = 10;
 
 export interface ShopTurnRequest {
   readonly customerId: string;
@@ -62,6 +70,17 @@ export async function answerShopTurn(
       products: [],
       orderStatus: null,
     });
+  }
+  if (intent === 'greeting') {
+    return persist(db, input, turnId, {
+      kind: 'general',
+      answer: greetingAnswer(input.message),
+      products: [],
+      orderStatus: null,
+    });
+  }
+  if (intent === 'general') {
+    return generalTurn(db, pipeline, input, turnId);
   }
   return productTurn(db, pipeline, input, turnId);
 }
@@ -136,6 +155,69 @@ function toCard(item: Product): ShopCard {
   return { id: item.id, name: item.name, priceCents: item.priceCents, stock: item.stock };
 }
 
+/**
+ * A general answer: the model talks, the guardrails listen.
+ *
+ * The model gets public context and a tone hint; its prose is schema-checked
+ * and guard-checked before anyone reads it. Anything else - no model, a
+ * failure, an unsafe sentence - falls back to the deterministic answer, which
+ * is why a general question works with no key at all.
+ */
+async function generalTurn(db: Db, pipeline: PipelineDeps, input: ShopTurnRequest, turnId: string): Promise<ShopTurn> {
+  const history = recentDialogue(db, input.customerId);
+  const answer = (await converseBounded(db, pipeline, input, history, turnId)) ?? fallbackGeneralAnswer();
+  return persist(db, input, turnId, {
+    kind: 'general',
+    answer,
+    products: [],
+    orderStatus: null,
+  });
+}
+
+/** The customer's shopping thread as model context, oldest first. */
+function recentDialogue(db: Db, customerId: string): readonly DialogueLine[] {
+  return listShopTurns(db, customerId, MAX_GENERAL_HISTORY).flatMap((turn) => [
+    { role: 'customer' as const, text: turn.customerMessage },
+    { role: 'assistant' as const, text: turn.record.answer },
+  ]);
+}
+
+async function converseBounded(
+  db: Db,
+  pipeline: PipelineDeps,
+  input: ShopTurnRequest,
+  history: readonly DialogueLine[],
+  turnId: string,
+): Promise<string | null> {
+  if (pipeline.analyzer.converse === undefined) {
+    return null;
+  }
+  const profile = inferTone(history);
+  const catalogue = listProducts(db)
+    .slice(0, MAX_CATALOG_PRODUCTS)
+    .map((item) => ({ name: item.name }));
+  const policy = POLICY_RULES.map((rule) => ({ title: rule.title, summary: rule.summary }));
+  const observer = (attempt: ProviderAttempt): void => {
+    pipeline.recordAttempt(turnId, pipeline.analyzer.label, attempt);
+  };
+  try {
+    const text = await pipeline.analyzer.converse(
+      { message: input.message, history, products: catalogue, policy, style: { tone: profile.tone } },
+      observer,
+    );
+    if (text === null) {
+      return null;
+    }
+    const parsed = GeneralReplySchema.safeParse(text);
+    if (!parsed.success || !isSafeGeneralReply(parsed.data)) {
+      return null;
+    }
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
 /** Ids the model nominated, or null when there is no model to ask or it declined. */
 async function nominateProducts(
   db: Db,
@@ -184,7 +266,11 @@ function persist(db: Db, input: ShopTurnRequest, turnId: string, record: ShopAns
   return recordShopTurn(db, {
     id: turnId,
     customerId: input.customerId,
-    orderId: input.orderId ?? input.identification.order?.id ?? null,
+    // The thread the question was asked on, not the order it happened to
+    // match: a browsing question that names a product the customer owns is
+    // still browsing, and filing it under that order would replay it on the
+    // wrong thread after a reload while hiding it from the shopping one.
+    orderId: input.orderId,
     customerMessage: input.message,
     record,
     now: input.now,

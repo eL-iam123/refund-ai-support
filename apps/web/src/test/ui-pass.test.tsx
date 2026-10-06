@@ -179,7 +179,7 @@ const READS: readonly { readonly path: string; readonly body: unknown }[] = [
   { path: '/api/shop/products', body: { products: [PRODUCT] } },
   { path: '/api/shop/orders', body: { orders: [ORDER] } },
   { path: '/api/shop/chat/summary', body: { counts: [{ orderId: 'ORD-1', count: 2 }] } },
-  { path: '/api/shop/chat/history', body: { orderId: 'ORD-1', closed: false, awaitingPerson: false, turns: [TURN] } },
+  { path: '/api/shop/chat/history', body: { orderId: 'ORD-1', closed: false, awaitingPerson: false, turns: [TURN], assistantTurns: [] } },
   { path: '/api/requests', body: { requests: [REQUEST] } },
   { path: '/api/refunds', body: { refunds: [REFUND] } },
   { path: '/api/staff/conversations', body: { conversations: [CONVERSATION] } },

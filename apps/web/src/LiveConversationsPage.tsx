@@ -45,27 +45,9 @@ export function LiveConversationsPage(): ReactNode {
   );
   // Hoisted out of the console because the case file renders in the sidebar and
   // the thread in the console; one read feeds both.
-  // The live row, read from the newest list rather than remembered - this is the one
-  // place the staleness showed, because the header's verbs come from it. A row that has
-  // gone from the list (the thread closed) leaves the case open on the case file,
-  // which is still readable, so the selection falls back to "open, no handoff".
-  const selected: StaffConversation | null =
-    open === null
-      ? null
-      : conversations.data?.find(
-          (row) => row.customerId === open.customerId && row.orderId === open.orderId,
-        ) ??
-        // The row is gone from the list - the thread closed between clicks. The case
-        // file is still readable, so the case stays open with no handoff.
-        ({ ...open, activeHandoff: null });
-
-  const caseFile = useAsyncData<CaseDetail | null>(
-    () =>
-      open === null
-        ? Promise.resolve(null)
-        : api.staffConversation(open.customerId, open.orderId).then((result) => result),
-    ['live-case', open?.customerId ?? '', open?.orderId ?? '', version],
-  );
+  const [forkOnly, setForkOnly] = useState(false);
+  const { selected, forkHandoffId } = useOpenCase(open, conversations.data, forkOnly);
+  const caseFile = useOpenCaseFile(open, forkHandoffId, version);
 
   useStaffConversationSocket(() => setVersion((v) => v + 1));
 
@@ -80,6 +62,9 @@ export function LiveConversationsPage(): ReactNode {
   const toggleCase = (row: StaffConversation): void => {
     const key = conversationKey(row);
     setOpen((current) => (current !== null && conversationKey(current) === key ? null : row));
+    // A new case starts on the whole thread: the fork view is a focus the agent
+    // chose for the previous case, not a property of this one.
+    setForkOnly(false);
   };
 
   return (
@@ -105,11 +90,64 @@ export function LiveConversationsPage(): ReactNode {
           <ConsoleBody
             conversation={selected}
             detail={caseFile.data}
+            forkScope={selected?.forkScope ?? null}
+            forkOnly={forkOnly}
+            onForkOnly={setForkOnly}
             onChanged={() => setVersion((v) => v + 1)}
           />
         </section>
       </div>
     </div>
+  );
+}
+
+/**
+ * The open case, re-derived from the live list on every render.
+ *
+ * The live row, read from the newest list rather than remembered - this is the
+ * one place the staleness showed, because the header's verbs come from it. A
+ * row that has gone from the list (the thread closed) leaves the case open on
+ * the case file, which is still readable, so the selection falls back to
+ * "open, no handoff".
+ *
+ * Also resolves which fork the console reads when focused: the handoff id
+ * comes from the live list row rather than the open case, because the row
+ * refetches on every socket message, so a fork claimed after the case was
+ * opened still resolves to the takeover that actually holds it.
+ */
+function useOpenCase(
+  open: StaffConversation | null,
+  rows: readonly StaffConversation[] | null,
+  forkOnly: boolean,
+): { selected: StaffConversation | null; forkHandoffId: string | null } {
+  if (open === null) {
+    return { selected: null, forkHandoffId: null };
+  }
+  const selected =
+    rows?.find((row) => row.customerId === open.customerId && row.orderId === open.orderId) ??
+    // The row is gone from the list - the thread closed between clicks. The case
+    // file is still readable, so the case stays open with no handoff.
+    { ...open, activeHandoff: null };
+  const liveHandoff = selected.activeHandoff;
+  const forkHandoffId =
+    forkOnly && liveHandoff !== null && !isUnattended(liveHandoff) ? liveHandoff.id : null;
+  return { selected, forkHandoffId };
+}
+
+/** The open case's thread and brief, in the console's chosen scope. */
+function useOpenCaseFile(
+  open: StaffConversation | null,
+  forkHandoffId: string | null,
+  version: number,
+): { data: CaseDetail | null; error: string | null; reload: () => void } {
+  return useAsyncData<CaseDetail | null>(
+    () =>
+      open === null
+        ? Promise.resolve(null)
+        : api
+            .staffConversation(open.customerId, open.orderId, forkHandoffId ?? undefined)
+            .then((result) => result),
+    ['live-case', open?.customerId ?? '', open?.orderId ?? '', forkHandoffId ?? '', version],
   );
 }
 
@@ -193,10 +231,16 @@ function Rail({
 function ConsoleBody({
   conversation,
   detail,
+  forkScope,
+  forkOnly,
+  onForkOnly,
   onChanged,
 }: {
   conversation: StaffConversation | null;
   detail: CaseDetail | null;
+  forkScope: StaffConversation['forkScope'];
+  forkOnly: boolean;
+  onForkOnly: (only: boolean) => void;
   onChanged: () => void;
 }): ReactNode {
   if (conversation === null) {
@@ -222,6 +266,9 @@ function ConsoleBody({
       conversation={conversation}
       thread={detail.thread}
       brief={detail.brief}
+      forkScope={forkScope}
+      forkOnly={forkOnly}
+      onForkOnly={onForkOnly}
       onChanged={onChanged}
     />
   );
@@ -448,10 +495,29 @@ function renderRows(
               <span className="live-row-count">{row.activityCount} msg</span>
               <span className="live-row-time">{formatTime(row.lastActivityAt)}</span>
             </span>
+            {row.forkScope !== null ? <ForkScopeLine scope={row.forkScope} /> : null}
           </button>
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * Which case a row's takeover is the human side of.
+ *
+ * A customer with one escalation on one order and questions on another is one
+ * row per order, but a single takeover - without this line every row reads as
+ * the agent's case, and the agent opens the wrong thread first.
+ */
+function ForkScopeLine({ scope }: { scope: NonNullable<StaffConversation['forkScope']> }): ReactNode {
+  const count = scope.itemIds.length;
+  return (
+    <span className="live-row-meta">
+      <span className="live-row-fork" title={`Forked from case on ${scope.itemIds.join(', ')}`}>
+        case: {count} item{count === 1 ? '' : 's'}
+      </span>
+    </span>
   );
 }
 
@@ -468,11 +534,17 @@ function TakeoverConsole({
   conversation,
   thread,
   brief,
+  forkScope,
+  forkOnly,
+  onForkOnly,
   onChanged,
 }: {
   conversation: StaffConversation;
   thread: readonly StaffThreadTurn[];
   brief: HandoffBrief;
+  forkScope: StaffConversation['forkScope'];
+  forkOnly: boolean;
+  onForkOnly: (only: boolean) => void;
   onChanged: () => void;
 }): ReactNode {
   const [errand, setErrand] = useState<string>('');
@@ -500,12 +572,63 @@ function TakeoverConsole({
         takenOver={takenOver}
         onTakeOver={() => void run(() => api.staffTakeOver(conversation.customerId, conversation.orderId))}
         onHandBack={() => void run(() => api.staffHandBack(conversation.customerId))}
+        onClose={() => void run(() => api.staffCloseChat(conversation.customerId, conversation.orderId))}
       />
       {errand.length > 0 ? <p className="error">{errand}</p> : null}
       <div className="case-thread">
+        {forkScope !== null ? (
+          <ForkViewToggle scope={forkScope} forkOnly={forkOnly} onForkOnly={onForkOnly} />
+        ) : null}
         <ThreadView thread={thread} />
         {takenOver ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Which slice of the order thread the console reads.
+ *
+ * A fork answers one case, but the order thread holds everything: the case the
+ * fork was split from, other cases, small talk. "This case" narrows the human
+ * back-and-forth to the fork's own thread while the decided case around it
+ * stays; "whole thread" is the unfiltered read for when the customer is clearly
+ * talking about something else too. Defaults to the whole thread, because a
+ * focus the console chose silently would hide messages an agent should see.
+ */
+function ForkViewToggle({
+  scope,
+  forkOnly,
+  onForkOnly,
+}: {
+  scope: NonNullable<StaffConversation['forkScope']>;
+  forkOnly: boolean;
+  onForkOnly: (only: boolean) => void;
+}): ReactNode {
+  const count = scope.itemIds.length;
+  return (
+    <div className="row" role="group" aria-label="Thread scope">
+      <span className="muted small">
+        Case: {count} item{count === 1 ? '' : 's'}
+      </span>
+      <button
+        type="button"
+        className={forkOnly ? 'chip chip-active' : 'chip'}
+        aria-pressed={forkOnly}
+        disabled={forkOnly}
+        onClick={() => onForkOnly(true)}
+      >
+        This case
+      </button>
+      <button
+        type="button"
+        className={forkOnly ? 'chip' : 'chip chip-active'}
+        aria-pressed={!forkOnly}
+        disabled={!forkOnly}
+        onClick={() => onForkOnly(false)}
+      >
+        Whole thread
+      </button>
     </div>
   );
 }
@@ -524,11 +647,13 @@ function CaseHead({
   takenOver,
   onTakeOver,
   onHandBack,
+  onClose,
 }: {
   brief: HandoffBrief;
   takenOver: boolean;
   onTakeOver: () => void;
   onHandBack: () => void;
+  onClose: () => void;
 }): ReactNode {
   return (
     <header className="case-head">
@@ -560,6 +685,16 @@ function CaseHead({
           <Headset size={16} /> Take over
         </button>
       )}
+      {/*
+        Closing is permanent: the thread locks and the composer with it. It is
+        offered beside the handoff verbs rather than hidden behind them,
+        because a resolved case with no close button stays open forever - and
+        the server still refuses threads that owe the customer something, so a
+        premature click fails loudly with the reason instead of closing.
+      */}
+      <button type="button" className="btn btn-secondary" onClick={onClose}>
+        Close ticket
+      </button>
     </header>
   );
 }

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import type { RefundRequestDto } from '@refund/shared';
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react';
+import type { RefundRequestDto, ShopAnswerDto } from '@refund/shared';
 import { api, describe } from './api';
 import { shopApi, type ChatTurn as StoredTurn, type ItemPickerOffer, type ShopAnswerDto } from './shop/api';
 
@@ -151,6 +151,38 @@ export type Turn =
       readonly kind: 'handoff';
       readonly id: string;
       readonly text: string;
+    }
+  | {
+      /**
+       * One shopping-assistant answer: order status, return logistics, or
+       * product suggestions.
+       *
+       * Its own kind because it is neither a decision nor a question - there
+       * is no amount authorised and nothing to clarify, only an answer with
+       * optional product cards. Stored and live turns share the shape, since
+       * the server freezes what was shown and both halves read the same row.
+       */
+      readonly kind: 'shop';
+      readonly id: string;
+      readonly text: string;
+      readonly shopAnswer: ShopAnswerDto;
+    }
+  | {
+      /**
+       * The assistant answered from an already-open case instead of opening a
+       * second one.
+       *
+       * Ephemeral by design, unlike every other turn: there is no row behind
+       * it, because the whole point is that no new case was created. A reload
+       * drops the acknowledgement, but the open escalation it refers to is
+       * still drawn from storage - so nothing the customer was promised
+       * disappears, only the echo of words that needed no answer.
+       */
+      readonly kind: 'status';
+      readonly id: string;
+      readonly text: string;
+      readonly status: string;
+      readonly requestId: string;
     };
 
 export interface Conversation {
@@ -258,6 +290,7 @@ function blockedBecause(
 function useStoredThread(
   customerId: string | null,
   orderId: string | null,
+  shopping: boolean,
 ): {
   readonly turns: readonly Turn[];
   readonly closed: boolean;
@@ -274,43 +307,123 @@ function useStoredThread(
   const [version, setVersion] = useState(0);
 
   useEffect(() => {
-    if (orderId === null || customerId === null) {
+    if (customerId === null) {
       return;
     }
-    let current = true;
-    shopApi
-      .chatHistory(orderId)
-      .then((result) => {
-        if (current && result.orderId === orderId) {
-          setLoaded({
-            orderId,
-            turns: result.turns.map(toTurn),
-            closed: result.closed,
-            awaitingPerson: result.awaitingPerson,
-          });
-          setFailed('');
-        }
-      })
-      .catch((cause: unknown) => {
-        // A failure to load history is not a reason to refuse to start a new
-        // conversation, so the reason is stated and the thread stays usable.
-        if (current) {
-          setFailed(describe(cause));
-        }
-      });
-    return () => {
-      current = false;
-    };
-  }, [customerId, orderId, version]);
+    // The shopping thread has no order: it is one thread per customer, read
+    // from its own table so refund history never sees it.
+    if (shopping) {
+      return loadAssistantThread(setLoaded, setFailed);
+    }
+    if (orderId === null) {
+      return;
+    }
+    return loadOrderThread(orderId, setLoaded, setFailed);
+  }, [customerId, orderId, shopping, version]);
 
-  const applies = loaded !== null && loaded.orderId === orderId;
+  const applies = threadApplies(loaded, orderId, shopping);
+  const loading = !applies && failed === '' && customerId !== null && (shopping || orderId !== null);
+  const reload = (): void => {
+    setVersion((v) => v + 1);
+  };
+  if (!applies || loaded === null) {
+    return { turns: [], closed: false, awaitingPerson: false, loading, error: failed, reload };
+  }
   return {
-    turns: applies ? loaded.turns : [],
-    closed: applies && loaded.closed,
-    awaitingPerson: applies && loaded.awaitingPerson,
-    loading: orderId !== null && customerId !== null && !applies && failed === '',
+    turns: loaded.turns,
+    closed: loaded.closed,
+    awaitingPerson: loaded.awaitingPerson,
+    loading: false,
     error: failed,
-    reload: () => setVersion((v) => v + 1),
+    reload,
+  };
+}
+
+/** Whether the loaded thread belongs to the current selection. */
+function threadApplies(loaded: LoadedThread | null, orderId: string | null, shopping: boolean): boolean {
+  if (loaded === null) {
+    return false;
+  }
+  if (shopping) {
+    return loaded.orderId === '';
+  }
+  return loaded.orderId === orderId;
+}
+
+type ThreadSetter = Dispatch<SetStateAction<LoadedThread | null>>;
+type FailedSetter = Dispatch<SetStateAction<string>>;
+
+/** One order's thread from its two tables, in the order it happened. */
+function mergeThreadTurns(
+  chat: readonly StoredTurn[],
+  assisted: readonly { message: string; shopAnswer: ShopAnswerDto }[],
+): readonly Turn[] {
+  const stamped: { createdAt: string; turn: Turn }[] = [
+    ...chat.map((turn) => ({ createdAt: turn.createdAt, turn: toTurn(turn) })),
+    ...assisted.map((entry) => ({ createdAt: entry.shopAnswer.createdAt, turn: toShopTurn(entry) })),
+  ];
+  stamped.sort((a, b) => {
+    if (a.createdAt === b.createdAt) {
+      return 0;
+    }
+    return a.createdAt < b.createdAt ? -1 : 1;
+  });
+  return stamped.map((entry) => entry.turn);
+}
+
+/** One shopping-thread read, cancellable when the mode changes mid-flight. */
+function loadAssistantThread(setLoaded: ThreadSetter, setFailed: FailedSetter): () => void {
+  let current = true;
+  shopApi
+    .assistantHistory()
+    .then((result) => {
+      if (current) {
+        // Browsing only: answers given about an order replay on that order's
+        // thread, so showing them here too would answer every question twice.
+        const browsing = result.turns.filter((turn) => turn.shopAnswer.orderId === null);
+        setLoaded({ orderId: '', turns: browsing.map(toShopTurn), closed: false, awaitingPerson: false });
+        setFailed('');
+      }
+    })
+    .catch((cause: unknown) => {
+      if (current) {
+        setFailed(describe(cause));
+      }
+    });
+  return () => {
+    current = false;
+  };
+}
+
+/** One order-thread read, dropped when the selection moves underneath it. */
+function loadOrderThread(
+  orderId: string,
+  setLoaded: ThreadSetter,
+  setFailed: FailedSetter,
+): () => void {
+  let current = true;
+  shopApi
+    .chatHistory(orderId)
+    .then((result) => {
+      if (current && result.orderId === orderId) {
+        setLoaded({
+          orderId,
+          turns: mergeThreadTurns(result.turns, result.assistantTurns),
+          closed: result.closed,
+          awaitingPerson: result.awaitingPerson,
+        });
+        setFailed('');
+      }
+    })
+    .catch((cause: unknown) => {
+      // A failure to load history is not a reason to refuse to start a new
+      // conversation, so the reason is stated and the thread stays usable.
+      if (current) {
+        setFailed(describe(cause));
+      }
+    });
+  return () => {
+    current = false;
   };
 }
 
@@ -409,16 +522,18 @@ export function useConversation(
 
   const send = useCallback(async (selectedIds: readonly string[] = [], override?: string): Promise<void> => {
     const message = (override ?? draft).trim();
-    if (message.length === 0 || customerId === null || (!shopping && orderId === null) || busy || stored.closed) {
+    if (!canSend(message, customerId, orderId, shopping, busy, stored.closed)) {
+      return;
+    }
+    // Narrowed for the calls below: the guard above already decided this, but
+    // the decision does not travel through a function boundary.
+    if (customerId === null) {
       return;
     }
 
-    const previouslyReportedItemIds = [...new Set(
-      turns.flatMap((turn) => (turn.kind === 'replied' || turn.kind === 'stored' ? turn.result.itemIds ?? [] : [])),
-    )];
-
-    if (selectedIds.some((id) => previouslyReportedItemIds.includes(id))) {
-      setError('You have already reported that item in this chat. Please choose a different item from this order, or tell me about a different problem. I’m here to help with anything else.');
+    const reportedError = reportedItemError(selectedIds, turns);
+    if (reportedError !== undefined) {
+      setError(reportedError);
       return;
     }
 
@@ -460,6 +575,40 @@ export function useConversation(
 }
 
 /**
+ * The duplicate-claim warning, when the customer ticked an already reported line.
+ *
+ * A message scoped to a line with a decision would read as a second complaint
+ * about the same problem, so the tick is refused with the reason stated.
+ */
+function reportedItemError(selectedIds: readonly string[], turns: readonly Turn[]): string | undefined {
+  const previouslyReported = new Set(
+    turns.flatMap((turn) => (turn.kind === 'replied' || turn.kind === 'stored' ? turn.result.itemIds ?? [] : [])),
+  );
+  if (selectedIds.some((id) => previouslyReported.has(id))) {
+    return 'You have already reported that item in this chat. Please choose a different item from this order, or tell me about a different problem. I’m here to help with anything else.';
+  }
+  return undefined;
+}
+
+/**
+ * Whether a send may start. One predicate rather than five inline conditions,
+ * because the composer disables on the same answer and the two must agree.
+ */
+function canSend(
+  message: string,
+  customerId: string | null,
+  orderId: string | null,
+  shopping: boolean,
+  busy: boolean,
+  closed: boolean,
+): boolean {
+  if (message.length === 0 || customerId === null || busy || closed) {
+    return false;
+  }
+  return shopping || orderId !== null;
+}
+
+/**
  * Resolves a sent message into its live turn, by reply shape.
  *
  * A question is not a decision: the turn settles into its own shape and the
@@ -471,27 +620,40 @@ export function useConversation(
  * reply arrives later over the socket. Only a decided request settles as a
  * replied turn.
  */
+type SendReply = Awaited<ReturnType<typeof api.sendMessage>>;
+
 function settleReply(
   orderId: string,
   localId: string,
   message: string,
   itemIds: readonly string[],
-  reply: Awaited<ReturnType<typeof api.sendMessage>>,
+  reply: SendReply,
   live: { settle: (order: string, id: string, turn: Turn) => void },
 ): void {
+  live.settle(orderId, localId, turnForReply(message, localId, itemIds, reply));
+}
+
+/**
+ * The live turn a reply settles into.
+ *
+ * One arm per reply shape, so the narrowing stays in one function: split
+ * across helpers, the decision arm stops narrowing and the request fields go
+ * `any`. Split out because the variant count outgrew the settler, and each
+ * arm is one shape with no shared logic worth merging.
+ */
+function turnForReply(message: string, localId: string, itemIds: readonly string[], reply: SendReply): Turn {
   if ('question' in reply) {
-    live.settle(orderId, localId, {
+    return {
       kind: 'asked',
       id: reply.dialogueId,
       text: message,
       question: reply.question,
       picker: reply.picker ?? null,
       itemIds: reply.itemIds,
-    });
-    return;
+    };
   }
   if ('received' in reply) {
-    live.settle(orderId, localId, {
+    return {
       kind: 'agent',
       id: reply.message.id,
       text: message,
@@ -499,20 +661,27 @@ function settleReply(
       createdAt: reply.message.createdAt,
       media: reply.message.media ?? null,
       waitingForPerson: !reply.agentConnected,
-    });
-    return;
+    };
   }
   if ('shopAnswer' in reply) {
-    live.settle(orderId, localId, {
+    return {
       kind: 'shop',
       id: reply.shopAnswer.id,
       text: message,
       shopAnswer: reply.shopAnswer,
-    });
-    return;
+    };
+  }
+  if ('status' in reply) {
+    return {
+      kind: 'status',
+      id: localId,
+      text: message,
+      status: reply.status,
+      requestId: reply.requestId,
+    };
   }
   const { request, duplicate } = reply;
-  live.settle(orderId, localId, {
+  return {
     kind: 'replied',
     id: request.id,
     text: message,
@@ -523,7 +692,7 @@ function settleReply(
       itemIds: itemIds.length > 0 ? itemIds : request.decision.eligibleItemIds,
     },
     duplicate: duplicate ?? null,
-  });
+  };
 }
 
 /**

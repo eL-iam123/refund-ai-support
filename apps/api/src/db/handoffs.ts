@@ -3,7 +3,7 @@ import { AWAITING_AGENT_ID } from '@refund/shared';
 import type { Db } from './connection.js';
 import { queryAll } from './sql.js';
 import { openAppealsForCustomer, type Appeal } from './appeals.js';
-import { latestRequestForThread } from './requestRepository.js';
+import { findRequestById, latestRequestForThread } from './requestRepository.js';
 
 /**
  * Live human takeover of a customer thread.
@@ -49,6 +49,27 @@ export interface ActiveHandoff {
    * taken over" and offer a reply box that the message route then refuses.
    */
   readonly unattended: boolean;
+  /**
+   * Which decided escalation this takeover is the human side of, if any. Null
+   * means the takeover predates forks or a person took over on their own
+   * initiative — no decided case behind it, so no item scope to enforce and
+   * the takeover keeps the old whole-thread reach rather than gaining a scope
+   * nobody recorded.
+   */
+  readonly requestId: string | null;
+}
+
+/**
+ * The slice of a customer's history a forked takeover speaks for.
+ *
+ * A fork answers only for the escalated case it was forked from — its order
+ * and the claim's item ids — while everything else the customer says keeps
+ * flowing through the pipeline. That is the whole point of the fork: one
+ * escalation can no longer swallow the customer's other items.
+ */
+export interface ForkScope {
+  readonly orderId: string;
+  readonly itemIds: readonly string[];
 }
 
 export interface AgentMessage {
@@ -66,6 +87,7 @@ interface HandoffRow {
   readonly agent_id: string;
   readonly started_at: string;
   readonly ended_at: string | null;
+  readonly request_id: string | null;
 }
 
 interface MessageRow {
@@ -102,6 +124,14 @@ export interface StartHandoffInput {
   readonly orderId: string | null;
   readonly agentId: string;
   readonly now: Date;
+  /**
+   * The decided escalation this takeover is the human side of. Pass null for
+   * a staff-initiated takeover with no decided case behind it — the new
+   * takeover then keeps the old whole-thread reach rather than gaining a
+   * scope nobody recorded. Required so each creation site states its fork
+   * binding explicitly instead of silently inheriting one.
+   */
+  readonly requestId: string | null;
 }
 
 export function startHandoff(db: Db, input: StartHandoffInput): ActiveHandoff {
@@ -115,11 +145,12 @@ export function startHandoff(db: Db, input: StartHandoffInput): ActiveHandoff {
     agentId: input.agentId,
     startedAt: input.now.toISOString(),
     unattended: input.agentId === ESCALATION_AGENT,
+    requestId: input.requestId,
   };
   db.prepare(
-    `INSERT INTO handoffs (id, customer_id, order_id, agent_id, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, NULL)`,
-  ).run(handoff.id, handoff.customerId, handoff.orderId, handoff.agentId, handoff.startedAt);
+    `INSERT INTO handoffs (id, customer_id, order_id, agent_id, started_at, ended_at, request_id)
+     VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+  ).run(handoff.id, handoff.customerId, handoff.orderId, handoff.agentId, handoff.startedAt, handoff.requestId);
   return handoff;
 }
 
@@ -166,7 +197,16 @@ export function takeoverForEscalated(
     return null;
   }
   try {
-    return startHandoff(db, { customerId, orderId: latest.orderId, agentId: ESCALATION_AGENT, now });
+    // Fork binding: this takeover is the human side of this exact decided
+    // escalation, so only its own case's follow-ups route here. Anything else
+    // the customer says keeps flowing through the pipeline.
+    return startHandoff(db, {
+      customerId,
+      orderId: latest.orderId,
+      agentId: ESCALATION_AGENT,
+      now,
+      requestId: latest.id,
+    });
   } catch (error) {
     // Another process may have opened a takeover after the read above. Treat
     // that customer-wide uniqueness race just like the ordinary conflict.
@@ -296,13 +336,45 @@ export function listAgentMessagesForOrder(
   return rows.map(hydrateMessage).reverse();
 }
 
+/**
+ * One takeover by id, or null. The fork endpoints key on this rather than the
+ * customer-scoped live lookup: a customer can hold one live takeover while
+ * reading another fork's history, and the live lookup would answer about the
+ * wrong one.
+ */
+export function handoffById(db: Db, handoffId: string): ActiveHandoff | null {
+  const row = db.prepare('SELECT * FROM handoffs WHERE id = ?').get(handoffId) as HandoffRow | undefined;
+  return row === undefined ? null : toActive(row);
+}
+
+/** Every message on one takeover, oldest first, bounded for the side panel. */
+export function messagesForHandoff(db: Db, handoffId: string, limit: number): readonly AgentMessage[] {
+  const rows = queryAll<MessageRow>(
+    db.prepare(
+      `SELECT id, created_at, handoff_id, sender, body FROM agent_messages
+        WHERE handoff_id = ?
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT ?`,
+    ),
+    handoffId,
+    limit,
+  );
+  return rows.map(hydrateMessage).reverse();
+}
+
 export interface ConversationCandidate {
   readonly customerId: string;
   readonly customerName: string;
   readonly orderId: string | null;
   readonly lastActivityAt: string;
   readonly activityCount: number;
-  readonly activeHandoff: ActiveHandoff | null;
+  readonly   activeHandoff: ActiveHandoff | null;
+  /**
+   * The item slice the live takeover speaks for, for the queue's case line.
+   * Null when there is no live takeover or it predates forks — the queue
+   * then shows the thread as before, with no case boundary to name.
+   */
+  readonly forkScope: ForkScope | null;
   /** Refusals the customer is asking a person to look at again, oldest first. */
   readonly openAppeals: readonly Appeal[];
 }
@@ -348,13 +420,15 @@ export function listConversationCandidates(
     const nameRow = db
       .prepare('SELECT name FROM customers WHERE id = ?')
       .get(row.customer_id) as { name: string } | undefined;
+    const active = activeHandoffForCustomer(db, row.customer_id);
     return {
       customerId: row.customer_id,
       customerName: nameRow?.name ?? 'Unknown customer',
       orderId: row.order_id,
       lastActivityAt: row.last_activity,
       activityCount: row.activity,
-      activeHandoff: activeHandoffForCustomer(db, row.customer_id),
+      activeHandoff: active,
+      forkScope: active === null ? null : forkScopeForHandoff(db, active),
       openAppeals: openAppealsForCustomer(db, row.customer_id),
     }; 
   });
@@ -368,6 +442,7 @@ function toActive(row: HandoffRow): ActiveHandoff {
     agentId: row.agent_id,
     startedAt: row.started_at,
     unattended: row.agent_id === ESCALATION_AGENT,
+    requestId: row.request_id,
   };
 }
 
@@ -379,4 +454,113 @@ function hydrateMessage(row: MessageRow): AgentMessage {
     sender: row.sender as AgentMessage['sender'],
     body: row.body,
   };
+}
+
+/**
+ * Bounds for every fork loop below (Rule 2): a fork lookup runs once per chat
+ * message, so each scan carries its cap in its header or its query.
+ */
+const MAX_LIVE_FORKS = 10;
+const MAX_FORK_SCOPE_IDS = 64;
+
+/** A live person-claimed takeover together with the slice it speaks for. */
+export interface ClaimedFork {
+  readonly handoff: ActiveHandoff;
+  /** Null for pre-fork takeovers: no decided case behind them, whole-thread reach. */
+  readonly scope: ForkScope | null;
+}
+
+/**
+ * Which fork a new customer message belongs to, if any.
+ *
+ * First fork whose scope contains the message's thread wins, newest first: the
+ * fork answers its own case's follow-ups, so "no, refund the lamps too" after
+ * an escalated sofa lands with the person on the sofa. Anything else — a
+ * different order, a message naming only unclaimed items, no resolution at
+ * all — falls through to the pipeline and starts its own case. An unscoped
+ * legacy takeover is deliberately skipped here: it speaks for the whole
+ * thread and keeps going through the existing whole-thread divert.
+ */
+export function forkForMessage(
+  db: Db,
+  customerId: string,
+  thread: { orderId: string | null; itemIds: readonly string[] },
+): ClaimedFork | null {
+  if (thread.orderId === null) {
+    return null;
+  }
+  for (const fork of liveClaimedForks(db, customerId)) {
+    if (fork.scope !== null && forkMatchesThread(fork.scope, thread.orderId, thread.itemIds)) {
+      return fork;
+    }
+  }
+  return null;
+}
+
+/** The customer's live person-claimed takeovers — the forks — newest first. */
+export function liveClaimedForks(db: Db, customerId: string): readonly ClaimedFork[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM handoffs
+       WHERE customer_id = ? AND ended_at IS NULL AND agent_id <> ?
+       ORDER BY started_at DESC LIMIT ?`,
+    )
+    .all(customerId, ESCALATION_AGENT, MAX_LIVE_FORKS) as HandoffRow[];
+  return rows.map((row) => {
+    const handoff = toActive(row);
+    return { handoff, scope: forkScopeForHandoff(db, handoff) };
+  });
+}
+
+/**
+ * The item slice a fork speaks for, from the escalated case it was forked
+ * from. Prefers the decided claim, falls back to the eligible items (a case
+ * can escalate with an empty claim when extraction found nothing to pay);
+ * empty either way means no recorded scope, so the takeover keeps the old
+ * whole-thread reach rather than enforcing a boundary nobody stored.
+ */
+export function forkScopeForHandoff(db: Db, handoff: ActiveHandoff): ForkScope | null {
+  if (handoff.requestId === null) {
+    return null;
+  }
+  const request = findRequestById(db, handoff.requestId);
+  if (request === null || request.orderId === null) {
+    return null;
+  }
+  const claimed = parseScopeIds(request.claimItemIdsJson);
+  const ids = claimed.length > 0 ? claimed : parseScopeIds(request.eligibleItemIdsJson);
+  if (ids.length === 0) {
+    return null;
+  }
+  return { orderId: request.orderId, itemIds: ids };
+}
+
+function forkMatchesThread(scope: ForkScope, orderId: string, itemIds: readonly string[]): boolean {
+  if (scope.orderId !== orderId) {
+    return false;
+  }
+  if (itemIds.length === 0) {
+    return true;
+  }
+  return itemIds.some((id) => scope.itemIds.includes(id));
+}
+
+function parseScopeIds(json: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json) as unknown;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  const ids: string[] = [];
+  for (let i = 0; i < Math.min(parsed.length, MAX_FORK_SCOPE_IDS); i++) {
+    const entry: unknown = parsed[i];
+    if (typeof entry === 'string' && entry.length > 0) {
+      ids.push(entry);
+    }
+  }
+  return ids;
 }

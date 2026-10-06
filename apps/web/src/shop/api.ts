@@ -148,6 +148,8 @@ export const shopApi = {
     /** A person is holding the thread and has not answered yet. */
     awaitingPerson: boolean;
     turns: readonly ChatTurn[];
+    /** The order's own assistant answers, to replay after a reload. */
+    assistantTurns: readonly { message: string; shopAnswer: ShopAnswerDto }[];
   }> => request(`/api/shop/chat/history?orderId=${encodeURIComponent(orderId)}`),
 
   /** Message counts per order, for the "3 messages" badge on the order picker. */
@@ -194,7 +196,43 @@ export const shopApi = {
   chatMedia: (input: { orderId: string | null; caption?: string; media: { dataUrl: string } }): Promise<{ message: { kind: 'agent'; id: string; sender: 'agent' | 'customer'; body: string; createdAt: string; media: { type: string; url: string; bytes: number } | null } }> =>
     post('/api/shop/chat/media', input),
 
+  /**
+   * The customer's escalated cases currently with a person, newest first.
+   *
+   * One entry per live person-claimed takeover: the side panel's threads. An
+   * entry names the case it was forked from, so the panel can say what the
+   * person is looking at instead of showing another bare "an agent is here".
+   */
+  forks: (): Promise<{ forks: readonly CustomerFork[] }> => request('/api/shop/cases'),
+
+  /** One fork's thread with the person on that case, oldest first. */
+  forkMessages: (handoffId: string): Promise<{ handoffId: string; messages: readonly ForkThreadMessage[] }> =>
+    request(`/api/shop/cases/${encodeURIComponent(handoffId)}/messages`),
+
+  /** A follow-up filed on the fork's thread, for the person on that case. */
+  sendForkMessage: (handoffId: string, message: string): Promise<{ message: ForkThreadMessage }> =>
+    post(`/api/shop/cases/${encodeURIComponent(handoffId)}/message`, { message }),
+
 };
+
+/** One escalated case currently with a person, as the side panel shows it. */
+export interface CustomerFork {
+  readonly handoffId: string;
+  readonly orderId: string | null;
+  readonly items: readonly { id: string; name: string }[];
+  /** A person has the case and has not answered yet. */
+  readonly unanswered: boolean;
+  readonly startedAt: string;
+}
+
+/** One message on a fork's thread. */
+export interface ForkThreadMessage {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly handoffId: string;
+  readonly sender: 'agent' | 'customer';
+  readonly body: string;
+}
 
 /**
  * Note for whoever adds a returns UI next.

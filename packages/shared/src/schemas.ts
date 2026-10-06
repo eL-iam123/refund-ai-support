@@ -288,19 +288,21 @@ export const ShopOrderSnapshotSchema = z.object({
   paymentState: z.string(),
   trackingStatus: z.string(),
   totalCents: z.number().int().nonnegative(),
-  items: z.array(
-    z.object({
-      name: z.string(),
-      quantity: z.number().int().positive(),
-      unitPriceCents: z.number().int().nonnegative(),
-    }),
-  ),
+  items: z
+    .array(
+      z.object({
+        name: z.string(),
+        quantity: z.number().int().positive(),
+        unitPriceCents: z.number().int().nonnegative(),
+      }),
+    )
+    .readonly(),
 });
 export type ShopOrderSnapshotDto = z.infer<typeof ShopOrderSnapshotSchema>;
 
 export const ShopAnswerSchema = z.object({
   id: z.string(),
-  kind: z.enum(['order_status', 'return_help', 'product_help']),
+  kind: z.enum(['order_status', 'return_help', 'product_help', 'general']),
   answer: z.string().max(2000),
   products: z.array(ShopCardSchema).max(5),
   orderStatus: ShopOrderSnapshotSchema.nullable(),

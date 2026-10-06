@@ -14,7 +14,7 @@ import {
 } from '../../shop/auth.js';
 import { checkout, listOrdersForCustomer, listProducts, type Product, type ShopOrder } from '../../shop/catalogue.js';
 import { searchProducts } from '../../retrieval/catalogSearch.js';
-import { listShopTurns } from '../../db/shopAssistant.js';
+import { listShopTurns, listShopTurnsForOrder } from '../../db/shopAssistant.js';
 import { toShopAnswer } from '../../shop/assistant.js';
 import { findRequestById, insertAuditEvent } from '../../db/requestRepository.js';
 import { findOrder } from '../../db/orderRepository.js';
@@ -24,7 +24,8 @@ import { followUpFor } from '../../response/followUp.js';
 import { AppealAlreadyPendingError, fileAppeal, openAppealForRequest } from '../../db/appeals.js';
 import { FULLY_REFUNDED } from '../../policy/constants.js';
 import { isChatClosed } from '../../db/chatClosures.js';
-import { activeHandoffForCustomer, ESCALATION_AGENT } from '../../db/handoffs.js';
+import { activeHandoffForCustomer, ESCALATION_AGENT, forkScopeForHandoff, handoffById, liveClaimedForks, messagesForHandoff, recordAgentMessage, type ActiveHandoff, type AgentMessage, type ForkScope } from '../../db/handoffs.js';
+import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
 
 /**
@@ -369,21 +370,35 @@ function handleAssistantStatus(ctx: AppContext): { aiMode: string; aiAvailable: 
  * would leave a customer staring at a disabled box after being answered, and waiting
  * on the unattended slot would disable the composer in exactly the deployments where
  * nobody is ever going to reply.
+ *
+ * Thread-scoped, because a takeover forked from one order's escalation must not
+ * silence the customer's other threads: a fork blocks only the thread it was
+ * forked from, while a pre-fork takeover with no recorded scope keeps the old
+ * whole-thread reach and blocks everywhere.
  */
-function awaitingPersonReply(db: Db, customerId: string): boolean {
+function awaitingPersonReply(db: Db, customerId: string, orderId: string): boolean {
   const active = activeHandoffForCustomer(db, customerId);
   if (active === null || active.agentId === ESCALATION_AGENT) {
     return false;
   }
+  if (active.requestId !== null) {
+    const scope = forkScopeForHandoff(db, active);
+    if (scope === null || scope.orderId !== orderId) {
+      return false;
+    }
+  }
+  return !handoffHasAgentReply(db, active.id);
+}
+
+function handoffHasAgentReply(db: Db, handoffId: string): boolean {
   const answer = db
     .prepare(
-      `SELECT 1 AS present
-         FROM agent_messages m JOIN handoffs h ON h.id = m.handoff_id
-        WHERE h.id = ? AND m.sender = 'agent'
+      `SELECT 1 AS present FROM agent_messages
+        WHERE handoff_id = ? AND sender = 'agent'
         LIMIT 1`,
     )
-    .get(active.id);
-  return answer === undefined;
+    .get(handoffId);
+  return answer !== undefined;
 }
 
 function handleOrders(request: FastifyRequest, ctx: AppContext): { user: ShopUser | null; orders: readonly ShopOrder[] } {
@@ -435,15 +450,21 @@ function handleProducts(request: FastifyRequest, ctx: AppContext): { products: r
   };
 }
 
-export function registerShopRoutes(app: FastifyInstance, ctx: AppContext): void {
+export function registerShopRoutes(app: FastifyInstance, ctx: AppContext, hub: LiveHub): void {
   // Public: the catalogue is browsable without an account, like a real shop.
   app.get('/api/shop/products', (request) => handleProducts(request, ctx));
 
-  app.get('/api/shop/demo-accounts', () => ({ accounts: listDemoUsers(ctx.db) }));
+  // Passwordless demo entry is a reviewer convenience, never a production
+  // route: with pre-existing demo rows in the database the login would
+  // otherwise mint a session without a password on a real deployment.
+  // Unregistered paths answer 404 from Fastify itself.
+  if (ctx.env.NODE_ENV !== 'production') {
+    app.get('/api/shop/demo-accounts', () => ({ accounts: listDemoUsers(ctx.db) }));
+    app.post('/api/shop/demo-login', (request, reply) => handleDemoLogin(request, reply, ctx));
+  }
 
   app.post('/api/shop/register', (request, reply) => handleRegister(request, reply, ctx));
   app.post('/api/shop/login', (request, reply) => handleLogin(request, reply, ctx));
-  app.post('/api/shop/demo-login', (request, reply) => handleDemoLogin(request, reply, ctx));
   app.post('/api/shop/logout', (request, reply) => handleLogout(request, reply, ctx));
   app.get('/api/shop/me', (request) => handleMe(request, ctx));
   app.get('/api/shop/assistant-status', () => handleAssistantStatus(ctx));
@@ -451,7 +472,7 @@ export function registerShopRoutes(app: FastifyInstance, ctx: AppContext): void 
   app.post('/api/shop/checkout', (request, reply) => handleCheckout(request, reply, ctx));
 
   registerAppealRoutes(app, ctx);
-  registerChatHistoryRoutes(app, ctx);
+  registerChatHistoryRoutes(app, ctx, hub);
 }
 
 /**
@@ -466,7 +487,7 @@ export function registerShopRoutes(app: FastifyInstance, ctx: AppContext): void 
  * query in the system stops being the safest the moment a field is added that
  * says who to ask about.
  */
-function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext): void {
+function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext, hub: LiveHub): void {
   app.get('/api/shop/chat/history', (request) => {
     const user = currentUser(request, ctx);
     if (user === null) {
@@ -486,8 +507,15 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext): void 
       // for them rather than collecting messages nobody is reading, and reopens the
       // moment they reply. Derived server-side, because only the server knows which
       // agent messages are *after* the customer started typing to one.
-      awaitingPerson: awaitingPersonReply(ctx.db, user.customerId),
+      awaitingPerson: awaitingPersonReply(ctx.db, user.customerId, query.data.orderId),
       turns: conversationForOrder(ctx.db, user.customerId, query.data.orderId, ctx.now(), query.data.limit),
+      // The order's own assistant answers - order status asked here, not while
+      // browsing - so a reload replays what the customer already read instead
+      // of dropping it. Kept beside the thread rather than inside it, because
+      // the policy transcript reads that thread and must never see them.
+      assistantTurns: listShopTurnsForOrder(ctx.db, user.customerId, query.data.orderId, query.data.limit).map(
+        (turn) => ({ message: turn.customerMessage, shopAnswer: toShopAnswer(turn) }),
+      ),
     };
   });
 
@@ -502,6 +530,8 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext): void 
     const counts = conversationCounts(ctx.db, user.customerId);
     return { counts: [...counts].map(([orderId, count]) => ({ orderId, count })) };
   });
+
+  registerForkRoutes(app, ctx, hub);
 
   /**
    * The customer's shopping thread with the assistant.
@@ -530,4 +560,168 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext): void 
       })),
     };
   });
+}
+
+const ForkParams = z.object({
+  handoffId: z.string().trim().min(1, 'handoffId is required').max(120),
+});
+
+const ForkMessageBody = z.object({
+  message: z.string().trim().min(1, 'message is required'),
+});
+
+const ForkMessagesQuery = z.object({
+  // Bounded like the order thread: one fork with a long back-and-forth cannot
+  // return an unbounded payload on every panel open.
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+/**
+ * The side panel's endpoints: one escalated case's human thread at a time.
+ *
+ * A fork is a takeover bound to a decided escalation, so its thread shows the
+ * case it was forked from and takes follow-ups about that case without
+ * touching the customer's other threads. Everything here is session-scoped
+ * like the rest of this table: a handoff id names no customer, and a fork
+ * belonging to someone else reads as not found rather than forbidden, so an
+ * id guess reveals nothing about who it belongs to.
+ */
+function registerForkRoutes(app: FastifyInstance, ctx: AppContext, hub: LiveHub): void {
+  /** The customer's live person-claimed takeovers, newest first. */
+  app.get('/api/shop/cases', (request) => handleForkList(request, ctx));
+
+  /** One fork's thread, oldest first. */
+  app.get('/api/shop/cases/:handoffId/messages', (request) => handleForkMessages(request, ctx));
+
+  /** A follow-up filed on the fork's thread, for the person on that case. */
+  app.post('/api/shop/cases/:handoffId/message', (request, reply) => handleForkMessage(request, reply, ctx, hub));
+}
+
+interface ForkListItem {
+  readonly handoffId: string;
+  readonly orderId: string | null;
+  readonly items: readonly { id: string; name: string }[];
+  readonly unanswered: boolean;
+  readonly startedAt: string;
+}
+
+function handleForkList(request: FastifyRequest, ctx: AppContext): { forks: readonly ForkListItem[] } {
+  const user = currentUser(request, ctx);
+  if (user === null) {
+    throw new UnauthorizedError('sign in to see your conversations');
+  }
+  const now = ctx.now();
+  return {
+    forks: liveClaimedForks(ctx.db, user.customerId).map(({ handoff, scope }) => ({
+      handoffId: handoff.id,
+      orderId: scope?.orderId ?? handoff.orderId,
+      items: forkItemNames(ctx.db, user.customerId, scope, handoff.orderId, now),
+      unanswered: !handoffHasAgentReply(ctx.db, handoff.id),
+      startedAt: handoff.startedAt,
+    })),
+  };
+}
+
+function handleForkMessages(request: FastifyRequest, ctx: AppContext): { handoffId: string; messages: readonly AgentMessage[] } {
+  const user = currentUser(request, ctx);
+  if (user === null) {
+    throw new UnauthorizedError('sign in to see your conversations');
+  }
+  const handoffId = parseForkId(request);
+  const fork = forkForCustomer(ctx.db, user.customerId, handoffId);
+  const query = ForkMessagesQuery.safeParse(request.query);
+  if (!query.success) {
+    throw badRequest(
+      'invalid history filter',
+      query.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  return { handoffId: fork.id, messages: messagesForHandoff(ctx.db, fork.id, query.data.limit) };
+}
+
+function handleForkMessage(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  ctx: AppContext,
+  hub: LiveHub,
+): { message: AgentMessage } {
+  const user = currentUser(request, ctx);
+  if (user === null) {
+    throw new UnauthorizedError('sign in to write to your case');
+  }
+  const handoffId = parseForkId(request);
+  const parsed = ForkMessageBody.safeParse(request.body);
+  if (!parsed.success) {
+    throw badRequest(
+      'invalid request body',
+      parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  if (parsed.data.message.length > ctx.env.MAX_MESSAGE_LENGTH) {
+    throw badRequest('message is too long', [`message: must be at most ${ctx.env.MAX_MESSAGE_LENGTH} characters`]);
+  }
+  const fork = forkForCustomer(ctx.db, user.customerId, handoffId);
+  const live = activeHandoffForCustomer(ctx.db, user.customerId);
+  if (live === null || live.id !== fork.id) {
+    throw new NotFoundError('fork', handoffId);
+  }
+  const message = recordAgentMessage(ctx.db, {
+    handoffId: fork.id,
+    sender: 'customer',
+    body: parsed.data.message,
+    now: ctx.now(),
+  });
+  hub.notifyStaff({ type: 'customer.message', customerId: fork.customerId, message });
+  hub.notifyStaff({ type: 'conversation.updated', customerId: fork.customerId, orderId: fork.orderId });
+  reply.code(201);
+  return { message };
+}
+
+function parseForkId(request: FastifyRequest): string {
+  const params = ForkParams.safeParse(request.params);
+  if (!params.success) {
+    throw badRequest(
+      'invalid fork id',
+      params.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  return params.data.handoffId;
+}
+
+/**
+ * The fork this customer may read and write: theirs and person-held.
+ *
+ * Anything else — missing, someone else's, or still waiting for a person —
+ * is not found: the fork box is a thread with a person on it, not a second
+ * way to reach an unattended escalation. Ended forks stay readable (a closed
+ * case's thread is still the customer's history); only posting requires the
+ * takeover to be live, which the message route checks itself.
+ */
+function forkForCustomer(db: Db, customerId: string, handoffId: string): ActiveHandoff {
+  const handoff = handoffById(db, handoffId);
+  if (handoff === null || handoff.customerId !== customerId || handoff.unattended) {
+    throw new NotFoundError('fork', handoffId);
+  }
+  return handoff;
+}
+
+function forkItemNames(
+  db: Db,
+  customerId: string,
+  scope: ForkScope | null,
+  orderId: string | null,
+  now: Date,
+): readonly { id: string; name: string }[] {
+  const resolved = scope?.orderId ?? orderId;
+  if (resolved === null) {
+    return [];
+  }
+  const order = findOrder(db, customerId, resolved, now);
+  if (order === null) {
+    return [];
+  }
+  const wanted = scope === null ? null : new Set(scope.itemIds);
+  return order.items
+    .filter((line) => wanted === null || wanted.has(line.id))
+    .map((line) => ({ id: line.id, name: line.name }));
 }

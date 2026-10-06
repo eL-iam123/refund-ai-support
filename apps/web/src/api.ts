@@ -145,6 +145,12 @@ export interface StaffConversation {
   } | null;
   /** Refusals the customer is asking a person to look at again. */
   readonly openAppeals: readonly { readonly requestId: string; readonly reason: string; readonly createdAt: string }[];
+  /**
+   * The item slice the live takeover speaks for. Null when there is no live
+   * takeover or it predates forks — the queue then shows the thread as
+   * before, with no case boundary to name.
+   */
+  readonly forkScope: { readonly orderId: string; readonly itemIds: readonly string[] } | null;
 }
 
 /** A thread entry as the staff console reads it. */
@@ -311,6 +317,7 @@ export const api = {
         }
       | ({ received: true } & AgentRoutedReply)
       | { shopAnswer: ShopAnswerDto }
+      | { status: string; requestId: string }
     >('/api/chat/messages', input),
 
   listRequests: (params: RequestFilter = {}) =>
@@ -382,10 +389,13 @@ export const api = {
   staffConversations: (): Promise<{ conversations: readonly StaffConversation[] }> =>
     request('/api/staff/conversations'),
 
-  staffConversation: (customerId: string, orderId: string | null): Promise<{ thread: readonly StaffThreadTurn[]; brief: HandoffBrief }> => {
+  staffConversation: (customerId: string, orderId: string | null, handoffId?: string): Promise<{ thread: readonly StaffThreadTurn[]; brief: HandoffBrief }> => {
     const search = new URLSearchParams({ customerId });
     if (orderId !== null && orderId.length > 0) {
       search.set('orderId', orderId);
+    }
+    if (handoffId !== undefined && handoffId.length > 0) {
+      search.set('handoffId', handoffId);
     }
     return request(`/api/staff/conversation?${search.toString()}`);
   },
@@ -399,7 +409,7 @@ export const api = {
   staffHandBack: (customerId: string): Promise<{ ended: { id: string; customerId: string; orderId: string | null; agentId: string; startedAt: string } }> =>
     post(`/api/staff/conversations/${encodeURIComponent(customerId)}/hand-back`, {}),
 
-  staffCloseChat: (customerId: string, orderId: string | null): Promise<{ closure: { id: string; customerId: string; orderId: string | null; requestId: string; closedAt: string; closedBy: string; finalState: 'approved' | 'denied' } }> =>
+  staffCloseChat: (customerId: string, orderId: string | null): Promise<{ closure: { id: string; customerId: string; orderId: string | null; requestId: string; closedAt: string; closedBy: string; finalState: Decision } }> =>
     post(`/api/staff/conversations/${encodeURIComponent(customerId)}/close`, { orderId }),
 
   staffAnalytics: (): Promise<{ analytics: { openHandoffs: number; escalatedAwaiting: number; awaitingReviewCents: number; decisionsToday: Record<Decision, number>; averageTakeoverMinutes: number | null; since: string } }> =>

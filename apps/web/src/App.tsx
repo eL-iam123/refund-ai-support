@@ -1,4 +1,4 @@
-import React, { useState, type ReactNode } from 'react';
+import React, { useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { ChatPage } from './ChatPage';
 import { DashboardPage } from './DashboardPage';
@@ -12,7 +12,7 @@ import { ScenariosPage } from './ScenariosPage';
 import { LiveConversationsPage } from './LiveConversationsPage';
 import { StaffGate } from './StaffGate';
 import { useAsyncData, useSession, Spinner } from './shop/hooks';
-import { addToCart, cartLines, refillCart, clearCart, type CartLine } from './shop/cartStore';
+import { addToCart, cartLines, refillCart, clearCart, subscribeToCart, type CartLine } from './shop/cartStore';
 import { shopApi, type Product } from './shop/api';
 import { api } from './api';
 import { AccountPage } from './shop/Account';
@@ -196,6 +196,9 @@ function useCatalogue(): { products: readonly Product[]; loading: boolean; error
 
 function ShopRoute(): ReactNode {
   const { products, loading, error } = useCatalogue();
+  // Same subscription as the cart page: without it the per-product counts go
+  // stale the moment a line is removed elsewhere.
+  const lines = useSyncExternalStore(subscribeToCart, cartLines);
   return (
     <div className="stack">
       <section className="shop-hero">
@@ -208,7 +211,7 @@ function ShopRoute(): ReactNode {
       </section>
       <div className="section-heading"><div><p className="eyebrow">Featured catalogue</p><h2>Popular right now</h2></div><span className="muted small">Delivery options shown at checkout</span></div>
       {error !== null ? <p className="error">{error}</p> : null}
-      {loading ? <Spinner /> : <Catalogue products={products} onAdd={addToCart} inCart={quantityIn(cartLines())} />}
+      {loading ? <Spinner /> : <Catalogue products={products} onAdd={addToCart} inCart={quantityIn(lines)} />}
     </div>
   );
 }
@@ -217,13 +220,16 @@ function CartRoute(): ReactNode {
   const { products, loading } = useCatalogue();
   const session = useSession();
   const navigate = useNavigate();
+  // Subscribed, not snapshotted: removal replaces the store array, and a
+  // one-time read would keep the removed row and submit it at checkout.
+  const lines = useSyncExternalStore(subscribeToCart, cartLines);
   if (loading) {
     return <Spinner />;
   }
   return (
     <Cart
       products={products}
-      lines={cartLines()}
+      lines={lines}
       signedIn={session.user !== null}
       onClear={clearCart}
       onPlaced={() => void navigate('/orders')}

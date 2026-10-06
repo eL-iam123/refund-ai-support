@@ -1025,7 +1025,7 @@ describe('read-only catalog', () => {
       await get('/api/policy')
     ).json<{ policy: { rules: readonly { id: string; class: string; outcomes: readonly string[] }[] } }>();
 
-    expect(policy.rules).toHaveLength(17);
+    expect(policy.rules).toHaveLength(18);
     // A risk rule is documented as unable to deny, and the engine enforces it.
     const r08 = policy.rules.find((rule) => rule.id === 'R-08');
     expect(r08?.class).toBe('risk');
