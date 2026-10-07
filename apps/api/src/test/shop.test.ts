@@ -590,7 +590,7 @@ describe('storefront', () => {
         cookie,
         customerId,
         order.id,
-        'only the mug arrived broken, the lamp is perfect',
+        'only the mug arrived broken, the lamp is perfect, please refund me for the mugs',
       );
 
       expect(decision.decision).toBe('approved');
@@ -606,7 +606,7 @@ describe('storefront', () => {
       const { cookie, customerId } = await signUp('whole@shop.test');
       const order = await buyLampAndMugs(cookie);
 
-      const decision = await dispute(cookie, customerId, order.id, 'everything arrived broken');
+      const decision = await dispute(cookie, customerId, order.id, 'everything arrived broken, please refund me');
 
       expect(decision.decision).toBe('approved');
       expect(decision.refundAmountCents).toBe(order.totalCents);

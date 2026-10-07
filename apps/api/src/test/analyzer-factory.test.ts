@@ -185,7 +185,7 @@ describe('a missing key', () => {
  * observable.
  */
 describe('the pipeline with no model configured', () => {
-  const DAMAGED_TV = 'My NOVA 43 inch television arrived cracked and unusable.';
+  const DAMAGED_TV = 'My NOVA 43 inch television arrived cracked and unusable. Please refund me for it.';
 
   function run(analyzer: AIAnalyzer): Promise<Extract<ProcessResult, { stage: 'decided' }>> {
     const db = openMemoryDatabase();

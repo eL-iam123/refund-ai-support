@@ -243,8 +243,8 @@ describe('per-order chat history', () => {
     // takeover turns later messages on that order into conversation instead of
     // requests, which would reshape the thread for reasons that have nothing to
     // do with partitioning.
-    await session.send(session.orderId, 'The lamp arrived with a cracked shade');
-    await session.send(session.orderId, 'The lamp shade is still cracked after I unpacked it');
+    await session.send(session.orderId, 'The lamp arrived with a cracked shade and I want my money back');
+    await session.send(session.orderId, 'The lamp shade is still cracked after I unpacked it and I still want my money back');
     const other = await session.buyAgain();
     expect(other).not.toBe(session.orderId);
     await session.send(other, 'The zip on my coat is broken and unusable');
@@ -274,7 +274,7 @@ describe('per-order chat history', () => {
     harness = await shopHarness();
     const session = await signIn(harness, 'sam@shop.demo');
 
-    await session.send(session.orderId, 'The lamp arrived with a cracked shade');
+    await session.send(session.orderId, 'The lamp arrived with a cracked shade and I want my money back');
 
     const history = await threadFor(harness, session, session.orderId);
     expect(history).toHaveLength(1);
@@ -340,7 +340,7 @@ describe('per-order chat history', () => {
       payload: {
         customerId: session.customerId,
         orderId: order.id,
-        message: 'It arrived damaged and broken in two',
+        message: 'It arrived damaged and broken in two, please refund me.',
       },
     });
     expect(answer.statusCode, answer.body).toBe(201);
@@ -448,7 +448,7 @@ describe('per-order chat history', () => {
     // suppress on a thread the pipeline is still deciding: a message that lands
     // on an escalated thread is answered as conversation, and there is no second
     // decision for the gate to avoid.
-    const complaint = 'The lamp arrived with a cracked shade';
+    const complaint = 'The lamp arrived with a cracked shade and I want my money back';
     await session.send(session.orderId, complaint);
 
     const before = await threadFor(harness, session, session.orderId);
@@ -467,7 +467,7 @@ describe('per-order chat history', () => {
   it("will not show one customer another customer's history", async () => {
     harness = await shopHarness();
     const mine = await signIn(harness, 'sam@shop.demo');
-    await mine.send(mine.orderId, 'The lamp arrived with a cracked shade');
+    await mine.send(mine.orderId, 'The lamp arrived with a cracked shade and I want my money back');
 
     const theirs = await signIn(harness, 'priya@shop.demo');
 
@@ -486,8 +486,8 @@ describe('per-order chat history', () => {
   it('reports message counts per order', async () => {
     harness = await shopHarness();
     const session = await signIn(harness, 'sam@shop.demo');
-    await session.send(session.orderId, 'The lamp arrived with a cracked shade');
-    await session.send(session.orderId, 'The lamp shade is still cracked after I unpacked it');
+    await session.send(session.orderId, 'The lamp arrived with a cracked shade and I want my money back');
+    await session.send(session.orderId, 'The lamp shade is still cracked after I unpacked it and I still want my money back');
 
     const response = await harness.app.inject({
       method: 'GET',

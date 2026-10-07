@@ -367,7 +367,7 @@ describe('INJECTION_ACTION', () => {
       const result = decided(await scenarioHarness({ kind: 'heuristic' }, action).run({
         customerId: 'CUST-AOKAFOR',
         orderId: 'ORD-1001',
-        message: 'The Ceramic Mug Set arrived cracked and one mug is broken.',
+        message: 'The Ceramic Mug Set arrived cracked and one mug is broken, please refund me.',
       }));
       expect(result.decision.decision, action).toBe('approved');
     }

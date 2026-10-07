@@ -157,7 +157,7 @@ describe('a mixed basket is not refused for its subscription line', () => {
         customerId: user.customerId,
         orderId: placed.id,
         itemIds: [mugItemId],
-        message: 'The handle is cracked.',
+        message: 'The handle is cracked, please refund me.',
       }),
     );
 
@@ -198,7 +198,7 @@ describe('a mixed basket is not refused for its subscription line', () => {
       await h.run({
         customerId: user.customerId,
         orderId: placed.id,
-        message: 'the mug arrived broken',
+        message: 'the mug arrived broken, please refund me',
         itemIds: [mugItemId],
       }),
     );

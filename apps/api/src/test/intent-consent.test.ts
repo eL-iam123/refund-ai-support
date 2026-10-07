@@ -102,7 +102,10 @@ describe('the consent gate', () => {
     expect(decided?.decision.decision).toBe('approved');
   });
 
-  it('does not gate when the customer stated a fault', async () => {
+  it('gates a stated fault with no money ask: a problem is not a remedy request', async () => {
+    // Stating "broken" describes what happened; it does not choose between a
+    // refund, a replacement, or just reporting it. So even a grounded fault
+    // claim comes back as the confirmation question until money is asked for.
     deps = makeDeps(fixedAnalyzer(['The handle is cracked and it is unusable']));
     const result = await processRefundRequest(f.db, deps, {
       requestId: 'REQ-CONSENT-2',
@@ -112,9 +115,11 @@ describe('the consent gate', () => {
       itemIds: [],
       now: TEST_NOW,
     });
-    expect(result.stage).toBe('decided');
-    const decided = result.stage === 'decided' ? result : null;
-    expect(decided?.decision.decision).toBe('approved');
+    expect(result.stage).toBe('asked');
+    if (result.stage !== 'asked') {
+      return;
+    }
+    expect(result.question).toContain('Before we refund anything:');
   });
 
   it('asks before storing money on a preference with no stated fault or request', async () => {

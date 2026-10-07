@@ -660,7 +660,7 @@ describe('chat and assistant behavior', () => {
       const response = await chat(ctx, cookie, {
         customerId,
         orderId: orders[0]?.id ?? null,
-        message: 'the lamp arrived broken',
+        message: 'the lamp arrived broken and I want my money back',
         shopping: true,
       });
       expect(response.statusCode).toBe(201);

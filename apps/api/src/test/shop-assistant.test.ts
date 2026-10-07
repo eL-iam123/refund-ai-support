@@ -140,7 +140,7 @@ describe('shopping assistant', () => {
     const { cookie, customerId, orderId } = await signIn();
     const before = counts(harness.db);
 
-    const response = await send(cookie, { customerId, orderId, message: 'the lamp arrived broken', shopping: true });
+    const response = await send(cookie, { customerId, orderId, message: 'the lamp arrived broken, please refund me', shopping: true });
     expect(response.statusCode).toBe(201);
     const body = response.json<{ request: { id: string; decision: { decision: string } } }>();
     expect(typeof body.request.id).toBe('string');

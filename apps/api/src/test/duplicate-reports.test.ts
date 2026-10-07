@@ -135,7 +135,7 @@ describe('recognising a report the customer has already made', () => {
     // Different product, different problem. Same customer, same order - still
     // not a duplicate, and a gate that treated it as one would be refusing
     // legitimate follow-up.
-    const different = await send('Actually, the floor lamp is cracked too.');
+    const different = await send('Actually, the floor lamp is cracked too, please refund me.');
 
     expect(different.statusCode).toBe(201);
   });

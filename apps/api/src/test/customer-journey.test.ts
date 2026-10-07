@@ -233,7 +233,7 @@ describe('a customer can buy, then talk to us, whatever they send', () => {
         payload: {
           customerId: j.customerId,
           orderId: j.orderId,
-          message: 'The mug arrived with a crack through the handle.',
+          message: 'The mug arrived with a crack through the handle. Please refund me for it.',
         },
       });
       expect(followUp.statusCode, followUp.body).toBe(201);

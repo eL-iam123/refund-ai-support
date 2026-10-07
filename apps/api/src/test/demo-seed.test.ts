@@ -47,19 +47,19 @@ describe('demo seeding', () => {
     // the partial counts forever and never touch the missing claims.
     const harness = scenarioHarness({ kind: 'heuristic' });
     seedCatalogue(harness.db);
-    await seedDemoData(harness.db, harness, TEST_NOW);
+    const full = await seedDemoData(harness.db, harness, TEST_NOW);
 
     harness.db.prepare("DELETE FROM refund_requests WHERE id IN ('REQ-DEMO-6', 'REQ-DEMO-9')").run();
     harness.db
       .prepare("DELETE FROM shop_dialogue WHERE customer_message LIKE 'My mug is chipped%'")
       .run();
     const partial = harness.db.prepare('SELECT COUNT(*) AS n FROM refund_requests').get() as { n: number };
-    expect(partial.n).toBeLessThan(6);
+    expect(partial.n).toBeLessThan(full.requests);
 
     const resumed = await seedDemoData(harness.db, harness, TEST_NOW);
     expect(resumed.requests + resumed.dialogues).toBe(10);
     const restored = harness.db.prepare('SELECT COUNT(*) AS n FROM refund_requests').get() as { n: number };
-    expect(restored.n).toBe(6);
+    expect(restored.n).toBe(full.requests);
     const ids = harness.db
       .prepare('SELECT id, COUNT(*) AS n FROM refund_requests GROUP BY id HAVING n > 1')
       .all();

@@ -98,7 +98,7 @@ describe('partial refunds across a multi-item order', () => {
   });
 
   it('records why the amount was limited, so the cap is auditable', async () => {
-    const request = await submit('The television is broken and I want to return it.');
+    const request = await submit('The television is broken and I want my money back for it.');
 
     const cap = request.decision.overrides.find(
       (entry) => entry.code === 'amount_limited_to_disputed_items',

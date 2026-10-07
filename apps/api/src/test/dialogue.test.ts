@@ -128,7 +128,7 @@ describe('the ask-then-decide loop', () => {
   it('decides the answer against the question that asked it', async () => {
     await post('The floor lamp and the headphones both arrived broken.');
 
-    const response = await post("It's the headphones, they arrived broken.");
+    const response = await post("It's the headphones, they arrived broken, please refund me.");
 
     expect(response.statusCode, response.body).toBe(201);
     const { request } = response.json<{ request: { orderId: string; decision: { decision: string; refundAmountCents: number }; grounding: { grounded: boolean; verifiedQuotes: readonly string[] } | null } }>();
@@ -144,7 +144,7 @@ describe('the ask-then-decide loop', () => {
 
   it('adopts the ask into the order its answer resolved to', async () => {
     await post('The floor lamp and the headphones both arrived broken.');
-    await post("It's the headphones, they arrived broken.");
+    await post("It's the headphones, they arrived broken, please refund me.");
 
     // The order's thread now reads as one conversation: the question that asked,
     // then the request it produced.

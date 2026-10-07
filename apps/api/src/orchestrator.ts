@@ -41,7 +41,6 @@ import { confirmsIntent, picksRefund, wantsAnAgent } from './response/intent.js'
 import { buildPhraseEnvelope } from './response/envelope.js';
 import { inferTone } from './response/tone.js';
 import { isSafePhrasedReply } from './ai/replyGuard.js';
-import { detectedReason } from './ai/reasonVocabulary.js';
 import { formatCents } from './lib/money.js';
 
 /**
@@ -382,14 +381,13 @@ async function afterGates(
  *
  * The bar for moving money is not "we understood" but "they asked". A payable
  * decision comes back as a question instead of a stored decision unless the
- * customer asked for money back in so many words, stated a fault whose remedy
- * is unambiguous, or confirmed the question below one turn ago.
+ * customer asked for money back in so many words or confirmed the question
+ * below one turn ago. Stating a problem is never consent: "broken", "late"
+ * and "different from what I ordered" all describe what happened, and none
+ * of them chooses the remedy.
  *
- * Two deliberate narrowings. "Return" is logistics, not money: asking to send
- * goods back is not asking to be paid, so only refund and money-back words
- * count as the ask. And a wrong item is never unambiguous: "different from
- * what I ordered" might mean a refund, a replacement, or just reporting it,
- * so a problem statement there chooses nothing and the customer picks.
+ * "Return" is logistics, not money: asking to send goods back is not asking
+ * to be paid, so only refund and money-back words count as the ask.
  *
  *  - **Only payable decisions are gated.** Anything else has no money to stop.
  *  - **A refusal is never gated.** Confirming a denial would ask a customer to
@@ -413,12 +411,10 @@ function consentCheck(
     .map((turn) => turn.text)
     .join('\n');
 
-  // Already answered, three ways: money back in so many words, a stated fault
-  // whose remedy is unambiguous, or agreement with this confirmation one turn
-  // ago. A wrong item is excluded from the fault shortcut: refund, replacement
-  // and reporting are all live, so the statement chooses nothing.
-  const reason = detectedReason(customerText);
-  if (picksRefund(customerText) || (reason !== null && reason !== 'wrong_item')) {
+  // Already answered, two ways: money back in so many words, or agreement
+  // with this confirmation one turn ago. A stated fault is deliberately not
+  // consent - the remedy is the customer's to choose, whatever broke.
+  if (picksRefund(customerText)) {
     return null;
   }
   if (wasConfirmedJustNow(history, input.message)) {

@@ -87,7 +87,7 @@ describe('identifying which order a request is about', () => {
     // end as an escalation - which says nothing about order identification, the thing
     // this test is about. Said as a customer who also named the fault, so the case
     // exercises the resolution and not the intake vocabulary.
-    const request = await submit({ message: 'The floor lamp I bought fell over and is broken.' });
+    const request = await submit({ message: 'The floor lamp I bought fell over and is broken, please refund me.' });
 
     expect(request.orderId).toBe(LAMP_ORDER);
   });
@@ -115,7 +115,7 @@ describe('identifying which order a request is about', () => {
 
   it('escalates when the words match more than one order equally', async () => {
     // "Something" and "else" name nothing specific. A tie is not a decision.
-    const request = await submit({ message: 'I want to return something I bought recently.' });
+    const request = await submit({ message: 'I want to return something I bought recently and get my money back.' });
 
     expect(request.orderId).toBeNull();
     expect(request.decision.decision).toBe('escalated');

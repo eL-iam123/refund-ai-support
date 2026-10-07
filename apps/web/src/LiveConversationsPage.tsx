@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Bot, FileText, Headset, Inbox, MessageSquare, Send, User, Scale, ShieldAlert } from 'lucide-react';
 import { AWAITING_AGENT_ID, type Decision, type RuleOutcome } from '@refund/shared';
 import {
@@ -158,13 +158,22 @@ function useOpenCaseFile(
  * See the comment on LiveHub for why notify-then-refetch beats pushing copies.
  */
 function useStaffConversationSocket(onChange: () => void): void {
+  // Pinned in a ref: the caller passes an inline closure, so depending on its
+  // identity would tear the socket down and rebuild it on every render - a
+  // connect/close storm in which any message arriving mid-churn is lost, which
+  // is exactly how a reply lands in storage yet never on screen until refresh.
+  const handler = useRef(onChange);
+  useEffect(() => {
+    handler.current = onChange;
+  }, [onChange]);
+
   useEffect(() => {
     const socket = new WebSocket(
       `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/staff/conversation/ws`,
     );
-    socket.onmessage = onChange;
+    socket.onmessage = () => handler.current();
     return () => socket.close();
-  }, [onChange]);
+  }, []);
 }
 
 /**
