@@ -11,9 +11,8 @@
 
 import { request, post } from '../httpClient';
 import type { ItemPickerOffer } from '../api';
-import type { ShopAnswerDto } from '@refund/shared';
 
-export type { ItemPickerOffer, ShopAnswerDto };
+export type { ItemPickerOffer };
 
 export interface Product {
   readonly id: string;
@@ -56,7 +55,7 @@ export interface ShopOrder {
 
 /** The decision as the refund engine returns it, nested under `decision`. */
 export interface Decision {
-  readonly decision: 'approved' | 'denied' | 'escalated' | 'partial_refund' | 'exchange' | 'store_credit' | 'pass';
+  readonly decision: 'approved' | 'denied' | 'escalated' | 'partial_refund' | 'exchange' | 'store_credit';
   readonly refundAmountCents: number;
   readonly eligibleAmountCents: number;
   readonly currency: string;
@@ -82,21 +81,6 @@ export interface CartLineInput {
 
 export const shopApi = {
   products: (): Promise<{ products: readonly Product[] }> => request('/api/shop/products'),
-
-  /** Catalogue search: the same endpoint with a query, for the shopping panel. */
-  searchProducts: (q: string, opts: { inStock?: boolean; maxPriceCents?: number; limit?: number } = {}): Promise<{ products: readonly Product[] }> => {
-    const search = new URLSearchParams({ q });
-    if (opts.inStock !== undefined) {
-      search.set('inStock', opts.inStock ? 'true' : 'false');
-    }
-    if (opts.maxPriceCents !== undefined) {
-      search.set('maxPriceCents', String(opts.maxPriceCents));
-    }
-    if (opts.limit !== undefined) {
-      search.set('limit', String(opts.limit));
-    }
-    return request(`/api/shop/products?${search.toString()}`);
-  },
 
   demoAccounts: (): Promise<{ accounts: readonly ShopUser[] }> => request('/api/shop/demo-accounts'),
 
@@ -148,48 +132,11 @@ export const shopApi = {
     /** A person is holding the thread and has not answered yet. */
     awaitingPerson: boolean;
     turns: readonly ChatTurn[];
-    /** The order's own assistant answers, to replay after a reload. */
-    assistantTurns: readonly { message: string; shopAnswer: ShopAnswerDto }[];
   }> => request(`/api/shop/chat/history?orderId=${encodeURIComponent(orderId)}`),
 
   /** Message counts per order, for the "3 messages" badge on the order picker. */
   chatSummary: (): Promise<{ counts: readonly { orderId: string; count: number }[] }> =>
     request('/api/shop/chat/summary'),
-
-  /**
-   * The customer's shopping thread with the assistant.
-   *
-   * Separate from the order thread: these turns answered no claim, so they
-   * are read here rather than through `chatHistory`, which feeds the policy
-   * transcript and must never see them.
-   */
-  assistantHistory: (): Promise<{ turns: readonly { message: string; shopAnswer: ShopAnswerDto }[] }> =>
-    request('/api/shop/assistant/history'),
-
-  /**
-   * A fresh thread's greeting, with the customer's name in it when a model is
-   * available. Null reads as the static greeting: an unreachable model
-   * degrades to the same page rather than an error.
-   */
-  assistantGreeting: (orderId: string | null, shopping: boolean): Promise<{ greeting: string | null }> => {
-    const search = new URLSearchParams({ shopping: shopping ? 'true' : 'false' });
-    if (orderId !== null && orderId.length > 0) {
-      search.set('orderId', orderId);
-    }
-    return request(`/api/shop/assistant/greeting?${search.toString()}`);
-  },
-
-  /**
-   * Whether a model is actually behind the assistant right now.
-   *
-   * Public and free of customer data. It exists because a page that behaves
-   * identically with and without a model is indistinguishable from a model that
-   * is not being called - which is exactly the state a missing API key produces,
-   * and exactly the state a reviewer would otherwise report as "the AI does not
-   * work".
-   */
-  assistantStatus: (): Promise<{ aiMode: string; aiAvailable: boolean; aiNote: string }> =>
-    request('/api/shop/assistant-status'),
 
   /**
    * The customer's open appeal on a refused request, if any.
@@ -290,6 +237,14 @@ export type ChatTurn =
       readonly decision: 'approved' | 'denied' | 'escalated' | 'partial_refund' | 'exchange' | 'store_credit';
       readonly refundAmountCents: number;
       readonly itemIds: readonly string[];
+      /**
+       * The lines a mixed-cart decision left out, as the server stores them.
+       *
+       * Mirrors the server's cut-down `ChatTurn`: name and reason only, the two
+       * fields the composed reply already quotes and the one `ruleId`/`priceCents`
+       * never leave the staff view.
+       */
+      readonly blockedItems: readonly { readonly name: string; readonly reason: string }[];
       readonly createdAt: string;
     }
   | {

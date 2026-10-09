@@ -3,7 +3,7 @@ import { MONEY_DECISIONS, type Decision } from '@refund/shared';
 import type { Db } from './connection.js';
 import { appendAuditEvent } from './auditChain.js';
 import { latestRequestForThread } from './requestRepository.js';
-import { activeHandoffForCustomer, ESCALATION_AGENT } from './handoffs.js';
+import { ESCALATION_AGENT, liveHandoffForThread } from './handoffs.js';
 
 export interface ChatClosure {
   readonly id: string;
@@ -154,8 +154,8 @@ export function closeFinalizedChat(
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(closure.id, closure.customerId, closure.orderId, closure.requestId, closure.closedAt, closure.closedBy, closure.finalState);
 
-    const handoff = activeHandoffForCustomer(db, input.customerId);
-    if (handoff !== null && handoff.orderId === input.orderId) {
+    const handoff = liveHandoffForThread(db, input.customerId, input.orderId);
+    if (handoff !== null) {
       db.prepare('UPDATE handoffs SET ended_at = ? WHERE id = ? AND ended_at IS NULL').run(closure.closedAt, handoff.id);
     }
 

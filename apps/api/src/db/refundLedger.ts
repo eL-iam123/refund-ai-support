@@ -124,7 +124,60 @@ export interface AuthoriseInput {
   readonly orderId: string;
   readonly customerId: string;
   readonly amountCents: number;
+  /**
+   * The order lines this refund's money is calculated from. Omitted or empty
+   * means the whole order - the historical default before coverage was tracked.
+   * Coverage is recorded in `refund_items`, one child row per covered line.
+   */
+  readonly itemIds?: readonly string[];
   readonly now: Date;
+}
+
+/**
+ * The lines an authorisation claims to cover.
+ *
+ * Explicit lines when the caller supplied them (deduplicated); otherwise the
+ * whole order, which is what an unscoped authorisation always meant. Coverage
+ * must be priced: a refund cannot claim to cover lines worth less than its own
+ * amount, or the ledger would describe money the lines cannot back.
+ */
+function resolveCoverage(db: Db, input: AuthoriseInput): string[] {
+  if (input.itemIds !== undefined && input.itemIds.length > 0) {
+    const validIds = new Set(
+      (db.prepare('SELECT id FROM order_items WHERE order_id = ?').all(input.orderId) as { id: string }[]).map((r) => r.id),
+    );
+    return input.itemIds.filter((id) => validIds.has(id));
+  }
+  const rows = db.prepare('SELECT id FROM order_items WHERE order_id = ?').all(input.orderId) as {
+    id: string;
+  }[];
+  return rows.map((row) => row.id);
+}
+
+function assertCoveragePriced(db: Db, orderId: string, covered: readonly string[], amountCents: number): void {
+  const placeholders = covered.map(() => '?').join(',');
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(price), 0) AS total FROM (
+         SELECT unit_price_cents * quantity AS price
+           FROM order_items WHERE order_id = ? AND id IN (${placeholders})
+       )`,
+    )
+    .get(orderId, ...covered) as { total: number };
+  if (amountCents > row.total) {
+    throw new RefundLedgerError(
+      `refund of ${amountCents} cents covers lines worth only ${row.total} cents; ` +
+        'coverage must be backed by the order lines it names',
+    );
+  }
+}
+
+function replaceCoverage(db: Db, refundId: string, covered: readonly string[]): void {
+  db.prepare('DELETE FROM refund_items WHERE refund_id = ?').run(refundId);
+  const insert = db.prepare('INSERT INTO refund_items (refund_id, item_id) VALUES (?, ?)');
+  for (const itemId of covered) {
+    insert.run(refundId, itemId);
+  }
 }
 
 /**
@@ -157,6 +210,7 @@ export function authoriseRefund(db: Db, input: AuthoriseInput): RefundRecord {
       }
       assertRefundableBalance(db, input);
       reopenReleased(db, existing.id);
+      replaceCoverage(db, existing.id, resolveCoverage(db, input));
       const reopened = findRefundById(db, existing.id);
       if (reopened === null) {
         throw new RefundLedgerError(`refund ${existing.id} vanished while being reopened`);
@@ -165,6 +219,8 @@ export function authoriseRefund(db: Db, input: AuthoriseInput): RefundRecord {
     }
 
     assertRefundableBalance(db, input);
+    const covered = resolveCoverage(db, input);
+    assertCoveragePriced(db, input.orderId, covered, input.amountCents);
     const id = `RFD-${randomUUID()}`;
     const createdAt = input.now.toISOString();
     db.prepare(
@@ -182,6 +238,7 @@ export function authoriseRefund(db: Db, input: AuthoriseInput): RefundRecord {
       idempotencyKeyFor(input.requestId, input.orderId, input.amountCents),
       createdAt,
     );
+    replaceCoverage(db, id, covered);
 
     const created = findRefundById(db, id);
     if (created === null) {
@@ -267,6 +324,45 @@ export function pendingCentsForOrder(db: Db, orderId: string): number {
       "SELECT COALESCE(SUM(amount_cents), 0) AS total FROM refunds WHERE order_id = ? AND status = 'pending_verification'",
     )
     .get(orderId) as { total: number };
+  return row.total;
+}
+
+/** The covered lines of one refund, in the order they were recorded. */
+export function itemIdsForRefund(db: Db, refundId: string): string[] {
+  const rows = db
+    .prepare('SELECT item_id FROM refund_items WHERE refund_id = ? ORDER BY rowid')
+    .all(refundId) as { item_id: string }[];
+  return rows.map((row) => row.item_id);
+}
+
+/**
+ * Settled money against one line of an order.
+ *
+ * When a refund covers several lines, its whole amount is counted against each
+ * of them, so this is an upper bound on the line's share rather than an exact
+ * split. One-line refunds - the per-line fold writes one coverage row per
+ * approved line - are exact.
+ */
+export function settledCentsForItem(db: Db, orderId: string, itemId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(r.amount_cents), 0) AS total
+         FROM refunds r JOIN refund_items ri ON ri.refund_id = r.id
+        WHERE r.order_id = ? AND ri.item_id = ? AND r.status = 'settled'`,
+    )
+    .get(orderId, itemId) as { total: number };
+  return row.total;
+}
+
+/** Authorised-but-unpaid money reserved against a single line of an order. */
+export function pendingCentsForItem(db: Db, orderId: string, itemId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(r.amount_cents), 0) AS total
+         FROM refunds r JOIN refund_items ri ON ri.refund_id = r.id
+        WHERE r.order_id = ? AND ri.item_id = ? AND r.status = 'pending_verification'`,
+    )
+    .get(orderId, itemId) as { total: number };
   return row.total;
 }
 

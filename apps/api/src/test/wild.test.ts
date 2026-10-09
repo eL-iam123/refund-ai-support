@@ -9,7 +9,7 @@ import { shopHarness, signIn } from './shop-helpers.js';
 import { scenarioHarness, TEST_NOW, type PipelineHarness } from './helpers.js';
 import { DEFAULT_DISCRETION, processRefundRequest, type PipelineDeps, type ProcessResult } from '../orchestrator.js';
 import { DEFAULT_ITEM_PICKER } from '../retrieval/itemPicker.js';
-import { AiUnavailableError, type AIAnalyzer, type AttemptObserver, type ChatReply, type IntakeReply } from '../ai/analyzer.js';
+import { AiUnavailableError, type AIAnalyzer, type AttemptObserver, type IntakeReply } from '../ai/analyzer.js';
 import type { ClaimExtraction } from '@refund/shared';
 import type { Db } from '../db/connection.js';
 
@@ -498,13 +498,6 @@ function hostileAnalyzer(reply: IntakeReply): AIAnalyzer {
       });
       return Promise.resolve(reply);
     },
-    chat(_input, observer: AttemptObserver): Promise<ChatReply> {
-      observer({
-        model: 'hostile-v1', attempt: 1, ok: true, latencyMs: 0,
-        promptTokens: null, completionTokens: null, error: null,
-      });
-      return Promise.resolve({ kind: 'text', text: 'hello', model: 'hostile-v1' });
-    },
   };
 }
 
@@ -587,9 +580,6 @@ function deadAnalyzer(): AIAnalyzer {
       return Promise.resolve(null);
     },
     analyze(): Promise<IntakeReply> {
-      return Promise.reject(new AiUnavailableError('503 from the provider'));
-    },
-    chat(): Promise<ChatReply> {
       return Promise.reject(new AiUnavailableError('503 from the provider'));
     },
   };

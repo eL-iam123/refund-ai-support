@@ -510,6 +510,24 @@ describe('storefront', () => {
       expect(ids.every((id) => id.length > 0)).toBe(true);
     });
 
+    it('names lines with the order id and line position, so they sort with their order', async () => {
+      const { cookie } = await signUp('line-ids@shop.test');
+      const products = listProducts(harness.db).slice(0, 2);
+
+      const { order } = (
+        await call('POST', '/api/shop/checkout', {
+          cookie,
+          payload: { lines: products.map((product) => ({ productId: product.id, quantity: 1 })) },
+        })
+      ).json<{ order: ShopOrder }>();
+
+      const ids = order.items.map((item) => item.itemId).sort();
+      expect(ids).toEqual([
+        `ITM-${order.id}-01`,
+        `ITM-${order.id}-02`,
+      ]);
+    });
+
     it('addresses lines that share a product, so one can be returned without the other', async () => {
       const { cookie } = await signUp('two-lines@shop.test');
       // One product, two separate lines. `checkout` merges these, so the lines

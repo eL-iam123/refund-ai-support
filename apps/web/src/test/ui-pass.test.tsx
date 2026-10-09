@@ -93,6 +93,7 @@ const TURN = {
   decision: 'approved',
   refundAmountCents: 2400,
   itemIds: ['ITM-1'],
+  blockedItems: [],
   createdAt: '2026-01-02T00:00:00.000Z',
 };
 
@@ -175,11 +176,10 @@ const STATS = {
 
 const READS: readonly { readonly path: string; readonly body: unknown }[] = [
   { path: '/api/shop/me', body: { user: { customerId: 'CUST-1', name: 'Shopper', email: 's@shop.test' } } },
-  { path: '/api/shop/assistant-status', body: { aiMode: 'fake (test)', aiAvailable: true, aiNote: '' } },
   { path: '/api/shop/products', body: { products: [PRODUCT] } },
   { path: '/api/shop/orders', body: { orders: [ORDER] } },
   { path: '/api/shop/chat/summary', body: { counts: [{ orderId: 'ORD-1', count: 2 }] } },
-  { path: '/api/shop/chat/history', body: { orderId: 'ORD-1', closed: false, awaitingPerson: false, turns: [TURN], assistantTurns: [] } },
+  { path: '/api/shop/chat/history', body: { orderId: 'ORD-1', closed: false, awaitingPerson: false, turns: [TURN] } },
   { path: '/api/requests', body: { requests: [REQUEST] } },
   { path: '/api/refunds', body: { refunds: [REFUND] } },
   { path: '/api/staff/conversations', body: { conversations: [CONVERSATION] } },
@@ -189,7 +189,7 @@ const READS: readonly { readonly path: string; readonly body: unknown }[] = [
   // Without this the whole staff console is replaced by "this deployment has no
   // operator account", and a UI pass that reports "no buttons" for ten pages is
   // reporting the harness, not the product.
-  { path: '/api/health', body: { status: 'ok', aiMode: 'fake (test)', adminEnabled: true } },
+  { path: '/api/health', body: { status: 'ok', aiMode: 'fake (test)', adminEnabled: true, aiAvailable: true, aiUnavailableReason: null } },
   { path: '/api/scenarios', body: { scenarios: [] } },
   { path: '/api/policy', body: { policy: 'REFUND_POLICY.md', sections: [] } },
 ];
@@ -394,7 +394,7 @@ describe('pressing every control on every page', () => {
     { name: 'cart', at: '/cart' },
     { name: 'orders', at: '/orders' },
     { name: 'account', at: '/account' },
-    { name: 'assistant', at: '/help?order=ORD-1' },
+    { name: 'help', at: '/help?order=ORD-1' },
     { name: 'requests queue', at: '/admin/requests' },
     { name: 'refunds queue', at: '/admin/refunds' },
     { name: 'live conversations', at: '/admin/live' },
@@ -458,9 +458,9 @@ describe('the returns page offers exactly the moves the server allows', () => {
       </MemoryRouter>,
     );
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /review return RET-1/i })).toBeInTheDocument();
     });
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Open' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: /review return RET-1/i }));
   };
 
   /** The buttons the page offers for a given state, once it has loaded. */
@@ -524,9 +524,9 @@ describe('the returns page refuses to guess', () => {
       </MemoryRouter>,
     );
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /review return RET-1/i })).toBeInTheDocument();
     });
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Open' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: /review return RET-1/i }));
 
     const issue = await screen.findByRole('button', { name: 'Issue label' });
     // Nothing typed yet: a URL that looks right and 404s is worse than a visible

@@ -4,6 +4,7 @@ import type {
   GroundingResult,
   InjectionAction,
   InjectionScan,
+  LineClaim,
   RuleClass,
   RuleEvaluation,
   RuleId,
@@ -14,6 +15,7 @@ import type {
 import { FAULTY_REASONS } from '@refund/shared';
 import type { CustomerRecord, OrderItemRecord, OrderRecord } from '../db/records.js';
 import type { Db } from '../db/connection.js';
+import { sumPrices } from '../lib/money.js';
 
 /** Everything a rule is allowed to look at. Rules are pure functions of this. */
 export interface PolicyContext {
@@ -43,6 +45,14 @@ export interface PolicyContext {
   readonly eligibleItems: readonly OrderItemRecord[];
   readonly blockedItems: readonly BlockedItem[];
   readonly eligibleAmountCents: number;
+  /**
+   * The lines the request is about, when the customer named them. Reason rules
+   * read it to tell "a line the customer claimed but that has no grounded
+   * reason" from a line they never mentioned. Optional because contexts built
+   * by hand - tests, scripts - have no claim scope, which the rules treat as
+   * "all the lines the extraction named".
+   */
+  readonly claimedItemIds?: readonly string[];
   readonly orderTotalCents: number;
   /**
    * The order-total ceiling above which R-15 escalates. Supplied by the
@@ -138,6 +148,31 @@ export function approve(rule: PolicyRule, evidence: string): RuleEvaluation {
   });
 }
 
+/**
+ * The amount this request actually puts at risk, for the amount-authority
+ * thresholds (R-03, R-15): the sum of the lines the customer pointed at, so a
+ * $12 mug claim on a $700 order is not force-escalated alongside a whole-order
+ * repayment.
+ *
+ * null when the claim has no named lines - a whole-order claim has no scope to
+ * narrow against, and callers fall back to the order total, which is what keeps
+ * §4.1/§6.5 holding for whole-order claims. Named lines that resolve to nothing
+ * also fall back, so a bogus pick cannot dodge the threshold either.
+ */
+export function disputedClaimCents(context: PolicyContext): number | null {
+  const order = context.order;
+  const claimed = context.claimedItemIds;
+  if (order === null || claimed === undefined || claimed.length === 0) {
+    return null;
+  }
+  const wanted = new Set(claimed);
+  const matched = order.items.filter((item) => wanted.has(item.id));
+  if (matched.length === 0) {
+    return null;
+  }
+  return sumPrices(matched.map((item) => item.unitPriceCents * item.quantity));
+}
+
 /** True when the claim is grounded in the customer's own words. */
 export function hasGroundedFault(context: PolicyContext): boolean {
   const { extraction, grounding } = context;
@@ -147,5 +182,65 @@ export function hasGroundedFault(context: PolicyContext): boolean {
   return (
     extraction.intent === 'refund' &&
     FAULTY_REASONS.includes(extraction.reason)
+  );
+}
+
+/**
+ * The claimed lines for a per-line reading.
+ *
+ * The customer's own `claimedItemIds` when they named lines; otherwise the
+ * lines the extraction itself named. The two are deliberately not merged:
+ * a line the customer ticked but the model never mentioned must still be
+ * reviewable, but a line the model named that the customer never claimed
+ * cannot be.
+ */
+export function claimedLineIds(context: PolicyContext): readonly string[] {
+  const claims = context.extraction?.lineClaims ?? [];
+  if (context.claimedItemIds !== undefined && context.claimedItemIds.length > 0) {
+    return context.claimedItemIds;
+  }
+  return claims.map((claim) => claim.itemId);
+}
+
+/**
+ * The claimed lines whose per-line reason is grounded and faulty.
+ *
+ * One truth for both reason rules: R-04 approves exactly these lines, and R-12
+ * escalates the claimed lines that are not in the set. Sharing the set keeps
+ * the two from disagreeing about which line the model stood behind - a
+ * disagreement is how a grounded line and an ungrounded one both get the
+ * wrong outcome.
+ *
+ * Undefined when the extraction carried no `lineClaims`: there is no per-line
+ * reading to split on, and callers fall back to the whole-message behaviour.
+ */
+export function groundedClaimLineIds(context: PolicyContext): string[] | undefined {
+  const claims = context.extraction?.lineClaims;
+  const lines = context.grounding?.lines;
+  if (claims === undefined || claims.length === 0 || lines === undefined || lines.length === 0) {
+    return undefined;
+  }
+  const grounding = new Map(lines.map((line) => [line.itemId, line.grounded]));
+  const byId = new Map(claims.map((claim) => [claim.itemId, claim]));
+  const eligible = new Set(context.eligibleItems.map((item) => item.id));
+  const result: string[] = [];
+  for (const itemId of claimedLineIds(context)) {
+    if (lineClaimGrounded(byId.get(itemId), grounding.get(itemId), eligible.has(itemId))) {
+      result.push(itemId);
+    }
+  }
+  return result;
+}
+
+function lineClaimGrounded(
+  claim: LineClaim | undefined,
+  grounded: boolean | undefined,
+  eligible: boolean,
+): boolean {
+  return (
+    claim !== undefined &&
+    grounded === true &&
+    FAULTY_REASONS.includes(claim.reason) &&
+    eligible
   );
 }

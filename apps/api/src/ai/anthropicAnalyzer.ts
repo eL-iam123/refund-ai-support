@@ -4,8 +4,8 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom, type AttemptOutcome } from './breaker.js';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildCaseSummaryUser, buildIntakeUser, buildShopUser, buildGeneralUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, GENERAL_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM, SHOP_SYSTEM } from './prompts.js';
-import { AskItemsSchema, CaseSummarySchema, CompleteSchema, IntakeOutputSchema, PhraseReplySchema, ShopSuggestionSchema, type IntakeOutput } from './schemas.js';
+import { buildCaseSummaryUser, buildIntakeUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM } from './prompts.js';
+import { AskItemsSchema, parseCaseNote, CompleteSchema, IntakeOutputSchema, PhraseReplySchema, type IntakeOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
   AiUnavailableError,
@@ -15,12 +15,7 @@ import {
   type IntakeExit,
   type IntakeReply,
   type AttemptObserver,
-  type ChatInput,
-  type ChatReply,
-  type ConverseInput,
   type PhraseInput,
-  type ShopInput,
-  type ShopSuggestion,
 } from './analyzer.js';
 
 /**
@@ -60,9 +55,6 @@ const CASE_SUMMARY_TOKENS = 220;
 /** A chat answer is a few sentences. Longer is not friendlier, only slower. */
 const GENERAL_TOKENS = 300;
 
-function isNothingToAdd(text: string): boolean {
-  return text.toLowerCase() === 'nothing further to add.';
-}
 const MAX_ERROR_LENGTH = 500;
 const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -76,8 +68,6 @@ const ANTHROPIC_VERSION = '2023-06-01';
 const ASK_TOOL = 'ask_question';
 const DECIDE_TOOL = 'decide_claim';
 const ASK_ITEMS_TOOL = 'ask_which_items';
-const REMIND_TOOL = 'remind_admin';
-const SUGGEST_TOOL = 'suggest_products';
 
 interface MessageResponse {
   readonly content?: readonly {
@@ -179,107 +169,8 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     );
   }
 
-  /**
-   * Shopping nomination: which catalogue ids match, or null.
-   *
-   * Same contract as the other adapter: one pass, no repair, null on any
-   * failure. The model is forced through the single suggestion tool rather
-   * than asked for JSON, so a malformed nomination becomes a missing tool
-   * call instead of prose to parse.
-   */
-  async suggestProducts(input: ShopInput, observer: AttemptObserver): Promise<ShopSuggestion | null> {
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const user = buildShopUser(input.message, input.products, input.history);
-    const result = await runCandidates<ShopSuggestion>({
-      candidates: this.candidates,
-      maxAttempts: this.env.AI_MAX_ATTEMPTS,
-      breaker: this.breaker,
-      budget,
-      purpose: 'shop',
-      attempt: (model, attempt) => this.shopAttempt(model, attempt, user, budget, observer),
-    });
-    if (!result.ok) {
-      return null;
-    }
-    return result.value;
-  }
 
-  private async shopAttempt(
-    model: string,
-    attempt: number,
-    user: string,
-    budget: AbortSignal,
-    observer: AttemptObserver,
-  ): Promise<AttemptOutcome<ShopSuggestion>> {
-    const startedAt = Date.now();
-    try {
-      const response = await fetch(`${this.baseUrl}/messages`, {
-        method: 'POST',
-        signal: budget,
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': ANTHROPIC_VERSION,
-        },
-        body: JSON.stringify(shopRequestBody(model, user, this.env.AI_MAX_TOKENS)),
-      });
-      if (!response.ok) {
-        const body = await response.text().catch(() => '');
-        throw new HttpStatusError(response.status, body);
-      }
-      const payload = (await response.json()) as MessageResponse;
-      const suggestion = shopSuggestion(payload, payload.model ?? model);
-      if (suggestion === null) {
-        return { ok: false, error: 'shop reply carried no suggestion tool call', retryable: false };
-      }
-      observer({
-        model: payload.model ?? model,
-        attempt,
-        ok: true,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: payload.usage?.input_tokens ?? null,
-        completionTokens: payload.usage?.output_tokens ?? null,
-        error: null,
-      });
-      return { ok: true, value: suggestion };
-    } catch (error: unknown) {
-      const failure = classify(error);
-      observer({
-        model,
-        attempt,
-        ok: false,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: null,
-        completionTokens: null,
-        error: failure.error,
-      });
-      return { ok: false, ...failure };
-    }
-  }
 
-  /**
-   * General conversation: small talk, help, and abstract policy questions.
-   *
-   * Same contract as the other adapter: prose validated by the caller, one
-   * candidate walk, null on any failure. No tools here - the intake tools
-   * would let a general answer smuggle a claim-shaped object past the reader.
-   */
-  async converse(input: ConverseInput, observer: AttemptObserver): Promise<string | null> {
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const user = buildGeneralUser(input.message, input.products, input.policy, input.history, input.style);
-    const result = await runCandidates<string>({
-      candidates: this.candidates,
-      maxAttempts: this.env.AI_MAX_ATTEMPTS,
-      breaker: this.breaker,
-      budget,
-      purpose: 'general',
-      attempt: (model, attempt) => this.converseAttempt(model, attempt, user, budget, observer),
-    });
-    if (!result.ok) {
-      return null;
-    }
-    return result.value;
-  }
 
   /**
    * Phrases a decided outcome into customer-facing prose.
@@ -348,43 +239,6 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     }
   }
 
-  private async converseAttempt(
-    model: string,
-    attempt: number,
-    user: string,
-    budget: AbortSignal,
-    observer: AttemptObserver,
-  ): Promise<AttemptOutcome<string>> {
-    const startedAt = Date.now();
-    try {
-      const posted = await postProseMessage(this.baseUrl, this.apiKey, model, user, budget, this.env.AI_MAX_TOKENS, GENERAL_SYSTEM);
-      if (posted.text.length === 0) {
-        return { ok: false, error: 'general reply was empty', retryable: false };
-      }
-      observer({
-        model: posted.model,
-        attempt,
-        ok: true,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: posted.promptTokens,
-        completionTokens: posted.completionTokens,
-        error: null,
-      });
-      return { ok: true, value: posted.text };
-    } catch (error: unknown) {
-      const failure = classify(error);
-      observer({
-        model,
-        attempt,
-        ok: false,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: null,
-        completionTokens: null,
-        error: failure.error,
-      });
-      return { ok: false, ...failure };
-    }
-  }
 
   /**
    * The case note, in one call, or null.
@@ -422,8 +276,8 @@ export class AnthropicAnalyzer implements AIAnalyzer {
       }
       const data = (await response.json()) as { content?: { type: string; text?: string }[] };
       const text = (data.content ?? []).find((block) => block.type === 'text')?.text ?? '';
-      const parsed = CaseSummarySchema.safeParse(text);
-      if (!parsed.success || isNothingToAdd(parsed.data)) {
+      const note = parseCaseNote(text, input.outcome.amountCents);
+      if (note === null) {
         observer({
           model, attempt: 1, ok: false, latencyMs: Date.now() - startedAt,
           promptTokens: null, completionTokens: null, error: 'case summary rejected by validation',
@@ -434,7 +288,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
         model, attempt: 1, ok: true, latencyMs: Date.now() - startedAt,
         promptTokens: null, completionTokens: null, error: null,
       });
-      return parsed.data;
+      return note;
     } catch (error: unknown) {
       const failure = classify(error);
       observer({
@@ -533,91 +387,7 @@ export class AnthropicAnalyzer implements AIAnalyzer {
     }
   }
 
-  /**
-   * Chat mode for escalated conversations: a helpful conversational assistant
-   * with no monetary authority. The customer's message is answered in prose,
-   * or the `remind_admin` tool is called when the customer is pushing.
-   */
-  async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const body = chatRequestBody(this.candidates[0] ?? 'unknown', input);
-    const result = await runCandidates<ChatReply>({
-      candidates: this.candidates,
-      maxAttempts: this.env.AI_MAX_ATTEMPTS,
-      breaker: this.breaker,
-      budget,
-      purpose: 'chat',
-      attempt: (model, attempt) => this.chatAttempt(model, attempt, { ...body, model }, budget, observer),
-    });
-    if (!result.ok) {
-      throw unavailableFrom(result);
-    }
-    return result.value;
-  }
 
-  /**
-   * One chat call, reported as an outcome.
-   *
-   * It used to retry internally *and* let the ladder above retry it again, which
-   * meant a single chat turn could cost four attempts per candidate. Retrying is the
-   * ladder's job now; this returns what happened and lets it decide.
-   */
-  private async chatAttempt(
-    model: string,
-    attempt: number,
-    body: Record<string, unknown>,
-    budget: AbortSignal,
-    observer: AttemptObserver,
-  ): Promise<AttemptOutcome<ChatReply>> {
-    const startedAt = Date.now();
-    try {
-      const response = await fetch(`${this.baseUrl}/messages`, {
-        method: 'POST',
-        signal: budget,
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': ANTHROPIC_VERSION,
-        },
-        body: JSON.stringify(body),
-      });
-
-      if (!response.ok) {
-        const failedBody = await response.text().catch(() => '');
-        throw new HttpStatusError(response.status, failedBody);
-      }
-
-      const data = (await response.json()) as MessageResponse;
-      const answer = chatAnswer(data, model);
-      observer({
-        model,
-        attempt,
-        ok: answer !== null,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: data.usage?.input_tokens ?? null,
-        completionTokens: data.usage?.output_tokens ?? null,
-        error: answer === null ? 'chat reply carried neither text nor a tool call' : null,
-      });
-      // A reply with no text and no tool call is the empty-completion case again, in
-      // chat clothing, and it is not retryable: the model answered, and its answer
-      // was nothing.
-      return answer === null
-        ? { ok: false, error: 'chat reply carried neither text nor a tool call', retryable: false }
-        : { ok: true, value: answer };
-    } catch (error: unknown) {
-      const failure = classify(error);
-      observer({
-        model,
-        attempt,
-        ok: false,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: null,
-        completionTokens: null,
-        error: failure.error,
-      });
-      return { ok: false, ...failure };
-    }
-  }
 }
 
 interface Completion {
@@ -722,65 +492,9 @@ function decideTool(): { name: string; description: string; input_schema: object
   };
 }
 
-/**
- * The nomination tool.
- *
- * Ids only, re-checked against the database before anything is shown. The
- * tool that is not offered cannot be called, so on this wire format a closed
- * exit is closed rather than merely discouraged.
- */
-function suggestTool(): { name: string; description: string; input_schema: object } {
-  return {
-    name: SUGGEST_TOOL,
-    description: 'Nominate the catalogue ids matching what the customer asked about, best match first.',
-    input_schema: z.toJSONSchema(ShopSuggestionSchema),
-  };
-}
 
-function remindTool(): { name: string; description: string; input_schema: object } {
-  return {
-    name: REMIND_TOOL,
-    description: 'Notify the human agent that the customer is waiting or pushing for a response.',
-    input_schema: { type: 'object', properties: {}, additionalProperties: false },
-  };
-}
 
-/**
- * The Messages body for one nomination turn.
- *
- * `tool_choice: any` with a single tool, mirroring the intake adapter: the
- * model must call the one tool it has, and the answer is read back off the
- * call rather than parsed out of prose.
- */
-function shopRequestBody(model: string, user: string, maxTokens: number): Record<string, unknown> {
-  return {
-    model,
-    max_tokens: maxTokens,
-    temperature: 0,
-    system: SHOP_SYSTEM,
-    tools: [suggestTool()],
-    tool_choice: { type: 'any' },
-    messages: [{ role: 'user', content: user }],
-  };
-}
 
-/**
- * Reads the nomination off the tool call, validated and stripped.
- *
- * Null when the model called nothing usable, which the ladder treats as a
- * miss worth another candidate rather than an answer. What comes back is the
- * suggestion schema and nothing else.
- */
-function shopSuggestion(payload: MessageResponse, model: string): ShopSuggestion | null {
-  for (const block of payload.content ?? []) {
-    if (block.type !== 'tool_use' || block.name !== SUGGEST_TOOL) {
-      continue;
-    }
-    const parsed = ShopSuggestionSchema.safeParse(block.input ?? {});
-    return parsed.success ? { productIds: parsed.data.productIds, model } : null;
-  }
-  return null;
-}
 
 /**
  * One prose Messages call, read down to text.
@@ -836,49 +550,7 @@ function readConverseText(payload: MessageResponse): string {
   return text?.trim() ?? '';
 }
 
-/**
- * The Messages body for one chat-mode turn.
- *
- * `tool_choice: auto` rather than the analysis adapter's `any`, because the
- * answer here is usually prose. Forcing a tool would make the model call
- * `remind_admin` on every message, which is precisely the opposite of the point
- * of the tool.
- */
-function chatRequestBody(model: string, input: ChatInput, maxTokens = 4096): Record<string, unknown> {
-  const historyText = input.history.map((line) => `${line.role}: ${line.text}`).join('\n');
-  const body: Record<string, unknown> = {
-    model,
-    max_tokens: maxTokens,
-    temperature: 0.7,
-    system: CHAT_SYSTEM_PROMPT,
-    messages: [
-      {
-        role: 'user',
-        content: `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${input.tools.map((t) => t.name).join(', ')}`,
-      },
-    ],
-  };
-  if (input.tools.length > 0) {
-    body.tools = [remindTool()];
-    body.tool_choice = { type: 'auto' };
-  }
-  return body;
-}
 
-/**
- * Reads the turn's answer off the response: a `remind_admin` tool call if the
- * model reached for one, otherwise its prose. Null means nothing usable came
- * back, which is a miss worth another attempt rather than a reply to send.
- */
-function chatAnswer(payload: MessageResponse, model: string): ChatReply | null {
-  const toolUse = payload.content?.find((block) => block.type === 'tool_use');
-  if (toolUse !== undefined && toolUse.name === REMIND_TOOL) {
-    return { kind: 'tool_call', tool: REMIND_TOOL, model };
-  }
-
-  const text = payload.content?.find((block) => block.type === 'text')?.text ?? '';
-  return text.trim().length === 0 ? null : { kind: 'text', text, model };
-}
 
 /**
  * The tool call, normalised to the union shape, or null when none was made.

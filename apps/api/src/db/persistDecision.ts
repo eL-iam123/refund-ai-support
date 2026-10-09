@@ -24,6 +24,7 @@ export function persistDecision(
   db: Db,
   row: NewRequestRow,
   context: { readonly orderId: string | null; readonly customerId: string; readonly now: Date },
+  refundItemIds?: readonly string[],
 ): { readonly reservedCents: number; readonly reservationId: string | null } {
   const persist = db.transaction(() => {
     insertRequest(db, row);
@@ -46,6 +47,7 @@ export function persistDecision(
       orderId: context.orderId,
       customerId: context.customerId,
       amountCents: row.refundAmountCents,
+      ...(refundItemIds !== undefined ? { itemIds: refundItemIds } : {}),
       now: context.now,
     });
     insertAuditEvent(

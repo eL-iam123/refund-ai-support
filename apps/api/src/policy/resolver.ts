@@ -1,5 +1,6 @@
 import {
   type AiProposal,
+  type BlockedItem,
   type ClaimExtraction,
   type Decision,
   type GroundingResult,
@@ -9,7 +10,7 @@ import {
   type RuleEvaluation,
 } from '@refund/shared';
 import { assertAmountSane } from '../lib/assert.js';
-import { formatCents } from '../lib/money.js';
+import { formatCents, sumPrices } from '../lib/money.js';
 import { pendingCentsForOrder, settledCentsForOrder } from '../db/refundLedger.js';
 import type { Db } from '../db/connection.js';
 import type { CustomerRecord, OrderRecord } from '../db/records.js';
@@ -68,6 +69,15 @@ export interface ResolveInput {
    * still hears it.
    */
   readonly customerRequestedAgent?: boolean | undefined;
+  /**
+   * The lines the customer's request was about, when they named them.
+   *
+   * Plumbed from the claim scope so the resolver can certify that an approval
+   * came only from the lines the customer actually claimed. Optional because
+   * hand-built inputs - most unit tests - have no such scope, which the per-line
+   * fold then ignores.
+   */
+  readonly claimedItemIds?: readonly string[] | undefined;
 }
 
 /**
@@ -105,7 +115,8 @@ export function resolve(input: ResolveInput): RefundDecision {
     ...input.gateResult.evaluations,
     ...input.reasonEvaluations,
   ];
-  const winner = decidingRule(input, evaluations);
+  const split = lineSplit(evaluations);
+  const winner = decidingRule(input, evaluations, split);
   const baseDecision = decisionFrom(winner);
   // The fold always returns a rule, even when every one of them passed, so the
   // deciding rule and the *concluding* rule are not the same thing. Only the
@@ -118,13 +129,17 @@ export function resolve(input: ResolveInput): RefundDecision {
   // discretion layer proposes money. Gating only the base decision would leave the
   // obvious hole: an escalation that the layer would have softened into a partial
   // refund, on a claim the model does not stand behind.
-  const gated = confidenceGate(baseDecision, concluded, input);
-  const softened = applyDiscretion(gated.decision, gated.winner, evaluations, input);
+  const gated = confidenceGate(baseDecision, concluded, input, split);
+  const softened = softenDecision(gated.decision, gated.winner, evaluations, input, split);
   // After discretion, not before it: a handoff to a person is not something
   // the softening layer may convert back into a payment.
   const agentHeld = agentGate(softened.decision, input);
-  const decision = agentHeld.decision;
-  const requested = amountFor(decision, input, softened.partialAmountCents);
+  // The per-line split names two fates for approved lines: paid, and sent for a
+  // person to read. Only after the gates have had their say - a low confidence
+  // reading or the customer's own request for a person converts the whole
+  // request to escalated, and the split must not turn that back into money.
+  const decision = splitDecision(agentHeld.decision, split);
+  const requested = amountFor(decision, input, softened.partialAmountCents, split);
   const { decision: payable, amount, balanceNote, balanceWhy } = settledAgainstBalance(decision, requested, input);
   const ceiling = ceilingOverride(input, amount);
   const overrides = [
@@ -134,6 +149,7 @@ export function resolve(input: ResolveInput): RefundDecision {
     ...balanceNote,
     ...reconcile(input, payable, amount, evaluations),
     ...ceiling,
+    ...ungroundingOverrides(input, payable, split),
   ];
   assertAmountSane(amount, input.orderTotalCents);
 
@@ -146,14 +162,159 @@ export function resolve(input: ResolveInput): RefundDecision {
     // the amount, the two differ, and a summary that described the *pre-cap* decision
     // read "Approved under R-04 ... $0.00" next to a decision of escalated - a record
     // that contradicts itself, in the field a customer and an auditor both read.
-    summary: summarise(payable, gated.winner, input, amount, softened.applied, balanceWhy),
+    summary: summarise(payable, gated.winner, input, amount, softened.applied, balanceWhy, split),
     policyRef: concluded?.policyRef ?? 'REFUND_POLICY.md §9',
     trace: evaluations,
     overrides,
     eligibleItemIds: input.gateResult.eligibleItems.map((item) => item.id),
-    blockedItems: input.gateResult.blockedItems,
+    refundItemIds: refundItemIdsFor(input, payable, amount, split),
+    blockedItems: [...input.gateResult.blockedItems, ...splitReviewBlocked(input, split)],
     ...outstandingFor(input),
   };
+}
+
+/**
+ * The per-line reading of the request, when the extraction carried one.
+ *
+ * Both reason rules decide per-line and report item-scoped: R-04 lists the lines
+ * it approved, R-12 the lines it sent for a person to read. The resolver folds
+ * those two lists into the decision. A claimed line that neither rule named -
+ * never re-verified and never grounded - belongs to nobody, so it stays out of
+ * both lists and gets no money.
+ */
+interface LineSplit {
+  readonly active: boolean;
+  readonly approvedIds: readonly string[];
+  readonly reviewIds: readonly string[];
+  readonly approveEval: RuleEvaluation | null;
+  readonly escalateEval: RuleEvaluation | null;
+}
+
+function lineSplit(evaluations: readonly RuleEvaluation[]): LineSplit {
+  const none: LineSplit = {
+    active: false,
+    approvedIds: [],
+    reviewIds: [],
+    approveEval: null,
+    escalateEval: null,
+  };
+  const itemReason = evaluations.filter(
+    (evaluation) =>
+      evaluation.scope === 'item' && (evaluation.ruleId === 'R-04' || evaluation.ruleId === 'R-12'),
+  );
+  if (itemReason.length === 0) {
+    return none;
+  }
+  const approve = itemReason.find((e) => e.ruleId === 'R-04' && e.outcome === 'approve') ?? null;
+  const escalate = itemReason.find((e) => e.ruleId === 'R-12' && e.outcome === 'escalate') ?? null;
+  return {
+    active: true,
+    approvedIds: approve?.itemIds ?? [],
+    reviewIds: escalate?.itemIds ?? [],
+    approveEval: approve,
+    escalateEval: escalate,
+  };
+}
+
+/**
+ * Maps an approved decision into a partial refund when some lines are under
+ * review. Only `approved` is mapped: the gates have already converted anything
+ * they did not like into an escalation, and an escalation must not be converted
+ * back here.
+ */
+function splitDecision(decision: Decision, split: LineSplit): Decision {
+  if (decision !== 'approved' || !split.active) {
+    return decision;
+  }
+  return split.reviewIds.length > 0 ? 'partial_refund' : 'approved';
+}
+
+/**
+ * The lines a money decision actually covers, for the ledger.
+ *
+ * The per-line fold names its approved lines exactly. A scoped claim pays only
+ * the lines the customer named, so those name the coverage. A decision reached
+ * with neither is paid against the eligible scope - the lines whose value
+ * bounds the amount. No money moves, no coverage: denials, escalations and
+ * zero amounts name no lines.
+ */
+function refundItemIdsFor(
+  input: ResolveInput,
+  payable: Decision,
+  amount: number,
+  split: LineSplit,
+): string[] {
+  if ((payable !== 'approved' && payable !== 'partial_refund') || amount <= 0) {
+    return [];
+  }
+  if (split.active && split.approvedIds.length > 0) {
+    return [...split.approvedIds];
+  }
+  const claimed = input.claimedItemIds ?? [];
+  if (claimed.length > 0) {
+    const orderIds = new Set((input.order?.items ?? []).map((item) => item.id));
+    return claimed.filter((id) => orderIds.has(id));
+  }
+  return input.gateResult.eligibleItems.map((item) => item.id);
+}
+
+/** The money authorised by the approved lines, before the ledger caps it. */
+function splitAmountCents(input: ResolveInput, split: LineSplit): number | null {
+  if (!split.active || split.approvedIds.length === 0) {
+    return null;
+  }
+  const approved = new Set(split.approvedIds);
+  const sum = sumPrices(
+    input.gateResult.eligibleItems
+      .filter((item) => approved.has(item.id))
+      .map((item) => item.unitPriceCents * item.quantity),
+  );
+  const ceiling = input.disputeCeilingCents;
+  return ceiling === null ? sum : Math.min(sum, ceiling);
+}
+
+/**
+ * The lines a person is now reading, as blocked items the reply can name.
+ *
+ * A line under review is not "not eligible" - the eligible set already excludes
+ * the fact-blocked lines - so the reason says what it is instead of pretending
+ * it is a refund refusal. The `ruleId` marks it R-12 so compose can tell the
+ * two sentences apart.
+ */
+function splitReviewBlocked(input: ResolveInput, split: LineSplit): BlockedItem[] {
+  if (!split.active || split.reviewIds.length === 0) {
+    return [];
+  }
+  const review = new Set(split.reviewIds);
+  const fallbackReason = "there is no evidence in your message supporting this line's claim, so a person is checking it";
+  return (input.order?.items ?? [])
+    .filter((item) => review.has(item.id))
+    .map((item) => ({
+      itemId: item.id,
+      name: item.name,
+      priceCents: item.unitPriceCents * item.quantity,
+      ruleId: 'R-12' as const,
+      reason: split.escalateEval?.evidence ?? fallbackReason,
+    }));
+}
+
+/**
+ * The lowest confidence among the lines being paid, when a per-line reading
+ * drove the decision. The whole-message confidence is the model speaking about
+ * the message as a whole; paying a line must not lean on a guess about any
+ * other line.
+ */
+function splitConfidence(input: ResolveInput, split: LineSplit): number | null {
+  if (!split.active || split.approvedIds.length === 0) {
+    return null;
+  }
+  const approved = new Set(split.approvedIds);
+  const claims = input.extraction?.lineClaims ?? [];
+  const line = claims.filter((claim) => approved.has(claim.itemId)).map((claim) => claim.confidence);
+  if (line.length === 0) {
+    return null;
+  }
+  return Math.min(...line);
 }
 
 function stateOf(settled: number, pending: number): 'pending' | 'settled' | 'mixed' {
@@ -219,13 +380,28 @@ function concludingRule(winner: RuleEvaluation | null): RuleEvaluation | null {
 function decidingRule(
   input: ResolveInput,
   evaluations: readonly RuleEvaluation[],
+  split: LineSplit,
 ): RuleEvaluation | null {
   if (input.gateResult.terminal && input.gateResult.decidingRuleId !== null) {
     return (
       evaluations.find((rule) => rule.ruleId === input.gateResult.decidingRuleId) ?? null
     );
   }
-  return precedenceFold(evaluations.filter((rule) => rule.scope === 'order'));
+  const orderWinner = precedenceFold(evaluations.filter((rule) => rule.scope === 'order'));
+  // An order-scoped verdict outranks the per-line split, however it runs. A rule
+  // that passed decided nothing, though, so a split verdict may speak in its place.
+  if (orderWinner !== null && orderWinner.outcome !== 'pass') {
+    return orderWinner;
+  }
+  if (split.active) {
+    if (split.approvedIds.length > 0) {
+      return split.approveEval;
+    }
+    if (split.reviewIds.length > 0) {
+      return split.escalateEval;
+    }
+  }
+  return orderWinner;
 }
 
 function decisionFrom(winner: RuleEvaluation | null): Decision {
@@ -251,6 +427,28 @@ interface Softened {
   readonly applied: boolean;
   /** The audit records for the adjustment, in the order they should read. */
   readonly overrides: OverrideRecord[];
+}
+
+/**
+ * Consult the discretion layer and apply its recommendation - unless the
+ * per-line split already spoke.
+ *
+ * The split *is* the discretion on that claim: every line's fate has already
+ * been decided line by line, and a softening layer that paid the lines R-12
+ * sent for review would be reintroducing, one layer down, the whole-request
+ * payment the split exists to kill. When the split spoke, it speaks last.
+ */
+function softenDecision(
+  baseDecision: Decision,
+  winner: RuleEvaluation | null,
+  evaluations: readonly RuleEvaluation[],
+  input: ResolveInput,
+  split: LineSplit,
+): Softened {
+  if (split.active) {
+    return { decision: baseDecision, partialAmountCents: null, applied: false, overrides: [] };
+  }
+  return applyDiscretion(baseDecision, winner, evaluations, input);
 }
 
 /**
@@ -368,13 +566,22 @@ function discretionDetail(
  * the right thing - money that may leave the till - and the amount a reviewer is
  * looking at is on `eligibleAmountCents` and the trace.
  */
-function amountFor(decision: Decision, input: ResolveInput, partialAmountCents: number | null): number {
-  if (decision === 'approved') {
-    return capToDispute(input);
-  }
-  if (decision === 'partial_refund') {
+function amountFor(
+  decision: Decision,
+  input: ResolveInput,
+  partialAmountCents: number | null,
+  split: LineSplit,
+): number {
+  if (decision === 'approved' || decision === 'partial_refund') {
+    const splitAmount = splitAmountCents(input, split);
+    if (splitAmount !== null) {
+      return splitAmount;
+    }
     const base = capToDispute(input);
-    return partialAmountCents === null ? base : Math.min(partialAmountCents, base);
+    if (decision === 'partial_refund') {
+      return partialAmountCents === null ? base : Math.min(partialAmountCents, base);
+    }
+    return base;
   }
   return 0;
 }
@@ -545,7 +752,6 @@ function reconcile(
   overrides.push(...claimAmountOverride(input, decision, amount));
   overrides.push(...discardedClaimOverride(input, evaluations));
   overrides.push(...unpayableOverride(input, decision));
-  overrides.push(...ungroundingOverrides(input, decision));
   return overrides;
 }
 
@@ -587,16 +793,30 @@ function confidenceGate(
   baseDecision: Decision,
   winner: RuleEvaluation | null,
   input: ResolveInput,
+  split: LineSplit,
 ): { decision: Decision; winner: RuleEvaluation | null; overrides: readonly OverrideRecord[] } {
   const floor = input.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
-  const confidence = input.extraction?.confidence ?? null;
   const paid = baseDecision === 'approved' || baseDecision === 'partial_refund';
 
-  if (confidence === null || !paid || confidence >= floor) {
+  if (!paid) {
     return { decision: baseDecision, winner, overrides: [] };
   }
 
-  return { decision: 'escalated', winner, overrides: [lowConfidenceRecord(input, confidence, floor)] };
+  // Per-line payment is judged per line: the whole-message confidence speaks
+  // about the message as a whole, and paying a line must not lean on a guess
+  // about some other line. No per-line reading, no per-line gate - the message
+  // gate below stands in.
+  const lineConfidence = split.active ? splitConfidence(input, split) : null;
+  const confidence = lineConfidence ?? input.extraction?.confidence ?? null;
+  if (confidence === null || confidence >= floor) {
+    return { decision: baseDecision, winner, overrides: [] };
+  }
+
+  return {
+    decision: 'escalated',
+    winner,
+    overrides: [lowConfidenceRecord(input, confidence, floor)],
+  };
 }
 
 /**
@@ -742,8 +962,12 @@ function unpayableOverride(input: ResolveInput, decision: Decision): OverrideRec
   ];
 }
 
-function ungroundingOverrides(input: ResolveInput, decision: Decision): OverrideRecord[] {
-  if (input.grounding === null || input.grounding.grounded || decision !== 'escalated') {
+function ungroundingOverrides(
+  input: ResolveInput,
+  decision: Decision,
+  split: LineSplit,
+): OverrideRecord[] {
+  if (split.active || input.grounding === null || input.grounding.grounded || decision !== 'escalated') {
     return [];
   }
   return [
@@ -772,16 +996,40 @@ function summarise(
   amount: number,
   discretionApplied: boolean,
   balanceWhy: string | null = null,
+  split: LineSplit = { active: false, approvedIds: [], reviewIds: [], approveEval: null, escalateEval: null },
 ): string {
+  const reviewPart = reviewSentence(input, split);
+  const review = reviewPart === null ? '' : ` ${reviewPart}`;
   if (winner === null) {
     const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
-    return `${VERB[decision]}: no policy rule reached a conclusion, so the request escalated by default. ${amountPart}${balanceWhy === null ? '' : ` ${balanceWhy}`}${discretionPart(discretionApplied)}`;
+    return `${VERB[decision]}: no policy rule reached a conclusion, so the request escalated by default. ${amountPart}${balanceWhy === null ? '' : ` ${balanceWhy}`}${discretionPart(discretionApplied)}${review}`;
   }
   const rulePart = `${winner.ruleId} (${winner.policyRef}): ${winner.evidence}`;
   const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
   const orderPart = input.orderId === null ? '' : ` Order ${input.orderId}.`;
   const balancePart = balanceWhy === null ? '' : ` ${balanceWhy}`;
-  return `${VERB[decision]} under ${rulePart}${orderPart} ${amountPart}${balancePart}${discretionPart(discretionApplied)}`;
+  return `${VERB[decision]} under ${rulePart}${orderPart} ${amountPart}${balancePart}${discretionPart(discretionApplied)}${review}`;
+}
+
+/**
+ * The sentence naming the lines a person is checking, for a decision that paid
+ * part of the claim. Sums the list rather than spelling it out - the lines are
+ * already named in the body that lists what was not paid.
+ */
+function reviewSentence(input: ResolveInput, split: LineSplit): string | null {
+  if (!split.active || split.reviewIds.length === 0) {
+    return null;
+  }
+  let total = 0;
+  for (const item of input.order?.items ?? []) {
+    if (split.reviewIds.includes(item.id)) {
+      total += 1;
+    }
+  }
+  if (total === 0) {
+    return null;
+  }
+  return `${total} line${total === 1 ? '' : 's'} ${total === 1 ? 'is' : 'are'} under review by a member of the team.`;
 }
 
 /** The sentence that says the discretion layer was what changed the outcome. */

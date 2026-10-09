@@ -1,15 +1,17 @@
-import { escalate, pass, type PolicyRule } from '../types.js';
+import { escalate, pass, disputedClaimCents, type PolicyRule } from '../types.js';
 import { ESCALATION_CEILING_CENTS } from '../constants.js';
 import { formatCents } from '../../lib/money.js';
 
 /**
  * R-15 - order total above the manual-review ceiling.
  *
- * A blunt, non-negotiable rule: any order whose total exceeds the configured
- * ceiling must not be decided automatically, regardless of how many items are
- * in the basket or what each one costs. The check fires on the order's own
- * totalCents, before the customer has selected items and before the model is
- * called.
+ * A blunt, non-negotiable rule: a claim whose disputed amount exceeds the
+ * configured ceiling must not be decided automatically. The disputed amount is
+ * the sum of the lines the customer pointed at when they named lines, otherwise
+ * the order's own totalCents - so a $12 mug on a large order is decided like
+ * any small claim, while a claim covering the whole order keeps the ceiling
+ * check on the order total. Both figures are computable from the order facts
+ * alone, before the model is called.
  *
  * The ceiling is supplied via PolicyContext.escalationCeilingCents so the rule
  * stays a pure function of its inputs and the policy path can be tested with
@@ -17,18 +19,24 @@ import { formatCents } from '../../lib/money.js';
  */
 export const R15OrderTotalEscalation: PolicyRule = {
   id: 'R-15',
-  title: 'Order total exceeds manual-review ceiling',
+  title: 'Amount at risk exceeds manual-review ceiling',
   ruleClass: 'risk',
   scope: 'order',
   stage: 'fact_gates',
   policyRef: 'REFUND_POLICY.md §6.5',
-  summary: 'This order requires a person to review it before anything is approved.',
+  summary:
+    'A claim or order above the manual-review ceiling requires a person to review it before anything is approved.',
   evaluate(context) {
-    const total = context.order?.totalCents ?? 0;
+    const disputed = disputedClaimCents(context);
+    const amount = disputed ?? (context.order?.totalCents ?? 0);
     const ceiling = context.escalationCeilingCents ?? ESCALATION_CEILING_CENTS;
-    if (total > ceiling) {
-      return escalate(this, `order total ${formatCents(total)} exceeds the manual-review ceiling`);
+    const basis =
+      disputed !== null
+        ? `claimed items total of ${formatCents(amount)}`
+        : `order total of ${formatCents(amount)}`;
+    if (amount > ceiling) {
+      return escalate(this, `${basis} exceeds the manual-review ceiling`);
     }
-    return pass(this, `order total ${formatCents(total)} is within the manual-review ceiling`);
+    return pass(this, `${basis} is within the manual-review ceiling`);
   },
 };

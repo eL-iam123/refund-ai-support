@@ -200,16 +200,14 @@ function ShopRoute(): ReactNode {
   // stale the moment a line is removed elsewhere.
   const lines = useSyncExternalStore(subscribeToCart, cartLines);
   return (
-    <div className="stack">
+    <div className="stack shop-home">
       <section className="shop-hero">
         <div>
-          <p className="eyebrow">Official storefront</p>
-          <h1>Good things, clearly priced.</h1>
-          <p className="lede">Shop practical finds, then manage every order from one simple account.</p>
+          <h1>Store.com</h1>
+          <p className="lede">Whatever it is you are looking for we have it.</p>
         </div>
-        <div className="hero-stat"><strong>6</strong><span>items ready to ship</span></div>
       </section>
-      <div className="section-heading"><div><p className="eyebrow">Featured catalogue</p><h2>Popular right now</h2></div><span className="muted small">Delivery options shown at checkout</span></div>
+      <div className="section-heading"><h2>Shop products</h2><span className="muted small">Delivery options shown at checkout</span></div>
       {error !== null ? <p className="error">{error}</p> : null}
       {loading ? <Spinner /> : <Catalogue products={products} onAdd={addToCart} inCart={quantityIn(lines)} />}
     </div>

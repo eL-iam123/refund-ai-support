@@ -396,6 +396,80 @@ describe('the live takeover console', () => {
     expect(second.json<{ request: { decision: { decision: string } } }>().request.decision.decision).toBe('escalated');
   });
 
+  it('gives a second order its own takeover instead of dropping its escalation, scoped to that thread only', async () => {
+    harness = await appHarness();
+    seedShop(harness.db, TEST_NOW);
+    const app = harness.app;
+    const session = await signIn(harness, 'sam@shop.demo');
+
+    const first = await session.send(session.orderId, 'The charger never arrived and I want my money back');
+    expect(first.decision).toBe('escalated');
+
+    const checkout = await app.inject({
+      method: 'POST',
+      url: '/api/shop/checkout',
+      headers: { cookie: cookiesOf(session) },
+      payload: { lines: [{ productId: 'PRD-MUG-01', quantity: 1 }] },
+    });
+    expect(checkout.statusCode).toBe(201);
+    const secondOrderId = checkout.json<{ order: { id: string } }>().order.id;
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        customerId: session.customerId,
+        orderId: secondOrderId,
+        message: 'The mug never arrived and I want my money back.',
+      },
+    });
+    expect(second.statusCode).toBe(201);
+
+    // Both escalations now have a live takeover. The second is no longer dropped:
+    // this is the exact race that used to return null for it.
+    const queue = await app.inject({
+      method: 'GET',
+      url: '/api/staff/conversations',
+      headers: { authorization: agent() },
+    });
+    const conversations = queue.json<{
+      conversations: readonly {
+        orderId: string | null;
+        activeHandoff: { id: string; unattended: boolean } | null;
+      }[];
+    }>().conversations;
+    const firstRow = conversations.find((row) => row.orderId === session.orderId);
+    const secondRow = conversations.find((row) => row.orderId === secondOrderId);
+    expect(firstRow?.activeHandoff?.unattended).toBe(true);
+    expect(secondRow?.activeHandoff?.unattended).toBe(true);
+
+    // Claiming the first order leaves the second's marker waiting for its own
+    // person, and does not light up the second order's thread for the customer.
+    const secondThreadBefore = await customerThread(harness, session, secondOrderId);
+    const secondNoticesBefore = secondThreadBefore.filter((turn) => turn.kind === 'handoff').length;
+
+    const claimed = await app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${session.customerId}/take-over`,
+      headers: { authorization: agent() },
+      payload: { orderId: session.orderId },
+    });
+    expect(claimed.statusCode).toBe(200);
+
+    const claimedAgain = await app.inject({
+      method: 'POST',
+      url: `/api/staff/conversations/${session.customerId}/take-over`,
+      headers: { authorization: agent() },
+      payload: { orderId: secondOrderId },
+    });
+    // Different order, so not the same-case 409: its own takeover is claimable.
+    expect(claimedAgain.statusCode).toBe(200);
+
+    const secondThreadAfter = await customerThread(harness, session, secondOrderId);
+    const secondNoticesAfter = secondThreadAfter.filter((turn) => turn.kind === 'handoff').length;
+    expect(secondNoticesAfter).toBe(secondNoticesBefore);
+  });
+
   it('briefs a person two agents cannot race for: the second takeover loses', async () => {
     harness = await appHarness();
     seedShop(harness.db, TEST_NOW);
@@ -468,7 +542,7 @@ describe('the live takeover console', () => {
     expect(beforeBrief.unattended).toBe(true);
 
     // Nobody has claimed it, so the customer gets an answer instead of silence.
-    const answered = await session.send(session.orderId, 'I would like to return this item.');
+    const answered = await session.send(session.orderId, 'I would like to return this item for a refund.');
     expect(answered.handedOver).toBe(false);
     expect(answered.decision).toBe('escalated');
 

@@ -1,5 +1,5 @@
 import type { Db } from '../db/connection.js';
-import { activeHandoffForCustomer, type ActiveHandoff } from '../db/handoffs.js';
+import { liveHandoffForThread, type ActiveHandoff } from '../db/handoffs.js';
 import { latestRequestForThread } from '../db/requestRepository.js';
 import type { PersistedRequest } from '../db/records.js';
 import { threadForStaff, type ChatTurn } from '../retrieval/conversation.js';
@@ -28,6 +28,8 @@ export interface HandoffBrief {
   readonly customerId: string;
   readonly customerName: string;
   readonly orderId: string | null;
+  /** The newest decided request on the thread, used to key the console's actions. */
+  readonly requestId: string | null;
   /** Who is on the line, when a takeover is live. */
   readonly agentId: string | null;
   /**
@@ -109,7 +111,7 @@ function decision(
 }
 
 export function buildHandoffBrief(db: Db, customerId: string, orderId: string | null): HandoffBrief {
-  const active = activeHandoffForCustomer(db, customerId);
+  const active = liveHandoffForThread(db, customerId, orderId);
   const closure = chatClosureForThread(db, customerId, orderId);
   const conversation = collectCase(threadForStaff(db, customerId, orderId, 200));
   const latest = latestRequestForThread(db, customerId, orderId);
@@ -118,6 +120,7 @@ export function buildHandoffBrief(db: Db, customerId: string, orderId: string | 
   return {
     customerId,
     orderId,
+    requestId: latest?.id ?? null,
     ...identity(db, customerId, active, closure),
     canCloseChat: closure === null && finalizedRequestId(db, customerId, orderId) !== null,
     handoffReason: handoffReasonFor(active, latest),

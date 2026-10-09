@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { RefundDecision, RuleId } from '@refund/shared';
 import { isAttachmentOnly, isFrustrated, acknowledgementFor } from '../response/acknowledge.js';
 import { openMemoryDatabase } from '../db/connection.js';
 import { seedDatabase } from '../db/seed.js';
@@ -95,6 +96,85 @@ describe('the acknowledgement', () => {
 
   it('is empty for an ordinary complaint', () => {
     expect(acknowledgementFor(APPROVED)).toBe('');
+  });
+});
+
+describe('escalation messages differ by reason', () => {
+  // Every rule that can escalate, plus the no-rule-concluded fallback. Adding a
+  // rule here without a message is the test failing open: extend the list and
+  // the tables together.
+  const RULE_IDS: readonly RuleId[] = [
+    'R-01', 'R-01b', 'R-02', 'R-03', 'R-03b', 'R-04', 'R-05', 'R-06',
+    'R-06b', 'R-07', 'R-08', 'R-09', 'R-10', 'R-11', 'R-12', 'R-13',
+    'R-14', 'R-15',
+  ];
+
+  function escalatedText(ruleId: RuleId | null): string {
+    const decision: RefundDecision = {
+      decision: 'escalated',
+      refundAmountCents: 0,
+      eligibleAmountCents: 0,
+      currency: 'USD',
+      summary: '',
+      policyRef: 'REFUND_POLICY.md §5',
+      trace:
+        ruleId === null
+          ? []
+          : [
+              {
+                ruleId,
+                ruleClass: 'approval-authority',
+                scope: 'order',
+                outcome: 'escalate',
+                evidence: 'test escalation',
+                policyRef: 'REFUND_POLICY.md §5',
+                itemIds: [],
+              },
+            ],
+      overrides: [],
+      eligibleItemIds: [],
+      refundItemIds: [],
+      blockedItems: [],
+      outstandingAmountCents: 0,
+      outstandingState: 'none',
+    };
+    return composeDeterministicResponse(decision, null, APPROVED);
+  }
+
+  it('gives every escalation its own message', () => {
+    const texts = [...RULE_IDS.map(escalatedText), escalatedText(null)];
+    for (const text of texts) {
+      // The shared skeleton every escalation keeps: the wait, the why, the close.
+      expect(text).toContain('because');
+      expect(text).toContain('one business day');
+      expect(text).toContain('Nothing further is needed from you.');
+      // No policy internals in a customer's inbox.
+      expect(text).not.toMatch(/R-\d\d|REFUND_POLICY|§/);
+    }
+    // Sibling rules share a cause but never a message: same template, different words.
+    expect(new Set(texts).size).toBe(texts.length);
+  });
+
+  it('stays honest when no rule concluded', () => {
+    const text = escalatedText(null);
+    expect(text).toContain('it needs a person to decide rather than a rule.');
+    expect(text).toContain('They will read the case from the start and reply here.');
+  });
+
+  it('names the dispute without accusing on a history escalation', () => {
+    const chargeback = escalatedText('R-07');
+    expect(chargeback).toContain('open payment dispute');
+    expect(chargeback).not.toMatch(/fraud|abuse|chargeback/i);
+    const abuse = escalatedText('R-08');
+    expect(abuse).toContain('earlier requests');
+    expect(abuse).not.toMatch(/fraud|abuse/i);
+    expect(chargeback).not.toBe(abuse);
+  });
+
+  it('covers the order-total ceiling instead of the generic fallback', () => {
+    const text = escalatedText('R-15');
+    expect(text).toContain('the total on this case is above what we can decide on our own.');
+    expect(text).not.toContain('it needs a person to decide rather than a rule.');
   });
 });
 
@@ -249,6 +329,7 @@ describe('a denial that is really about the balance', () => {
     trace: [],
     overrides: [],
     eligibleItemIds: [],
+    refundItemIds: [],
     blockedItems: [],
   };
   const order = { id: 'ORD-1001' } as OrderRecord;

@@ -78,6 +78,7 @@ export function runFactGates(
 
   const gateContext: PolicyContext = {
     ...context,
+    ...(claimedItemIds.length > 0 ? { claimedItemIds } : {}),
     db: context.db,
     eligibleItems,
     blockedItems,

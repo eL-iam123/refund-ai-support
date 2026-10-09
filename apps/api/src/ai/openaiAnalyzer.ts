@@ -5,8 +5,8 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom } from './breaker.js';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildCaseSummaryUser, buildIntakeUser, buildShopUser, buildGeneralUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, CHAT_SYSTEM_PROMPT, GENERAL_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM, SHOP_SYSTEM } from './prompts.js';
-import { CaseSummarySchema, IntakeOutputSchema, PhraseReplySchema, ShopSuggestionSchema, type IntakeOutput } from './schemas.js';
+import { buildCaseSummaryUser, buildIntakeUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM } from './prompts.js';
+import { IntakeOutputSchema, PhraseReplySchema, parseCaseNote, type IntakeOutput } from './schemas.js';
 import type { AttemptOutcome } from './breaker.js';
 import { parseJson } from './json.js';
 import {
@@ -17,12 +17,7 @@ import {
   type IntakeReply,
   type AnalyzerOrder,
   type AttemptObserver,
-  type ChatInput,
-  type ChatReply,
-  type ConverseInput,
   type PhraseInput,
-  type ShopInput,
-  type ShopSuggestion,
 } from './analyzer.js';
 import type { OrderRecord } from '../db/records.js';
 
@@ -74,15 +69,6 @@ const CASE_SUMMARY_TOKENS = 220;
 /** A chat answer is a few sentences. Longer is not friendlier, only slower. */
 const GENERAL_TOKENS = 300;
 
-/**
- * The documented "nothing worth adding".
- *
- * A model told it may reply with this will sometimes do so, and storing it verbatim
- * would put a placeholder in every case file as though it were a real observation.
- */
-function isNothingToAdd(text: string): boolean {
-  return text.toLowerCase() === 'nothing further to add.';
-}
 /** A failure message is for a human reading a drawer, not a log archive. */
 const MAX_ERROR_LENGTH = 500;
 
@@ -290,63 +276,6 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     );
   }
 
-  /**
-   * Shopping nomination: which catalogue ids match, or null.
-   *
-   * One pass, no repair: keyword search is the repair. A nomination that
-   * fails validation is discarded and the caller answers from the FTS index,
-   * which is why this returns null instead of throwing - a missing suggestion
-   * must never fail a conversation.
-   */
-  async suggestProducts(input: ShopInput, observer: AttemptObserver): Promise<ShopSuggestion | null> {
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const user = buildShopUser(input.message, input.products, input.history);
-    let completion;
-    try {
-      completion = await this.complete(SHOP_SYSTEM, user, budget, observer, 'shop');
-    } catch {
-      return null;
-    }
-    const parsed = ShopSuggestionSchema.safeParse(parseJson(completion.text));
-    if (!parsed.success) {
-      observer({
-        model: completion.model,
-        attempt: 1,
-        ok: false,
-        latencyMs: 0,
-        promptTokens: completion.promptTokens,
-        completionTokens: completion.completionTokens,
-        error: 'shop suggestion rejected by validation',
-      });
-      return null;
-    }
-    return { productIds: parsed.data.productIds, model: completion.model };
-  }
-
-  /**
-   * General conversation: small talk, help, and abstract policy questions.
-   *
-   * Prose, not a tool call: the answer is sentences, and the caller validates
-   * them before anyone reads them. One candidate walk like everything else;
-   * every failure path returns null, because a missing sentence must never
-   * fail a conversation.
-   */
-  async converse(input: ConverseInput, observer: AttemptObserver): Promise<string | null> {
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const user = buildGeneralUser(input.message, input.products, input.policy, input.history, input.style);
-    const result = await runCandidates<string>({
-      candidates: this.candidates,
-      maxAttempts: this.env.AI_MAX_ATTEMPTS,
-      breaker: this.breaker,
-      budget,
-      purpose: 'general',
-      attempt: async (model, attempt) => this.converseAttempt(model, attempt, user, budget, observer),
-    });
-    if (!result.ok) {
-      return null;
-    }
-    return result.value;
-  }
 
   /**
    * Phrases a decided outcome into customer-facing prose.
@@ -421,48 +350,6 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     }
   }
 
-  private async converseAttempt(
-    model: string,
-    attempt: number,
-    user: string,
-    budget: AbortSignal,
-    observer: AttemptObserver,
-  ): Promise<AttemptOutcome<string>> {
-    const startedAt = Date.now();
-    try {
-      const completion = await this.createCompletion(
-        {
-          model,
-          temperature: 0.7,
-          max_tokens: Math.min(this.env.AI_MAX_TOKENS, GENERAL_TOKENS),
-          messages: [
-            { role: 'system', content: GENERAL_SYSTEM },
-            { role: 'user', content: user },
-          ],
-        },
-        budget,
-      );
-      const text = firstMessage(completion).trim();
-      if (text.length === 0) {
-        return { ok: false, error: 'general reply was empty', retryable: false };
-      }
-      const usage = readUsage(completion.usage);
-      observer({ model, attempt, ok: true, latencyMs: Date.now() - startedAt, ...usage, error: null });
-      return { ok: true, value: text };
-    } catch (error: unknown) {
-      const failure = classifyProviderFailure(error);
-      observer({
-        model,
-        attempt,
-        ok: false,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: null,
-        completionTokens: null,
-        error: failure.error,
-      });
-      return { ok: false, ...failure };
-    }
-  }
 
   /**
    * The case note, in one call, or null.
@@ -494,8 +381,8 @@ export class OpenAiAnalyzer implements AIAnalyzer {
         budget,
       );
       const text = firstMessage(completion);
-      const parsed = CaseSummarySchema.safeParse(text);
-      if (!parsed.success || isNothingToAdd(parsed.data)) {
+      const note = parseCaseNote(text, input.outcome.amountCents);
+      if (note === null) {
         observer({
           model: completion.model, attempt: 1, ok: false, latencyMs: Date.now() - startedAt,
           promptTokens: null, completionTokens: null, error: 'case summary rejected by validation',
@@ -506,7 +393,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
         model: completion.model, attempt: 1, ok: true, latencyMs: Date.now() - startedAt,
         promptTokens: null, completionTokens: null, error: null,
       });
-      return parsed.data;
+      return note;
     } catch (error: unknown) {
       const failure = classifyProviderFailure(error);
       observer({
@@ -647,116 +534,8 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     }
   }
 
-  async chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
-    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
-    const result = await runCandidates<ChatReply>({
-      candidates: this.candidates,
-      maxAttempts: this.env.AI_MAX_ATTEMPTS,
-      breaker: this.breaker,
-      budget,
-      purpose: 'chat',
-      attempt: async (model, attempt) => this.chatAttempt(model, attempt, input, budget, observer),
-    });
-    if (!result.ok) {
-      throw unavailableFrom(result);
-    }
-    return result.value;
-  }
-
-  private async chatAttempt(
-    model: string,
-    attempt: number,
-    input: ChatInput,
-    budget: AbortSignal,
-    observer: AttemptObserver,
-  ): Promise<AttemptOutcome<ChatReply>> {
-    const startedAt = Date.now();
-    try {
-      const completion = await this.client.chat.completions.create(
-        {
-          model,
-          temperature: 0.7,
-          max_tokens: this.env.AI_MAX_TOKENS,
-          messages: chatMessages(input),
-          ...(input.tools.length > 0 ? { tools: [REMIND_FUNCTION], tool_choice: 'auto' as const } : {}),
-        },
-        { signal: budget },
-      );
-
-      const answer = chatAnswer(completion, model);
-      if (answer === null) {
-        // A reply with neither text nor a tool call is the empty-completion case
-        // again, in chat clothing. Non-retryable for the same reason: the model has
-        // answered, and its answer was nothing.
-        return { ok: false, error: 'chat reply carried no text and no tool call', retryable: false };
-      }
-
-      observer({
-        model,
-        attempt,
-        ok: true,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: null,
-        completionTokens: null,
-        error: null,
-      });
-      return { ok: true, value: answer };
-    } catch (error: unknown) {
-      const failure = classifyProviderFailure(error);
-      observer({
-        model,
-        attempt,
-        ok: false,
-        latencyMs: Date.now() - startedAt,
-        promptTokens: null,
-        completionTokens: null,
-        error: failure.error,
-      });
-      return { ok: false, ...failure };
-    }
-  }
 }
 
-/** The chat-mode tool declaration, in OpenAI function-calling shape. */
-const REMIND_FUNCTION = {
-  type: 'function' as const,
-  function: {
-    name: 'remind_admin',
-    description: 'Notify the human agent that the customer is waiting or pushing for a response.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
-  },
-};
-
-function chatMessages(input: ChatInput): { role: 'system' | 'user'; content: string }[] {
-  const historyText = input.history.map((line) => `${line.role}: ${line.text}`).join('\n');
-  const toolText = input.tools.map((t) => t.name).join(', ');
-  return [
-    { role: 'system', content: CHAT_SYSTEM_PROMPT },
-    {
-      role: 'user',
-      content: `Customer message: ${input.message}\n\nConversation history:\n${historyText}\n\nAvailable tools: ${toolText}`,
-    },
-  ];
-}
-
-/**
- * Reads the turn's answer off the completion: a `remind_admin` tool call if the
- * model reached for one, otherwise its prose. Null means the model said nothing
- * usable, which is a miss worth another attempt rather than a reply to send.
- */
-function chatAnswer(
-  completion: OpenAI.Chat.Completions.ChatCompletion,
-  model: string,
-): ChatReply | null {
-  const message = completion.choices[0]?.message;
-  const toolCall = message?.tool_calls?.[0];
-  if (toolCall !== undefined && 'function' in toolCall && toolCall.function.name === 'remind_admin') {
-    return { kind: 'tool_call', tool: 'remind_admin', model };
-  }
-
-  const text = message?.content ?? '';
-  return text.trim().length === 0 ? null : { kind: 'text', text, model };
-}
 
 /**
  * The validated wire object as an `IntakeReply`.

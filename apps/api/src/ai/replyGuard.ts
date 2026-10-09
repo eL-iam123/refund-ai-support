@@ -1,35 +1,6 @@
 import type { PhraseEnvelope } from './analyzer.js';
 
-/**
- * What a conversational reply may not say.
- *
- * The general model is prompted with prohibitions, but prompts are advice and
- * this is the enforcement: a reply that states an outcome, names a figure, or
- * claims knowledge of the customer's orders is discarded and the caller
- * answers deterministically instead. The check is deliberately lexical and
- * strict - a false rejection costs one canned sentence, while a false
- * acceptance puts an approval-looking claim in front of a customer that the
- * policy never made.
- *
- * Bare policy nouns stay legal on purpose: an answer explaining the exchange
- * policy has to be allowed the word "exchange". What is forbidden is outcome
- * language (approved, paid), figures, and anything addressed to *their* case.
- */
-
-const FORBIDDEN_OUTCOME: readonly RegExp[] = [
-  /\bapprov\w*\b/i,
-  /\bden(y|ied)\b/i,
-  /\bescalat\w*\b/i,
-  /\bpaid\b/i,
-  /\bwill be (refunded|paid|approved)\b/i,
-  /\bon (its|the) way\b/i,
-  /\bwe (approved|denied|refunded|will refund|have issued)\b/i,
-  /\byour (refund|exchange|return|claim|payment)\b/i,
-  /\bpartial_refund\b/i,
-  /[$€£]\s?\d/,
-  /\b\d+\s?(dollars|cents|usd|eur)\b/i,
-];
-
+/** Order facts no reply may invent beyond what the envelope names. */
 const FORBIDDEN_FACTS: readonly RegExp[] = [
   /\border\b[^.?!]{0,30}\b(shipped|delivered|arrived|processing|placed)\b/i,
   /\btracking (number|id|code)\b/i,
@@ -37,14 +8,6 @@ const FORBIDDEN_FACTS: readonly RegExp[] = [
   /\bi (checked|looked|can see|found) (your|the) (order|account)\b/i,
   /\bwill (arrive|ship|be delivered) (on|by|tomorrow|today|monday|tuesday|wednesday|thursday|friday)\b/i,
 ];
-
-/** True when the reply stays inside the conversational contract. */
-export function isSafeGeneralReply(text: string): boolean {
-  if (text.trim().length === 0) {
-    return false;
-  }
-  return ![...FORBIDDEN_OUTCOME, ...FORBIDDEN_FACTS].some((pattern) => pattern.test(text));
-}
 
 /**
  * Whether a phrased decision reply states exactly its envelope.

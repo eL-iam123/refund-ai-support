@@ -1,6 +1,7 @@
 import { useSyncExternalStore, type ReactNode } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import {
+  ClipboardCheck,
   FileText,
   Headset,
   Inbox,
@@ -52,7 +53,7 @@ export function ShopperLayout(): ReactNode {
           <Search size={18} aria-hidden="true" />
           <span>What are you looking for?</span>
         </div>
-        <nav>
+        <nav aria-label="Shop navigation">
           <NavLink to="/"><ShoppingBag size={18} aria-hidden="true" /><span>Shop</span></NavLink>
           <NavLink to="/orders"><Package size={18} aria-hidden="true" /><span>Orders</span></NavLink>
           <NavLink to="/help"><MessageSquare size={18} aria-hidden="true" /><span>Help</span></NavLink>
@@ -63,11 +64,6 @@ export function ShopperLayout(): ReactNode {
       <main className="main">
         <Outlet />
       </main>
-      <footer className="footer">
-        <p className="muted small">
-          A demo storefront. Every order here is real, in the same database the refund policy reads.
-        </p>
-      </footer>
     </div>
   );
 }
@@ -84,13 +80,14 @@ export function AdminLayout(): ReactNode {
             <small>operations</small>
           </div>
         </div>
-        <nav>
-          <NavLink to="/admin" end><LayoutDashboard size={16} /> Overview</NavLink>
-          <NavLink to="/admin/live"><Headset size={16} /> Live</NavLink>
-          <NavLink to="/admin/refunds"><Wallet size={16} /> Payouts</NavLink>
-          <NavLink to="/admin/returns"><Package size={16} /> Returns</NavLink>
-          <NavLink to="/admin/requests"><Inbox size={16} /> All requests</NavLink>
-          <NavLink to="/admin/policy"><FileText size={16} /> Policy</NavLink>
+        <nav aria-label="Staff navigation">
+          <NavLink to="/admin" end><LayoutDashboard size={16} aria-hidden="true" /> Overview</NavLink>
+          <NavLink to="/admin/live"><Headset size={16} aria-hidden="true" /> Live</NavLink>
+          <NavLink to="/admin/refunds"><Wallet size={16} aria-hidden="true" /> Payouts</NavLink>
+          <NavLink to="/admin/returns"><Package size={16} aria-hidden="true" /> Returns</NavLink>
+          <NavLink to="/admin/requests"><Inbox size={16} aria-hidden="true" /> All requests</NavLink>
+          <NavLink to="/admin/scenarios"><ClipboardCheck size={16} aria-hidden="true" /> Scenarios</NavLink>
+          <NavLink to="/admin/policy"><FileText size={16} aria-hidden="true" /> Policy</NavLink>
           {signedIn ? (
             <button type="button" className="linkish" onClick={() => void signOut()}>
               <LogOut size={16} /> Sign out

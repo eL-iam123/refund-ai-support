@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import { Bot, FileText, Headset, Inbox, MessageSquare, Send, User, Scale, ShieldAlert } from 'lucide-react';
 import { AWAITING_AGENT_ID, type Decision, type RuleOutcome } from '@refund/shared';
 import {
   api,
   describe,
+  type ExchangeDto,
   type HandoffBrief,
   type StaffConversation,
+  type StaffOrderLineDto,
   type StaffThreadTurn,
 } from './api';
 import { formatCents, formatTime } from './format';
@@ -68,14 +71,11 @@ export function LiveConversationsPage(): ReactNode {
   };
 
   return (
-    <div className="admin-page">
-      {/*
-        No visible page heading. The topbar already shows "Live" as the active
-        nav item, so a second one said it again and cost a whole row. The
-        guidance it carried moved to the empty state, where an agent actually
-        needs it, and the heading stays in the document for screen readers.
-      */}
-      <h1 className="sr-only">Live</h1>
+    <div className="admin-page live-page">
+      <header className="live-page-heading">
+        <h1>Live conversations</h1>
+        <Link to="/admin/requests">View all request history <span aria-hidden="true">↗</span></Link>
+      </header>
       <div className="live-layout">
         <AnalyticsStrip analytics={analytics} />
 <Rail
@@ -250,7 +250,6 @@ function ConsoleBody({
   // the page from it.
   return (
     <>
-      <CaseBrief brief={detail.brief} />
       <TakeoverConsole
         key={conversationKey(conversation)}
         conversation={conversation}
@@ -261,6 +260,8 @@ function ConsoleBody({
         onForkOnly={onForkOnly}
         onChanged={onChanged}
       />
+      <CaseBrief brief={detail.brief} />
+      <ActionsPanel brief={detail.brief} />
     </>
   );
 }
@@ -540,7 +541,7 @@ function TakeoverConsole({
         brief={brief}
         takenOver={takenOver}
         onTakeOver={() => void run(() => api.staffTakeOver(conversation.customerId, conversation.orderId))}
-        onHandBack={() => void run(() => api.staffHandBack(conversation.customerId))}
+        onHandBack={() => void run(() => api.staffHandBack(conversation.customerId, conversation.orderId))}
         onClose={() => void run(() => api.staffCloseChat(conversation.customerId, conversation.orderId))}
       />
       {errand.length > 0 ? <p className="error">{errand}</p> : null}
@@ -549,7 +550,7 @@ function TakeoverConsole({
           <ForkViewToggle scope={forkScope} forkOnly={forkOnly} onForkOnly={onForkOnly} />
         ) : null}
         <ThreadView thread={thread} />
-        {takenOver ? <Composer customerId={conversation.customerId} onSent={onChanged} /> : null}
+        {takenOver ? <Composer customerId={conversation.customerId} orderId={conversation.orderId} onSent={onChanged} /> : null}
       </div>
     </div>
   );
@@ -695,6 +696,355 @@ function CaseBrief({ brief }: { brief: HandoffBrief }): ReactNode {
         </div>
       </div>
     </details>
+  );
+}
+
+/**
+ * The building verbs: what the agent on a case can do to the goods behind it.
+ *
+ * A return is goods travelling back, an exchange is goods coming back and a
+ * replacement going out, and a full refund is money reserved against the decided
+ * request. They are offered here, beside the case file, from the brief's own ids
+ * and a single order read - the ledgers confirm the rest server-side, and
+ * nothing this panel does pays the customer: every outcome still has a person
+ * between it and the purse.
+ */
+function ActionsPanel({ brief }: { brief: HandoffBrief }): ReactNode {
+  const customerId = brief.customerId;
+  const orderId = brief.orderId;
+  const order = useAsyncData(
+    () => (orderId === null ? Promise.resolve(null) : api.staffOrder(customerId, orderId)),
+    [customerId, orderId],
+  );
+  const existing = useAsyncData(
+    () =>
+      orderId === null
+        ? Promise.resolve({ exchanges: [] as readonly ExchangeDto[] })
+        : api.listStaffExchanges({ orderId, customerId }),
+    [customerId, orderId],
+  );
+
+  if (orderId === null) {
+    return (
+      <ActionsShell note="none enabled">
+        <p className="muted small">No order on this case, so there is nothing to open a return, exchange or refund against.</p>
+      </ActionsShell>
+    );
+  }
+  if (order.error !== null) {
+    return (
+      <ActionsShell note="unavailable">
+        <p className="error">{order.error}</p>
+      </ActionsShell>
+    );
+  }
+  if (order.data === null) {
+    return (
+      <ActionsShell note="loading">
+        <Spinner />
+      </ActionsShell>
+    );
+  }
+
+  return (
+    <ActionsShell note="return · exchange · refund">
+      {existing.data !== null && existing.data.exchanges.length > 0 ? (
+        <ExchangeStatusRow exchanges={existing.data.exchanges} />
+      ) : null}
+      <FullRefundAction brief={brief} totalCents={order.data.order.totalCents} />
+      <ActionsForm brief={brief} orderId={orderId} items={order.data.order.items} />
+    </ActionsShell>
+  );
+}
+
+/** The folding panel every state of the actions console shares. */
+function ActionsShell({ note, children }: { note: string; children: ReactNode }): ReactNode {
+  return (
+    <details className="live-panel case-brief">
+      <summary className="rail-tab">
+        <span className="rail-tab-title">
+          <Scale size={14} aria-hidden="true" /> Actions
+        </span>
+        <span className="rail-tab-note">{note}</span>
+      </summary>
+      <div className="panel-body">{children}</div>
+    </details>
+  );
+}
+
+/** Any exchange already moving on this order, so the agent does not open a second one. */
+function ExchangeStatusRow({ exchanges }: { exchanges: readonly ExchangeDto[] }): ReactNode {
+  return (
+    <section className="actions-block">
+      <h4>Exchange in motion</h4>
+      <ul className="action-lines">
+        {exchanges.map((exchange) => (
+          <li key={exchange.id}>
+            <span className="chip">{exchange.status}</span>
+            {exchange.labelUrl !== null ? <span className="muted small">label ready</span> : null}
+            {exchange.trackingNumber !== null ? <span className="muted small">tracking {exchange.trackingNumber}</span> : null}
+            {exchange.replacementSentAt !== null ? <span className="muted small">replacement sent</span> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * The money verb. Approving is deciding the refund is owed; this reserves an
+ * amount against the decided request so the purse can act. The reservation
+ * lands in `pending_verification` and a person still checks it - the console
+ * never reaches the purse on its own.
+ */
+function FullRefundAction({ brief, totalCents }: { brief: HandoffBrief; totalCents: number }): ReactNode {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+  const requestId = brief.requestId;
+
+  const run = async (): Promise<void> => {
+    if (requestId === null) return;
+    setBusy(true);
+    setError('');
+    setNotice(null);
+    try {
+      const { refund } = await api.authoriseFullRefund(requestId);
+      setNotice(`${formatCents(refund.amountCents)} reserved on ${refund.id} · ${refund.status}, awaiting a person to check`);
+    } catch (cause: unknown) {
+      setError(describe(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="actions-block">
+      <h4>Full refund</h4>
+      {requestId === null ? (
+        <p className="muted small">No decided request on this case, so there is nothing to reserve money against.</p>
+      ) : (
+        <>
+          <button type="button" className="chip chip-active" disabled={busy} onClick={() => void run()}>
+            {busy ? 'Reserving…' : `Reserve full refund · ${formatCents(totalCents)}`}
+          </button>
+          <p className="muted small">Creates a pending_verification reservation for the whole order; a person still checks it before payment.</p>
+        </>
+      )}
+      {error.length > 0 ? <p className="error">{error}</p> : null}
+      {notice !== null ? <p className="ok-note">{notice}</p> : null}
+    </section>
+  );
+}
+
+/** Toggle an order line into or out of the build, carrying its quantity with it. */
+function toggleSelection(prev: Readonly<Record<string, number>>, id: string): Record<string, number> {
+  const next = { ...prev };
+  if ((next[id] ?? 0) > 0) {
+    delete next[id];
+  } else {
+    next[id] = 1;
+  }
+  return next;
+}
+
+/** Clamp a line's quantity to a sane entry range; the order's own cap is enforced server-side. */
+function rewriteQuantity(
+  prev: Readonly<Record<string, number>>,
+  id: string,
+  quantity: number,
+): Record<string, number> {
+  return { ...prev, [id]: Math.max(1, Math.min(99, quantity)) };
+}
+
+/**
+ * The goods verbs, as one picker: a return and an exchange differ in what
+ * happens after the parcel comes back, so the agent chooses the lines first and
+ * the kind second.
+ */
+function ActionsForm({
+  brief,
+  orderId,
+  items,
+}: {
+  brief: HandoffBrief;
+  orderId: string;
+  items: readonly StaffOrderLineDto[];
+}): ReactNode {
+  const [mode, setMode] = useState<'return' | 'exchange'>('exchange');
+  const [chosen, setChosen] = useState<Readonly<Record<string, number>>>({});
+  const [reason, setReason] = useState('');
+  const [replacementNote, setReplacementNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const toggleLine = (id: string): void => setChosen((prev) => toggleSelection(prev, id));
+  const setQuantity = (id: string, quantity: number): void => setChosen((prev) => rewriteQuantity(prev, id, quantity));
+
+  const selectedLines = items
+    .filter((line) => (chosen[line.id] ?? 0) > 0)
+    .map((line) => ({ itemId: line.id, quantity: chosen[line.id] ?? 1 }));
+  const reasoning = reason.trim();
+  const canSubmit = !busy && selectedLines.length > 0 && reasoning.length > 0;
+  const body = { orderId, customerId: brief.customerId, items: selectedLines, reason: reasoning };
+  const reasonRequired = reasoning.length === 0;
+
+  const submit = (): void => {
+    setBusy(true);
+    setError('');
+    setNotice(null);
+    void openBuild(mode, body, brief.requestId, replacementNote)
+      .then(setNotice)
+      .catch((cause: unknown) => setError(describe(cause)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <section className="actions-block">
+      <h4>Return or exchange</h4>
+      <KindToggle mode={mode} onMode={setMode} />
+      <LinePicker items={items} chosen={chosen} onToggle={toggleLine} onQuantity={setQuantity} />
+      <BuildFields
+        mode={mode}
+        reason={reason}
+        replacementNote={replacementNote}
+        reasonHint={reasonRequired && selectedLines.length > 0}
+        onReason={setReason}
+        onReplacementNote={setReplacementNote}
+      />
+      <button type="button" className="chip chip-active" disabled={!canSubmit} onClick={submit}>
+        {busy ? 'Opening…' : 'Open'}
+      </button>
+      {error.length > 0 ? <p className="error">{error}</p> : null}
+      {notice !== null ? <p className="ok-note">{notice}</p> : null}
+    </section>
+  );
+}
+
+/** The two free-text fields; the replacement note exists only for the exchange. */
+function BuildFields({
+  mode,
+  reason,
+  reasonHint,
+  replacementNote,
+  onReason,
+  onReplacementNote,
+}: {
+  mode: 'return' | 'exchange';
+  reason: string;
+  reasonHint: boolean;
+  replacementNote: string;
+  onReason: (value: string) => void;
+  onReplacementNote: (value: string) => void;
+}): ReactNode {
+  return (
+    <>
+      <label className="actions-field">
+        Reason
+        <textarea value={reason} onChange={(event) => onReason(event.target.value)} placeholder={`Why this ${mode}? Shown on the case file.`} />
+        {reasonHint ? <span className="muted small">Say why, so the file shows the intent.</span> : null}
+      </label>
+      {mode === 'exchange' ? (
+        <label className="actions-field">
+          Note on the replacement
+          <input value={replacementNote} onChange={(event) => onReplacementNote(event.target.value)} placeholder="Optional — e.g. ship in the same colour" />
+        </label>
+      ) : null}
+    </>
+  );
+}
+
+/** The two kinds share a picker; the kind chosen changes only the ledger it lands in. */
+function KindToggle({
+  mode,
+  onMode,
+}: {
+  mode: 'return' | 'exchange';
+  onMode: (mode: 'return' | 'exchange') => void;
+}): ReactNode {
+  const kinds = [
+    { kind: 'exchange' as const, label: 'Exchange' },
+    { kind: 'return' as const, label: 'Return' },
+  ];
+  return (
+    <div className="row" role="group" aria-label="Build kind">
+      {kinds.map((candidate) => (
+        <button
+          key={candidate.kind}
+          type="button"
+          className={mode === candidate.kind ? 'chip chip-active' : 'chip'}
+          aria-pressed={mode === candidate.kind}
+          onClick={() => onMode(candidate.kind)}
+        >
+          {candidate.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+interface BuildBody {
+  readonly orderId: string;
+  readonly customerId: string;
+  readonly items: readonly { readonly itemId: string; readonly quantity: number }[];
+  readonly reason: string;
+}
+
+/** Run the ledger verb, tripping the exact `requestId` form when the case is linked. */
+async function openBuild(
+  mode: 'return' | 'exchange',
+  body: BuildBody,
+  requestId: string | null,
+  replacementNote: string,
+): Promise<string> {
+  if (mode === 'return') {
+    const { return: made } = await api.createStaffReturn(requestId === null ? body : { ...body, requestId });
+    return `Return ${made.id} opened · ${made.status}`;
+  }
+  const linked = requestId === null ? body : { ...body, requestId };
+  const note = replacementNote.trim();
+  const { exchange: made } = await api.createStaffExchange(note.length > 0 ? { ...linked, replacementNote: note } : linked);
+  return `Exchange ${made.id} opened · ${made.status}`;
+}
+
+/** One row per order line: add it to the build, or set how many are coming back. */
+function LinePicker({
+  items,
+  chosen,
+  onToggle,
+  onQuantity,
+}: {
+  items: readonly StaffOrderLineDto[];
+  chosen: Readonly<Record<string, number>>;
+  onToggle: (id: string) => void;
+  onQuantity: (id: string, quantity: number) => void;
+}): ReactNode {
+  if (items.length === 0) {
+    return <p className="muted small">No lines on this order.</p>;
+  }
+  return (
+    <ul className="action-lines">
+      {items.map((line) => {
+        const quantity = chosen[line.id] ?? 0;
+        return (
+          <li key={line.id}>
+            <span className="action-name">
+              {line.name} · {line.quantity} × {formatCents(line.unitPriceCents)}
+            </span>
+            <button type="button" className="chip" aria-pressed={quantity > 0} onClick={() => onToggle(line.id)}>
+              {quantity > 0 ? 'Remove' : 'Add'}
+            </button>
+            {quantity > 0 ? (
+              <label className="action-qty">
+                Qty
+                <input type="number" min={1} max={line.quantity} value={quantity} onChange={(event) => onQuantity(line.id, Number(event.target.value))} />
+              </label>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -1105,6 +1455,7 @@ function HandoffTurn({ turn }: { turn: Extract<StaffThreadTurn, { kind: 'handoff
 
 function handleAttachPhoto(
   customerId: string,
+  orderId: string | null,
   draft: string,
   onSent: () => void,
   setDraft: React.Dispatch<React.SetStateAction<string>>,
@@ -1124,7 +1475,7 @@ function handleAttachPhoto(
     reader.onload = async () => {
       const dataUrl = reader.result as string;
       try {
-        await api.staffMessage(customerId, draft, dataUrl);
+        await api.staffMessage(customerId, draft, dataUrl, orderId);
         setDraft('');
         onSent();
       } catch (cause) {
@@ -1138,6 +1489,7 @@ function handleAttachPhoto(
 
 async function sendMessage(
   customerId: string,
+  orderId: string | null,
   body: string,
   onSent: () => void,
   setBusy: React.Dispatch<React.SetStateAction<boolean>>,
@@ -1147,7 +1499,7 @@ async function sendMessage(
   setBusy(true);
   setError('');
   try {
-    await api.staffMessage(customerId, body);
+    await api.staffMessage(customerId, body, undefined, orderId);
     setDraft('');
     onSent();
   } catch (cause: unknown) {
@@ -1158,7 +1510,7 @@ async function sendMessage(
 }
 
 /** The reply box, visible only while this agent has the thread. */
-function Composer({ customerId, onSent }: { customerId: string; onSent: () => void }): ReactNode {
+function Composer({ customerId, orderId, onSent }: { customerId: string; orderId: string | null; onSent: () => void }): ReactNode {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -1170,7 +1522,7 @@ function Composer({ customerId, onSent }: { customerId: string; onSent: () => vo
         event.preventDefault();
         const body = draft.trim();
         if (body.length > 0 && !busy) {
-          void sendMessage(customerId, body, onSent, setBusy, setError, setDraft);
+          void sendMessage(customerId, orderId, body, onSent, setBusy, setError, setDraft);
         }
       }}
     >
@@ -1185,7 +1537,7 @@ function Composer({ customerId, onSent }: { customerId: string; onSent: () => vo
         type="button"
         disabled={busy}
         aria-label="Attach a photo"
-        onClick={() => handleAttachPhoto(customerId, draft, onSent, setDraft, setError)}
+        onClick={() => handleAttachPhoto(customerId, orderId, draft, onSent, setDraft, setError)}
         className="composer-photo"
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

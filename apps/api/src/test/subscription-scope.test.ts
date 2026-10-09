@@ -215,6 +215,11 @@ describe('a mixed basket is not refused for its subscription line', () => {
     expect(result.decision.blockedItems.map((item) => item.name)).toEqual([
       'Coffee Subscription (monthly)',
     ]);
+
+    // And the reply names the excluded line, so "approved" does not read as the
+    // whole basket going back.
+    expect(result.responseText).toContain('Coffee Subscription (monthly)');
+    expect(result.responseText).toContain('not eligible for a refund on this order.');
   });
 });
 
@@ -282,6 +287,7 @@ function decision(over: Partial<RefundDecision> & Pick<RefundDecision, 'decision
     trace: [],
     overrides: [],
     eligibleItemIds: [],
+    refundItemIds: [],
     blockedItems: [],
     outstandingAmountCents: 0,
     outstandingState: 'none',

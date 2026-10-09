@@ -255,7 +255,7 @@ describe('emoji and unicode', () => {
       const response = await chat(ctx, cookie, { customerId, orderId: null, message: '😊🎉🔥' });
       expect([200, 201]).toContain(response.statusCode);
       const body = response.json<Record<string, unknown>>();
-      expect('shopAnswer' in body || 'question' in body || 'request' in body).toBe(true);
+      expect('question' in body || 'request' in body).toBe(true);
     } finally {
       await ctx.app.close();
     }
@@ -267,8 +267,8 @@ describe('emoji and unicode', () => {
       const { cookie, customerId } = await signup(ctx, 'emoji');
       const response = await chat(ctx, cookie, { customerId, orderId: null, message: 'The mug arrived broken 😭💔 I want a refund' });
       expect([200, 201]).toContain(response.statusCode);
-      const history = await ctx.app.inject({ method: 'GET', url: '/api/shop/assistant/history', headers: { cookie } });
-      expect(history.statusCode).toBe(200);
+      const body = response.json<Record<string, unknown>>();
+      expect('question' in body || 'request' in body).toBe(true);
     } finally {
       await ctx.app.close();
     }
@@ -442,12 +442,11 @@ describe('auth and isolation', () => {
       const response = await chat(ctx, cookie, {
         customerId: 'CUST-IMPOSTOR',
         orderId: orders[0]?.id ?? null,
-        message: 'where is my order?',
-        shopping: true,
+        message: 'The mug arrived broken and I want my money back',
       });
-      expect(response.statusCode).toBe(201);
-      const answer = response.json<{ shopAnswer: { orderStatus: { orderId: string } | null } }>().shopAnswer;
-      expect(answer.orderStatus?.orderId).toBe(orders[0]?.id);
+      expect([200, 201]).toContain(response.statusCode);
+      const answer = response.json<{ request?: { orderId: string | null } }>();
+      expect(answer.request?.orderId).toBe(orders[0]?.id);
       expect(customerId.startsWith('CUST-')).toBe(true);
     } finally {
       await ctx.app.close();
@@ -547,44 +546,54 @@ describe('auth and isolation', () => {
 });
 
 describe('chat and assistant behavior', () => {
-  it('32 greets without touching the refund ledger', async () => {
+  it('32 greets without touching the refund ledger when an order is in place', async () => {
     const ctx = await fresh();
     try {
       const { cookie, customerId } = await signup(ctx, 'greet');
+      await buy(ctx, cookie, [{ productId: 'PRD-MUG-01', quantity: 1 }]);
+      const orderId = (await ordersOf(ctx, cookie))[0]?.id ?? null;
       const before = tableCount(ctx.db, 'refund_requests');
-      const response = await chat(ctx, cookie, { customerId, orderId: null, message: 'hello', shopping: true });
-      expect(response.statusCode).toBe(201);
-      expect(response.json<{ shopAnswer: { kind: string } }>().shopAnswer.kind).toBe('general');
+      const response = await chat(ctx, cookie, { customerId, orderId, message: 'hello' });
+      expect([200, 201]).toContain(response.statusCode);
+      expect(response.json<{ question?: string }>().question).toMatch(/what has gone wrong with it/i);
       expect(tableCount(ctx.db, 'refund_requests')).toBe(before);
     } finally {
       await ctx.app.close();
     }
   });
 
-  it('33 files two greetings as two turns and still no requests', async () => {
+  it('33 files two greetings as two turns and still no requests when an order is in place', async () => {
     const ctx = await fresh();
     try {
       const { cookie, customerId } = await signup(ctx, 'greet');
-      await chat(ctx, cookie, { customerId, orderId: null, message: 'hello', shopping: true });
-      await chat(ctx, cookie, { customerId, orderId: null, message: 'hello', shopping: true });
-      expect(tableCount(ctx.db, 'shop_assistant_turns')).toBe(2);
+      await buy(ctx, cookie, [{ productId: 'PRD-MUG-01', quantity: 1 }]);
+      const orderId = (await ordersOf(ctx, cookie))[0]?.id ?? null;
+      const first = await chat(ctx, cookie, { customerId, orderId, message: 'hello' });
+      const second = await chat(ctx, cookie, { customerId, orderId, message: 'hello' });
+      expect([200, 201]).toContain(first.statusCode);
+      expect([200, 201]).toContain(second.statusCode);
+      expect(first.json<{ question?: string }>().question).toMatch(/what has gone wrong with it/i);
+      expect(second.json<{ question?: string }>().question).toBeDefined();
       expect(tableCount(ctx.db, 'refund_requests')).toBe(0);
     } finally {
       await ctx.app.close();
     }
   });
 
-  it('34 reports status for the right order', async () => {
+  it('34 reports a decision for the right order', async () => {
     const ctx = await fresh();
     try {
       const { cookie, customerId } = await signup(ctx, 'status');
       await buy(ctx, cookie, [{ productId: 'PRD-MUG-01', quantity: 1 }]);
       const orders = await ordersOf(ctx, cookie);
-      const response = await chat(ctx, cookie, { customerId, orderId: null, message: 'where is my order?', shopping: true });
+      const response = await chat(ctx, cookie, {
+        customerId,
+        orderId: orders[0]?.id ?? null,
+        message: 'The mug arrived broken and I want my money back',
+      });
       expect(response.statusCode).toBe(201);
-      const answer = response.json<{ shopAnswer: { kind: string; orderStatus: { orderId: string } | null } }>().shopAnswer;
-      expect(answer.kind).toBe('order_status');
-      expect(answer.orderStatus?.orderId).toBe(orders[0]?.id);
+      const request = response.json<{ request: { orderId: string | null } }>().request;
+      expect(request.orderId).toBe(orders[0]?.id);
     } finally {
       await ctx.app.close();
     }
@@ -670,7 +679,7 @@ describe('chat and assistant behavior', () => {
     }
   });
 
-  it('39 answers a support-mode status check conversationally anyway', async () => {
+  it('39 answers a status query inside the refund pipeline', async () => {
     const ctx = await fresh();
     try {
       const { cookie, customerId } = await signup(ctx, 'mode');
@@ -681,8 +690,9 @@ describe('chat and assistant behavior', () => {
         orderId: orders[0]?.id ?? null,
         message: 'where is my order?',
       });
-      expect(response.statusCode).toBe(201);
-      expect('shopAnswer' in response.json<Record<string, unknown>>()).toBe(true);
+      expect([200, 201]).toContain(response.statusCode);
+      const body = response.json<Record<string, unknown>>();
+      expect('question' in body || 'request' in body).toBe(true);
     } finally {
       await ctx.app.close();
     }
@@ -943,16 +953,6 @@ describe('misc boundaries', () => {
       expect(wrongPw.statusCode).toBe(401);
       expect(noUser.statusCode).toBe(401);
       expect(wrongPw.json<{ message: string }>().message).toBe(noUser.json<{ message: string }>().message);
-    } finally {
-      await ctx.app.close();
-    }
-  });
-
-  it('49 refuses assistant history without a session', async () => {
-    const ctx = await fresh();
-    try {
-      const response = await ctx.app.inject({ method: 'GET', url: '/api/shop/assistant/history' });
-      expect(response.statusCode).toBe(401);
     } finally {
       await ctx.app.close();
     }

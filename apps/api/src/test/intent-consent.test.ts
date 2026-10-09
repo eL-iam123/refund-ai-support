@@ -5,7 +5,7 @@ import { seedDatabase } from '../db/seed.js';
 import { seedShop } from '../shop/seed.js';
 import { createUser } from '../shop/auth.js';
 import { checkout } from '../shop/catalogue.js';
-import { processRefundRequest, DEFAULT_DISCRETION } from '../orchestrator.js';
+import { confirmingClaimText, processRefundRequest, DEFAULT_DISCRETION } from '../orchestrator.js';
 import type { ClaimExtraction } from '@refund/shared';
 import { recordDialogueTurn } from '../db/dialogue.js';
 import { FakeAnalyzer } from './fakeAnalyzer.js';
@@ -207,5 +207,75 @@ describe('the consent gate', () => {
     }
     expect(confirmed.decision.decision).toBe('approved');
     expect(confirmed.decision.refundAmountCents).toBe(2400);
+  });
+
+  it('completes the confirmation from the pending claim, not from the bare yes', async () => {
+    // A "yes" carries no claim of its own: analysed on its own words it
+    // evaporates into an escalation and the confirmation can never complete.
+    deps = makeDeps(fixedAnalyzer(['the mug is not what i ordered'], 'wrong_item'));
+    const asked = await processRefundRequest(f.db, deps, {
+      requestId: 'REQ-CONSENT-8',
+      customerId: f.customerId,
+      orderId: f.orderId,
+      message: 'the mug is not what i ordered',
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+    expect(asked.stage).toBe('asked');
+    if (asked.stage !== 'asked') {
+      return;
+    }
+    recordDialogueTurn(f.db, {
+      customerId: f.customerId,
+      orderId: f.orderId,
+      customerMessage: 'the mug is not what i ordered',
+      assistantQuestion: asked.question,
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+
+    const completed = await processRefundRequest(f.db, makeDeps(FakeAnalyzer({ kind: 'heuristic' })), {
+      requestId: 'REQ-CONSENT-9',
+      customerId: f.customerId,
+      orderId: f.orderId,
+      message: 'yes please',
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+    expect(completed.stage).toBe('decided');
+    if (completed.stage !== 'decided') {
+      return;
+    }
+    expect(completed.decision.decision).toBe('approved');
+    expect(completed.decision.refundAmountCents).toBe(2400);
+  });
+
+  it('finds the pending claim only for a confirmation answer', () => {
+    const claim = 'the mug is not what i ordered';
+    recordDialogueTurn(f.db, {
+      customerId: f.customerId,
+      orderId: f.orderId,
+      customerMessage: claim,
+      assistantQuestion: 'Before we refund anything: which do you want?',
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+
+    expect(confirmingClaimText(f.db, f.customerId, f.orderId, 'yes please')).toBe(claim);
+    // Not an affirmation: no confirmation to complete.
+    expect(confirmingClaimText(f.db, f.customerId, f.orderId, 'the lamp is broken too')).toBeNull();
+  });
+
+  it('finds no pending claim without a confirmation question', () => {
+    recordDialogueTurn(f.db, {
+      customerId: f.customerId,
+      orderId: f.orderId,
+      customerMessage: 'where is my order',
+      assistantQuestion: 'Which order is this about?',
+      itemIds: [],
+      now: TEST_NOW,
+    });
+
+    expect(confirmingClaimText(f.db, f.customerId, f.orderId, 'yes please')).toBeNull();
   });
 });

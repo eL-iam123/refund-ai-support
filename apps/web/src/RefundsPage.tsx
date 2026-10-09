@@ -50,10 +50,10 @@ function Queue({ refunds, onChanged }: { refunds: RefundDto[]; onChanged: () => 
       title="Awaiting verification"
       action={<span className="muted">{refunds.length} pending · {formatCents(total)}</span>}
     >
-      <p className="note">
-        These amounts have been approved by policy and are being held against their orders. They
-        have <strong>not</strong> been paid: nothing is charged or transferred until a reviewer
-        settles a row below. Each one is linked to the request that authorised it.
+      <p className="note payout-boundary">
+        <strong>Approved by policy. Not paid.</strong> These amounts are held against their orders.
+        Nothing is charged or transferred until a reviewer settles a row below. Each amount links to
+        the request that authorised it.
       </p>
       <table className="table">
         <thead>
@@ -168,22 +168,25 @@ function Row({ refund, onChanged }: { refund: RefundDto; onChanged: () => void }
             A reviewer should be able to see it is stable, not guess. */}
         <small className="muted mono">{refund.idempotencyKey.slice(0, 16)}…</small>
       </td>
-      <td className="actions">
+      <td className="actions payout-actions">
         {state.done.length > 0 ? (
           <span className="muted">{state.done}</span>
         ) : (
           <>
-            <input
-              value={state.reason}
-              onChange={(event) => setReason(event.target.value)}
-              placeholder="reason, if releasing"
-              aria-label={`reason for releasing ${formatCents(refund.amountCents)}`}
-            />
-            <button type="button" disabled={state.busy !== null} onClick={() => void act('settle')}>
+            <label className="release-reason">
+              Reason for release
+              <input
+                value={state.reason}
+                onChange={(event) => setReason(event.target.value)}
+                placeholder="Required when releasing"
+                aria-label={`reason for releasing ${formatCents(refund.amountCents)}`}
+              />
+            </label>
+            <button type="button" className="btn-primary" disabled={state.busy !== null} onClick={() => void act('settle')}>
               {state.busy === 'settle' ? 'Settling…' : 'Settle — pay it'}
             </button>
-            <button type="button" disabled={state.busy !== null} onClick={() => void act('release')}>
-              {state.busy === 'release' ? 'Releasing…' : 'Release'}
+            <button type="button" className="btn-secondary" disabled={state.busy !== null} onClick={() => void act('release')}>
+              {state.busy === 'release' ? 'Releasing…' : 'Release reservation'}
             </button>
           </>
         )}

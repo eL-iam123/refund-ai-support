@@ -54,15 +54,6 @@ export {
   type DialogueLine,
   type AttemptObserver,
   type ProviderAttempt,
-  type ChatInput,
-  type ChatReply,
-  type ChatTool,
-  type ShopInput,
-  type ShopProduct,
-  type ShopSuggestion,
-  type ConverseInput,
-  type ConverseProduct,
-  type ConversePolicy,
   type ConverseStyle,
 } from './analyzer.js';
 export { parseJson } from './json.js';

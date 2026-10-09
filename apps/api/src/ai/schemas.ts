@@ -65,28 +65,8 @@ export const AskItemsSchema = z.object({
 export const IntakeOutputSchema = z.union([AskItemsSchema, AskSchema, CompleteSchema]);
 export type IntakeOutput = z.infer<typeof IntakeOutputSchema>;
 
-/** The most product cards one shop answer may carry. Bounded so the array cannot be a payload. */
-export const MAX_SHOP_PRODUCTS = 5;
-
-/**
- * The model's product nomination.
- *
- * Ids only, copied from the catalogue block in the prompt. There is no price
- * and no prose field, so there is nothing in this schema that could be
- * mistaken for an offer: what the customer sees is rendered deterministically
- * from database rows re-resolved by id.
- */
-export const ShopSuggestionSchema = z.object({
-  productIds: z.array(z.string().min(1).max(64)).max(MAX_SHOP_PRODUCTS).default([]),
-});
-export type ShopSuggestionOutput = z.infer<typeof ShopSuggestionSchema>;
-
-/** The longest a conversational reply may be. Bounded so verbosity is a choice, not a bill. */
+/** The longest a phrased reply may be. Bounded so verbosity is a choice, not a bill. */
 export const MAX_GENERAL_CHARS = 600;
-
-/** A conversational reply, bounded. Content rules live in `replyGuard.ts`. */
-export const GeneralReplySchema = z.string().trim().min(1).max(MAX_GENERAL_CHARS);
-export type GeneralReplyOutput = z.infer<typeof GeneralReplySchema>;
 
 /**
  * A phrased decision reply, bounded like any other prose.
@@ -114,3 +94,60 @@ export const CaseSummarySchema = z
   .string()
   .transform((value) => value.trim())
   .pipe(z.string().min(1).max(800));
+
+/**
+ * A currency-marked amount as written in prose, so a note naming "$1,234.55",
+ * "450 USD" or "450 dollars" is seen and a bare ordinal ("2 orders") is not.
+ */
+const NAMED_AMOUNT_IN_NOTE = /\$\s?\d[\d,]*(?:\.\d{1,2})?|\d[\d,]{0,12}(?:\.\d{1,2})?\s*(?:usd|dollars?)\b/gi;
+
+/**
+ * Whether a case note only states the decision's own amount.
+ *
+ * The note is the first thing an agent reads before taking over, so a note
+ * that names a figure different from the fixed decision would brief them into
+ * a case the resolver never made - the one way a model's prose can still move
+ * a refund discussion after the money is locked. Only model-authored prose is
+ * gated on this: the deterministic local writer echoes verified quotes, which
+ * may legitimately quote what a customer claimed, and quoting evidence is not
+ * the same as naming an outcome.
+ */
+export function caseNoteMatchesOutcome(note: string, amountCents: number): boolean {
+  for (const match of note.matchAll(NAMED_AMOUNT_IN_NOTE)) {
+    const cents = centsFromNamedAmount(match[0]);
+    if (cents !== null && cents !== amountCents) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function centsFromNamedAmount(text: string): number | null {
+  const digits = /\d[\d,]*(?:\.\d{1,2})?/.exec(text);
+  if (digits === null) {
+    return null;
+  }
+  const value = Number.parseFloat(digits[0].replace(/,/g, ''));
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return Math.round(value * 100);
+}
+
+/** The placeholder the prompt tells a model to emit when there is nothing to add. */
+const NOTHING_TO_ADD = 'nothing further to add.';
+
+/**
+ * The one path a model's case note passes before it can be stored.
+ *
+ * Bound, non-placeholder, and consistent with the fixed decision's amount -
+ * a note failing any of those is discarded (null) rather than stored, because
+ * the note is the briefing an agent reads before they touch a live case.
+ */
+export function parseCaseNote(text: string, amountCents: number): string | null {
+  const parsed = CaseSummarySchema.safeParse(text);
+  if (!parsed.success || parsed.data.toLowerCase() === NOTHING_TO_ADD || !caseNoteMatchesOutcome(parsed.data, amountCents)) {
+    return null;
+  }
+  return parsed.data;
+}

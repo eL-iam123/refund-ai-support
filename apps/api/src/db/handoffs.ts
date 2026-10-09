@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { AWAITING_AGENT_ID } from '@refund/shared';
+import { AWAITING_AGENT_ID, type InjectionScan, type InjectionSignal } from '@refund/shared';
 import type { Db } from './connection.js';
 import { queryAll } from './sql.js';
 import { openAppealsForCustomer, type Appeal } from './appeals.js';
@@ -16,14 +16,21 @@ import { findRequestById, latestRequestForThread } from './requestRepository.js'
  *
  * Two rules are worth stating because both are safety properties:
  *
- *  - A customer has at most one live takeover. That is enforced by a partial
- *    unique index in the migration *and* checked in `startHandoff`, because a
- *    constraint someone has to read the schema to find is not a guard.
+ *  - A customer has at most one live takeover *per escalated order*, and at most
+ *    one customer-wide takeover for the no-order and whole-thread cases. That is
+ *    enforced by partial unique indexes in the migration *and* checked in
+ *    `startHandoff`, because a constraint someone has to read the schema to find
+ *    is not a guard. The per-order carve-out is what lets two escalations on
+ *    different orders both reach a person instead of the second being silently
+ *    dropped.
  *  - The customer's messages during a takeover are stored here, not run through
  *    the pipeline. The pipeline's output is a decision; while a person is on the
  *    line, the person is the decision maker, and the fewer decisions the
  *    pipeline has produced the less there is to untangle afterwards.
  */
+
+/** Bound for every live-handoff scan below: a lookup runs per chat message. */
+const MAX_LIVE_HANDOFFS = 10;
 
 /**
  * The `agent_id` of a takeover nobody has claimed yet.
@@ -78,6 +85,13 @@ export interface AgentMessage {
   readonly handoffId: string;
   readonly sender: 'agent' | 'customer';
   readonly body: string;
+  /**
+   * The policy-override scan of the message's text, recorded so the staff
+   * thread keeps the same evidence trail a decided case keeps. Agent messages
+   * carry an empty scan: the person on the line is the trusted side of the
+   * exchange.
+   */
+  readonly injection: InjectionScan;
 }
 
 interface HandoffRow {
@@ -96,6 +110,8 @@ interface MessageRow {
   readonly handoff_id: string;
   readonly sender: string;
   readonly body: string;
+  readonly injection_detected: number;
+  readonly injection_signals: string | null;
 }
 
 export class HandoffAlreadyActiveError extends Error {
@@ -119,6 +135,35 @@ export function activeHandoffForCustomer(db: Db, customerId: string): ActiveHand
   return row === undefined ? null : toActive(row);
 }
 
+/** Every live takeover for the customer, newest first, bounded. */
+export function liveHandoffsForCustomer(db: Db, customerId: string): readonly ActiveHandoff[] {
+  const rows = db
+    .prepare('SELECT * FROM handoffs WHERE customer_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT ?')
+    .all(customerId, MAX_LIVE_HANDOFFS) as HandoffRow[];
+  return rows.map(toActive);
+}
+
+/**
+ * The live takeover that currently speaks for this thread, if any.
+ *
+ * With forks, "the thread that changed hands" is narrower than the customer:
+ * a fork exists because one order escalated, and it answers only for that
+ * order. Older takeovers - a person on the line before forks were scoped, or
+ * a handoff with no order recorded because the customer was mid-clarify -
+ * kept the whole-thread reach and thus cover every thread. Newest covering
+ * takeover wins, so a claimed fork reads as the current owner of its own
+ * order even when an older unattended marker for a different order is still
+ * waiting.
+ */
+export function liveHandoffForThread(db: Db, customerId: string, orderId: string | null): ActiveHandoff | null {
+  for (const live of liveHandoffsForCustomer(db, customerId)) {
+    if (isThreadOf(db, live, orderId)) {
+      return live;
+    }
+  }
+  return null;
+}
+
 export interface StartHandoffInput {
   readonly customerId: string;
   readonly orderId: string | null;
@@ -135,8 +180,10 @@ export interface StartHandoffInput {
 }
 
 export function startHandoff(db: Db, input: StartHandoffInput): ActiveHandoff {
-  if (activeHandoffForCustomer(db, input.customerId) !== null) {
-    throw new HandoffAlreadyActiveError(input.customerId);
+  for (const live of liveHandoffsForCustomer(db, input.customerId)) {
+    if (takeoversClash(live, input)) {
+      throw new HandoffAlreadyActiveError(input.customerId);
+    }
   }
   const handoff: ActiveHandoff = {
     id: `HAND-${randomUUID()}`,
@@ -152,6 +199,29 @@ export function startHandoff(db: Db, input: StartHandoffInput): ActiveHandoff {
      VALUES (?, ?, ?, ?, ?, NULL, ?)`,
   ).run(handoff.id, handoff.customerId, handoff.orderId, handoff.agentId, handoff.startedAt, handoff.requestId);
   return handoff;
+}
+
+/**
+ * Whether a new takeover may not open beside a live one.
+ *
+ * A fork speaks for the escalated case it was forked from, so forks on
+ * different orders coexist - that is exactly what lets two escalations for one
+ * customer both reach a person instead of the second being dropped. Everything
+ * broader does not compound: a whole-customer takeover (no order yet) and a
+ * whole-thread takeover (no decided case behind it) each own whatever the
+ * customer says next, so either blocks any new takeover, on any order.
+ */
+function takeoversClash(live: ActiveHandoff, input: StartHandoffInput): boolean {
+  if (live.orderId === null || input.orderId === null) {
+    return true;
+  }
+  if (live.requestId === null && input.requestId === null) {
+    return live.orderId === input.orderId;
+  }
+  if (live.orderId === input.orderId && (live.requestId === null || input.requestId === null)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -177,16 +247,11 @@ export function takeoverForEscalated(
   orderId: string | null,
   now: Date,
 ): ActiveHandoff | null {
-  const live = activeHandoffForCustomer(db, customerId);
-  if (live !== null) {
-    if (isThreadOf(live, orderId)) {
-      return live;
-    }
-    // Only one live takeover is allowed per customer. An unattended escalation
-    // for another order must not make this order's persisted escalation fail
-    // with HandoffAlreadyActiveError; both requests remain visible to staff, and
-    // the existing takeover stays anchored to its original thread.
-    return null;
+  // A live takeover that already covers this thread satisfies the escalation:
+  // its own forked case, or a whole-thread person attached to the customer.
+  const covering = liveHandoffForThread(db, customerId, orderId);
+  if (covering !== null) {
+    return covering;
   }
 
   const latest = latestRequestForThread(db, customerId, orderId);
@@ -199,7 +264,10 @@ export function takeoverForEscalated(
   try {
     // Fork binding: this takeover is the human side of this exact decided
     // escalation, so only its own case's follow-ups route here. Anything else
-    // the customer says keeps flowing through the pipeline.
+    // the customer says keeps flowing through the pipeline. A second escalation
+    // on a different order from the same customer is not "anything else" - it is
+    // its own case with no human side yet, so it raises its own takeover rather
+    // than being dropped where the old customer-wide lock dropped it.
     return startHandoff(db, {
       customerId,
       orderId: latest.orderId,
@@ -208,31 +276,31 @@ export function takeoverForEscalated(
       requestId: latest.id,
     });
   } catch (error) {
-    // Another process may have opened a takeover after the read above. Treat
-    // that customer-wide uniqueness race just like the ordinary conflict.
-    if (activeHandoffForCustomer(db, customerId) !== null) {
-      return null;
+    // Another process may have opened a takeover after the read above. If the
+    // winner covers this thread the escalation is handled; if it reaches only
+    // another order, this thread keeps its escalation visible in the queue and a
+    // follow-up touching it will raise its own takeover there and then.
+    if (error instanceof HandoffAlreadyActiveError) {
+      return liveHandoffForThread(db, customerId, orderId);
     }
     throw error;
   }
 }
 
 /**
- * Whether an unattended takeover belongs to the thread being messaged.
+ * Whether a takeover belongs to the thread being messaged.
  *
  * A takeover row exists for two reasons now, and they do not have the same
- * reach. A *person* attached to the customer owns whatever they next talk
- * about, so a human takeover on one order is customer-wide on purpose. An
- * unattended escalation marker is not: it exists because this order escalated,
- * and letting it swallow the next order's thread would move a complaint that
+ * reach. A *person* attached to the customer before forks were scoped took
+ * whatever they next talked about, so a pre-fork takeover (and a handoff with
+ * no order recorded) is still customer-wide on purpose. A *forked* takeover is
+ * the human side of one escalated case: it answers for that case's order and
+ * items, and letting it swallow another order's thread would move a complaint
  * nobody has looked at onto a case file for a different order - quietly denying
  * a refund claim by burying it, which is worse than the escalation it replaced.
- *
- * A person who does mean to help with both orders takes the takeover over, and
- * that claim is customer-wide.
  */
-export function isThreadOf(handoff: ActiveHandoff, orderId: string | null): boolean {
-  if (handoff.agentId !== ESCALATION_AGENT) {
+export function isThreadOf(_db: Db, handoff: ActiveHandoff, orderId: string | null): boolean {
+  if (handoff.orderId === null) {
     return true;
   }
   return handoff.orderId === orderId;
@@ -251,15 +319,23 @@ function escalationWasHandled(db: Db, customerId: string, orderId: string | null
 }
 
 /**
- * A person claims a takeover nobody has taken yet.
+ * A person claims the unattended takeover on one thread.
  *
  * The auto-provisioned escalation takeover must not lock a person out of the
- * thread it exists to get them to: `startHandoff` refuses a second takeover, so
- * without this the customer who escalated automatically could never be helped by
- * a human. Returns the takeover now owned by `agentId`, or null when the live one
- * is already a person's - which is the race, and stays a race.
+ * thread it exists to get them to: `startHandoff` refuses a second takeover on
+ * the same order, so without this the customer who escalated automatically
+ * could never be helped by a human. Scoped by order, because two escalations on
+ * two orders now mean two live markers - claiming the customer must not grab
+ * the sibling order's case along with this one. Returns the takeover now owned
+ * by `agentId`, or null when this thread's live one is already a person's -
+ * which is the race, and stays a race.
  */
-export function claimUnattendedHandoff(db: Db, customerId: string, agentId: string): ActiveHandoff | null {
+export function claimUnattendedHandoff(
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  agentId: string,
+): ActiveHandoff | null {
   // The sentinel lives in the WHERE clause rather than in a read above it. Two
   // staff members claiming the same escalated thread is the same race
   // `startHandoff` refuses, and a read-then-write would let both of them see
@@ -267,19 +343,24 @@ export function claimUnattendedHandoff(db: Db, customerId: string, agentId: stri
   const claimed = db
     .prepare(
       `UPDATE handoffs SET agent_id = ?
-        WHERE customer_id = ? AND ended_at IS NULL AND agent_id = ?
+        WHERE customer_id = ? AND order_id IS ? AND ended_at IS NULL AND agent_id = ?
         RETURNING id, customer_id, order_id, agent_id, started_at`,
     )
-    .get(agentId, customerId, ESCALATION_AGENT) as HandoffRow | undefined;
+    .get(agentId, customerId, orderId, ESCALATION_AGENT) as HandoffRow | undefined;
   return claimed === undefined ? null : toActive(claimed);
 }
 
-/** Ends the customer's live takeover, returning what it was, or null. */
-export function endHandoff(db: Db, customerId: string, now: Date): ActiveHandoff | null {
-  const active = activeHandoffForCustomer(db, customerId);
-  if (active === null) {
+/** Ends the live takeover on one order, returning what it was, or null. */
+export function endHandoff(db: Db, customerId: string, orderId: string | null, now: Date): ActiveHandoff | null {
+  const row = db
+    .prepare(
+      'SELECT * FROM handoffs WHERE customer_id = ? AND order_id IS ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1',
+    )
+    .get(customerId, orderId) as HandoffRow | undefined;
+  if (row === undefined) {
     return null;
   }
+  const active = toActive(row);
   db.prepare('UPDATE handoffs SET ended_at = ? WHERE id = ?').run(now.toISOString(), active.id);
   return active;
 }
@@ -289,6 +370,7 @@ export interface RecordMessageInput {
   readonly sender: 'agent' | 'customer';
   readonly body: string;
   readonly now: Date;
+  readonly injection: InjectionScan;
 }
 
 export function recordAgentMessage(db: Db, input: RecordMessageInput): AgentMessage {
@@ -298,11 +380,20 @@ export function recordAgentMessage(db: Db, input: RecordMessageInput): AgentMess
     handoffId: input.handoffId,
     sender: input.sender,
     body: input.body,
+    injection: input.injection,
   };
   db.prepare(
-    `INSERT INTO agent_messages (id, created_at, handoff_id, sender, body)
-     VALUES (?, ?, ?, ?, ?)`,
-  ).run(message.id, message.createdAt, message.handoffId, message.sender, message.body);
+    `INSERT INTO agent_messages (id, created_at, handoff_id, sender, body, injection_detected, injection_signals)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    message.id,
+    message.createdAt,
+    message.handoffId,
+    message.sender,
+    message.body,
+    message.injection.detected ? '1' : '0',
+    JSON.stringify(message.injection.signals),
+  );
   return message;
 }
 
@@ -322,7 +413,7 @@ export function listAgentMessagesForOrder(
 ): readonly AgentMessage[] {
   const rows = queryAll<MessageRow>(
     db.prepare(
-      `SELECT m.id, m.created_at, m.handoff_id, m.sender, m.body
+      `SELECT m.id, m.created_at, m.handoff_id, m.sender, m.body, m.injection_detected, m.injection_signals
          FROM agent_messages m
          JOIN handoffs h ON h.id = m.handoff_id
         WHERE h.customer_id = ? AND h.order_id IS ?
@@ -351,7 +442,7 @@ export function handoffById(db: Db, handoffId: string): ActiveHandoff | null {
 export function messagesForHandoff(db: Db, handoffId: string, limit: number): readonly AgentMessage[] {
   const rows = queryAll<MessageRow>(
     db.prepare(
-      `SELECT id, created_at, handoff_id, sender, body FROM agent_messages
+      `SELECT id, created_at, handoff_id, sender, body, injection_detected, injection_signals FROM agent_messages
         WHERE handoff_id = ?
         ORDER BY created_at DESC, rowid DESC
         LIMIT ?`,
@@ -384,8 +475,9 @@ export interface ConversationCandidate {
  *
  * Built from a UNION over everything that touches a thread - requests, dialogue,
  * updates and agent messages - so a conversation is on the list whether or not
- * it ever produced a decision row. The active handoff is attached per customer,
- * because a takeover is per customer no matter which order the thread drifted to.
+ * it ever produced a decision row. The active handoff is attached per thread,
+ * because with forks a takeover belongs to the order it was forked from; a
+ * claim or a notice must not light up the customer's other rows.
  */
 export function listConversationCandidates(
   db: Db,
@@ -420,7 +512,7 @@ export function listConversationCandidates(
     const nameRow = db
       .prepare('SELECT name FROM customers WHERE id = ?')
       .get(row.customer_id) as { name: string } | undefined;
-    const active = activeHandoffForCustomer(db, row.customer_id);
+    const active = liveHandoffForThread(db, row.customer_id, row.order_id);
     return {
       customerId: row.customer_id,
       customerName: nameRow?.name ?? 'Unknown customer',
@@ -447,12 +539,29 @@ function toActive(row: HandoffRow): ActiveHandoff {
 }
 
 function hydrateMessage(row: MessageRow): AgentMessage {
+  let signals: readonly InjectionSignal[] = [];
+  if (row.injection_signals !== null && row.injection_signals.length > 0) {
+    try {
+      signals = JSON.parse(row.injection_signals) as InjectionSignal[];
+    } catch {
+      signals = [];
+    }
+  }
   return {
     id: row.id,
     createdAt: row.created_at,
     handoffId: row.handoff_id,
     sender: row.sender as AgentMessage['sender'],
     body: row.body,
+    injection: {
+      detected: row.injection_detected === 1,
+      signals,
+      // The staff thread is an evidence trail, not a decision record: the
+      // obfuscation note only says "and also this looked squiggly", and the
+      // scan response to it was recorded at decision time, so a live read of
+      // history does not re-decide it.
+      obfuscationNoted: false,
+    },
   };
 }
 
@@ -460,7 +569,6 @@ function hydrateMessage(row: MessageRow): AgentMessage {
  * Bounds for every fork loop below (Rule 2): a fork lookup runs once per chat
  * message, so each scan carries its cap in its header or its query.
  */
-const MAX_LIVE_FORKS = 10;
 const MAX_FORK_SCOPE_IDS = 64;
 
 /** A live person-claimed takeover together with the slice it speaks for. */
@@ -505,7 +613,7 @@ export function liveClaimedForks(db: Db, customerId: string): readonly ClaimedFo
        WHERE customer_id = ? AND ended_at IS NULL AND agent_id <> ?
        ORDER BY started_at DESC LIMIT ?`,
     )
-    .all(customerId, ESCALATION_AGENT, MAX_LIVE_FORKS) as HandoffRow[];
+    .all(customerId, ESCALATION_AGENT, MAX_LIVE_HANDOFFS) as HandoffRow[];
   return rows.map((row) => {
     const handoff = toActive(row);
     return { handoff, scope: forkScopeForHandoff(db, handoff) };

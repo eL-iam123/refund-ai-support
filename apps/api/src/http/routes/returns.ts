@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { badRequest, conflict, NotFoundError, UnauthorizedError } from '../errors.js';
 import { staffOnly } from '../../auth/guards.js';
+import type { Principal } from '../../auth/tokens.js';
 import { insertAuditEvent } from '../../db/requestRepository.js';
 import { resolveShopSession, SESSION_COOKIE } from '../../shop/auth.js';
 import {
@@ -135,11 +136,32 @@ const DenyBody = z.object({
     .pipe(z.string().min(1, 'a denial needs a reason the customer could be shown').max(2000)),
 });
 
+/**
+ * What an agent needs to open a return from the console.
+ *
+ * The customer version derives the customer id from the session cookie; staff
+ * name the customer of the case they are holding, and the ledger refuses an
+ * order that does not belong to that customer. Reuses the customer body for the
+ * parts that mean the same thing, so the two paths cannot drift apart on items
+ * or reason.
+ */
+const StaffCreateReturnBody = CreateReturnBody.extend({
+  customerId: z.string().trim().min(1).max(120),
+});
+
 function parseOr<T>(result: { success: true; data: T } | { success: false; error: z.ZodError }, what: string): T {
   if (result.success) {
     return result.data;
   }
   throw badRequest(`invalid ${what}`, result.error.issues.map((issue) => issue.message));
+}
+
+function requirePrincipal(principal: Principal | undefined): Principal {
+  if (principal === undefined) {
+    // Behind `staffOnly` this cannot happen; a missing principal is wiring.
+    throw new Error('return route reached without an authenticated principal');
+  }
+  return principal;
 }
 
 /**
@@ -313,9 +335,55 @@ function registerStaffRoutes(
   ctx: AppContext,
   agent: (request: FastifyRequest) => Promise<void>,
 ): void {
+  registerStaffCreateRoutes(app, ctx, agent);
   registerReturnReadRoutes(app, ctx, agent);
   registerReturnForwardRoutes(app, ctx, agent);
   registerReturnCloseoutRoutes(app, ctx, agent);
+}
+
+/**
+ * Opening a return from the console.
+ *
+ * The customer can ask for a return themselves; this is the staff half of the
+ * same act, for the agent who is already on a case and has been told "just open
+ * it for them". The ledger enforces the same three checks either way - order
+ * ownership, request match, lines on the order - and the same idempotency on
+ * `requestId`, so a case whose return already exists answers with that return
+ * rather than a second parcel. Audited as a staff action so the trail can say
+ * who opened it, not just that it was opened.
+ */
+function registerStaffCreateRoutes(
+  app: FastifyInstance,
+  ctx: AppContext,
+  agent: (request: FastifyRequest) => Promise<void>,
+): void {
+  app.post<{ Body: unknown }>('/api/admin/returns', { preHandler: agent }, (request) => {
+    const body = parseOr(StaffCreateReturnBody.safeParse(request.body), 'return request');
+    const now = ctx.now();
+
+    let created: { returnRecord: ReturnRecord };
+    try {
+      created = createReturn(ctx.db, { ...body, now });
+    } catch (error: unknown) {
+      throw toConflict(error);
+    }
+
+    const { returnRecord } = created;
+    audit(
+      ctx,
+      returnRecord,
+      'return_requested',
+      returnRecord.requestId === null
+        ? `Staff opened a return against order ${returnRecord.orderId}`
+        : `Staff opened a return for request ${returnRecord.requestId}`,
+      now,
+    );
+    ctx.log.info(
+      { returnId: returnRecord.id, orderId: returnRecord.orderId, by: requirePrincipal(request.principal).subject },
+      'staff.return.requested',
+    );
+    return { return: returnRecord, items: listReturnItems(ctx.db, returnRecord.id) };
+  });
 }
 
 /** The warehouse and support view: everything, and one return in detail. */

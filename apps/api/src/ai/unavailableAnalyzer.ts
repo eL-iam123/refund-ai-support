@@ -1,4 +1,4 @@
-import { AiUnavailableError, type AIAnalyzer, type IntakeInput, type IntakeReply, type AttemptObserver, type ChatInput, type ChatReply } from './analyzer.js';
+import { AiUnavailableError, type AIAnalyzer, type IntakeInput, type IntakeReply, type AttemptObserver } from './analyzer.js';
 
 /**
  * The analyzer used when no provider key is configured.
@@ -53,18 +53,6 @@ export function UnavailableAnalyzer(reason: string, missingKey: string): AIAnaly
       // Null by definition rather than by failure: there is nothing here to write with,
       // and the field is documented as null when no model was available.
       return Promise.resolve(null);
-    },
-    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
-      observer({
-        model,
-        attempt: 1,
-        ok: false,
-        latencyMs: 0,
-        promptTokens: null,
-        completionTokens: null,
-        error: describe(),
-      });
-      return Promise.reject(new AiUnavailableError(describe()));
     },
   };
 }

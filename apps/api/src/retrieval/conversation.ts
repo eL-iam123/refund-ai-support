@@ -4,7 +4,7 @@ import { findOrder } from '../db/orderRepository.js';
 import { listUpdatesForOrder } from '../db/customerUpdates.js';
 import { listDialogueForOrder } from '../db/dialogue.js';
 import type { ItemPickerOffer } from './itemPicker.js';
-import { ESCALATION_AGENT, activeHandoffForCustomer, isThreadOf, listAgentMessagesForOrder, messagesForHandoff } from '../db/handoffs.js';
+import { ESCALATION_AGENT, liveHandoffForThread, listAgentMessagesForOrder, messagesForHandoff } from '../db/handoffs.js';
 import { NotFoundError } from '../http/errors.js';
 import type { DialogueLine } from '../ai/analyzer.js';
 
@@ -68,6 +68,15 @@ export type ChatTurn =
       readonly decision: string;
       readonly refundAmountCents: number;
       readonly itemIds: readonly string[];
+      /**
+       * The lines a mixed-cart decision left out, in words a shopper can read.
+       *
+       * A cut-down `BlockedItem`: the customer already sees the names and the
+       * reason in the composed reply, so naming them here costs nothing the prose
+       * has not quoted, and `itemId`/`priceCents`/`ruleId` are staff data that
+       * the full request row is deliberately not reduced into this view.
+       */
+      readonly blockedItems: readonly { readonly name: string; readonly reason: string }[];
       readonly createdAt: string;
     }
   | {
@@ -114,6 +123,7 @@ interface TurnRow {
   readonly refund_amount_cents: number;
   readonly eligible_item_ids_json: string | null;
   readonly claim_item_ids_json: string | null;
+  readonly blocked_items_json: string | null;
   readonly created_at: string;
 }
 
@@ -208,7 +218,7 @@ function pushRequests(
 ): void {
   const rows = queryAll<TurnRow>(
     db.prepare(
-      `SELECT id, message, response_text, decision, refund_amount_cents, eligible_item_ids_json, claim_item_ids_json, created_at
+      `SELECT id, message, response_text, decision, refund_amount_cents, eligible_item_ids_json, claim_item_ids_json, blocked_items_json, created_at
          FROM refund_requests
         WHERE customer_id = ? AND order_id IS ?
         ORDER BY created_at DESC, rowid DESC
@@ -315,10 +325,11 @@ function pushAgentMessages(
 /**
  * The moment *this* thread changed hands.
  *
- * Scoped to the order, deliberately. A takeover is one-per-customer, so reading it
- * without checking the thread put the notice on every conversation the customer has:
- * one escalation on one order greeted them on all the others, which is how a banner
- * that means "a person is looking at this" turns into decoration that means nothing.
+ * Scoped to the order, deliberately. A fork is per escalated order rather than
+ * per customer, so reading it without checking the thread put the notice on
+ * every conversation the customer has: one escalation on one order greeted them
+ * on all the others, which is how a banner that means "a person is looking at
+ * this" turns into decoration that means nothing.
  *
  * The unattended wording is also no longer a promise the system cannot keep. It used
  * to say the assistant would not reply on the person's behalf, which was true when an
@@ -327,8 +338,8 @@ function pushAgentMessages(
  * directly above it is worse than no notice.
  */
 function pushHandoffNotice(entries: Entry[], db: Db, customerId: string, orderId: string | null): void {
-  const active = activeHandoffForCustomer(db, customerId);
-  if (active === null || !isThreadOf(active, orderId)) {
+  const active = liveHandoffForThread(db, customerId, orderId);
+  if (active === null) {
     return;
   }
   const body = active.agentId === ESCALATION_AGENT
@@ -494,8 +505,43 @@ function hydrateTurn(row: TurnRow): ChatTurn {
     decision: row.decision,
     refundAmountCents: row.refund_amount_cents,
     itemIds: parseIds(row.claim_item_ids_json),
+    blockedItems: parseBlockedItems(row.blocked_items_json),
     createdAt: row.created_at,
   };
+}
+
+/**
+ * The blocked lines, cut down to what a shopper's browser may see.
+ *
+ * `BlockedItem` carries `itemId`, `priceCents` and `ruleId` as well - staff
+ * detail that never needed to leave the staff view. Kept to name and reason,
+ * which is exactly what the composed reply already quotes.
+ */
+function parseBlockedItems(value: string | null): readonly { name: string; reason: string }[] {
+  if (value === null) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const items: { name: string; reason: string }[] = [];
+    for (const entry of parsed) {
+      const item = entry as { name?: unknown; reason?: unknown } | null;
+      if (
+        item !== null &&
+        typeof item === 'object' &&
+        typeof item.name === 'string' &&
+        typeof item.reason === 'string'
+      ) {
+        items.push({ name: item.name, reason: item.reason });
+      }
+    }
+    return items;
+  } catch {
+    return [];
+  }
 }
 
 function parseIds(value: string | null): readonly string[] {

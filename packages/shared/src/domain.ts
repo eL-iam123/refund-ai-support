@@ -191,6 +191,26 @@ export const CARRIERS = ['usps', 'ups', 'fedex'] as const;
 
 export type Carrier = (typeof CARRIERS)[number];
 
+/**
+ * Where an exchange stands.
+ *
+ * An exchange is goods coming back and a replacement going out, so its states
+ * walk the same physical track as a return for the inbound leg and then keep
+ * going past it. Shared like `ReturnStatus` for the same reason: the staff
+ * console renders these and offers the moves each one allows, and a client
+ * that keeps its own copy will eventually offer a move the server refuses.
+ */
+export const EXCHANGE_STATUSES = [
+  'exchange_requested',
+  'exchange_label_generated',
+  'exchange_shipped',
+  'exchange_received',
+  'exchange_replaced',
+  'exchange_denied',
+] as const;
+
+export type ExchangeStatus = (typeof EXCHANGE_STATUSES)[number];
+
 export const OVERRIDE_CODES = [
   'ai_proposal_rejected',
   'ai_proposed_approve_clamped_to_deny',
@@ -266,6 +286,17 @@ export interface RefundDecision {
   readonly trace: readonly RuleEvaluation[];
   readonly overrides: readonly OverrideRecord[];
   readonly eligibleItemIds: readonly string[];
+  /**
+   * The order lines this decision's money is calculated from - the lines a
+   * refund would cover. A per-line reading names exactly the approved lines;
+   * a whole-order reading names the eligible lines whose value backs the
+   * amount. Empty when no money moves, and it never grows on a denial that the
+   * resolver later softens, because the amount is fixed before this is.
+   *
+   * Computed by the resolver, never by the model, and recorded on the ledger so
+   * an auditor can say which lines a payout actually paid for.
+   */
+  readonly refundItemIds: readonly string[];
   readonly blockedItems: readonly BlockedItem[];
   /**
    * Money earlier claims have already committed to this order: refunded, or
@@ -284,9 +315,35 @@ export interface RefundDecision {
 // --- LLM output -------------------------------------------------------------
 
 /**
+ * One line's share of a claim.
+ *
+ * The extraction previously carried a single reason for the whole message. A
+ * mixed basket ("the mug arrived broken and the lamp shade is cracked") needs
+ * one reading per line, or a single grounded reason decides every line it names
+ * - and a single ungrounded one escalates every line it names. Each entry
+ * carries only what the model read *for that line*; `evidenceQuotes` is
+ * mechanically re-verified against the customer's own words before a line may
+ * be paid.
+ */
+export interface LineClaim {
+  readonly itemId: string;
+  readonly reason: ReasonCode;
+  readonly condition: ItemCondition;
+  readonly confidence: number;
+  readonly evidenceQuotes: readonly string[];
+}
+
+/**
  * Structured claim extraction. Every field is validated against a JSON Schema
  * before it enters the pipeline, and `evidenceQuotes` is independently
  * grounding-checked against the customer's own words.
+ *
+ * `lineClaims`, when present, is the per-line reading that lets R-04 approve the
+ * grounded lines and R-12 escalate the ungrounded ones without dragging the
+ * rest of the claim with them. Absent, R-04/R-12 fall back to the single
+ * `reason` - the behaviour every stored row predates, and one that stays
+ * correct, if less precise, for a request that names a problem without naming
+ * which line it is about.
  */
 export interface ClaimExtraction {
   readonly intent: Intent;
@@ -301,12 +358,34 @@ export interface ClaimExtraction {
   readonly urgency: 'low' | 'normal' | 'high';
   /** The model's opinion on injection. Recorded for audit, never trusted. */
   readonly policyOverrideAttempted: boolean;
+  readonly lineClaims?: readonly LineClaim[];
+}
+
+/**
+ * Grounding, per claimed line.
+ *
+ * The same verification the whole-message result does, split so a reason rule
+ * can ask "is *this* line grounded?" - the question that decides whether the
+ * line is paid, reviewed, or neither. `lines` is populated when the extraction
+ * carried `lineClaims`; the top-level fields are always populated.
+ */
+export interface LineGrounding {
+  readonly itemId: string;
+  readonly grounded: boolean;
+  readonly verifiedQuotes: readonly string[];
+  readonly rejectedQuotes: readonly string[];
 }
 
 export interface GroundingResult {
   readonly grounded: boolean;
   readonly verifiedQuotes: readonly string[];
   readonly rejectedQuotes: readonly string[];
+  /**
+   * Per-line grounding, present only when the extraction carried `lineClaims`.
+   * Absent means this is a whole-message grounding - legacy behaviour - which
+   * is exactly what the reason rules check for before using it.
+   */
+  readonly lines?: readonly LineGrounding[];
 }
 
 // --- Audit ------------------------------------------------------------------

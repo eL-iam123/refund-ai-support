@@ -69,6 +69,7 @@ function decided(partial: Partial<RefundDecision>): RefundDecision {
     trace: [],
     overrides: [],
     eligibleItemIds: ['ITM-1'],
+    refundItemIds: ['ITM-1'],
     blockedItems: [],
     outstandingAmountCents: 0,
     outstandingState: 'none',

@@ -14,8 +14,8 @@ import type {
   RuleOutcome,
   Scenario,
   ReturnStatus,
+  ExchangeStatus,
   Carrier,
-  ShopAnswerDto,
 } from '@refund/shared';
 
 /**
@@ -189,6 +189,8 @@ export interface HandoffBrief {
   readonly customerId: string;
   readonly customerName: string;
   readonly orderId: string | null;
+  /** The decided request behind the case, when one exists - the key for money verbs. */
+  readonly requestId: string | null;
   readonly agentId: string | null;
   /** Live takeover still waiting for a person to claim it. */
   readonly unattended: boolean;
@@ -275,8 +277,81 @@ export interface ReturnDetailDto {
   readonly canDeny: boolean;
 }
 
+/**
+ * An exchange, as the staff console builds it.
+ *
+ * Same client-of-the-HTTP-contract reasoning as `ReturnDto`: declared here, not
+ * imported from the server, so the console notices when the contract drifts.
+ */
+export interface ExchangeDto {
+  readonly id: string;
+  readonly requestId: string | null;
+  readonly orderId: string;
+  readonly customerId: string;
+  readonly status: ExchangeStatus;
+  readonly reason: string;
+  readonly replacementNote: string | null;
+  readonly trackingNumber: string | null;
+  readonly carrier: Carrier | null;
+  readonly labelUrl: string | null;
+  readonly shippedAt: string | null;
+  readonly receivedAt: string | null;
+  readonly replacementSentAt: string | null;
+  readonly deniedAt: string | null;
+  readonly deniedReason: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ExchangeItemDto {
+  readonly id: string;
+  readonly exchangeId: string;
+  readonly itemId: string;
+  readonly name: string;
+  readonly quantity: number;
+  readonly unitPriceCents: number;
+  readonly receivedQuantity: number;
+  readonly receivedCondition: string | null;
+}
+
+export interface ExchangeDetailDto {
+  readonly exchange: ExchangeDto;
+  readonly items: readonly ExchangeItemDto[];
+  readonly nextStates: readonly ExchangeStatus[];
+  readonly canDeny: boolean;
+}
+
+/** The lines an agent picks for a return or an exchange, as the service reads them. */
+export interface StaffLineChoice {
+  readonly itemId: string;
+  readonly quantity: number;
+}
+
+/** An order as the console's picker reads it: lines with names and prices. */
+export interface StaffOrderDto {
+  readonly order: {
+    readonly id: string;
+    readonly customerId: string;
+    readonly totalCents: number;
+    readonly items: readonly StaffOrderLineDto[];
+  };
+}
+
+export interface StaffOrderLineDto {
+  readonly id: string;
+  readonly name: string;
+  readonly quantity: number;
+  readonly unitPriceCents: number;
+}
+
 export const api = {
-  health: (): Promise<{ status: string; aiMode: string; adminEnabled: boolean }> => request('/api/health'),
+  health: (): Promise<{
+    status: string;
+    aiMode: string;
+    adminEnabled: boolean;
+    aiAvailable: boolean;
+    aiUnavailableReason: string | null;
+  }> => request('/api/health'),
 
   /** The staff session, or a 401. Used to decide whether to render the console. */
   staffSession: (): Promise<StaffSession> => request('/api/admin/session'),
@@ -287,13 +362,13 @@ export const api = {
   signOut: (): Promise<{ ok: boolean }> => post('/api/admin/logout', {}),
 
 /**
-   * Sends a message. Five possible replies, and they are not interchangeable: a
+   * Sends a message. Four possible replies, and they are not interchangeable: a
    * decision (`request`, with `duplicate` when the server recognised a repeat and
    * returned the earlier request instead of creating one - a 200 rather than a
    * 201 in that case), the assistant's clarifying question (`question`),
    * `received` - the thread was handed to a person, the pipeline is off, and the
-   * message was routed to them instead of being decided - or a shopping answer
-   * (`shopAnswer`), which wrote a shopping thread row and no request.
+   * message was routed to them instead of being decided - or a status
+   * acknowledgement (`status`) when an already-open case is holding the thread.
    *
    * `itemIds` is what the customer ticked in the item picker. It narrows the
    * claim to those lines; the server checks every id against the order it
@@ -304,7 +379,6 @@ export const api = {
     orderId: string | null;
     message: string;
     itemIds?: readonly string[];
-    shopping?: boolean;
   }) =>
     post<
       | { request: RefundRequestDto; duplicate?: DuplicateNotice }
@@ -316,9 +390,10 @@ export const api = {
           itemIds: readonly string[];
           /** Where the pipeline stopped, for the pending bubble. */
           progressStage: string | null;
+          /** What the intake step had to do before asking, e.g. a confirmation note. */
+          notice: string | null;
         }
       | ({ received: true } & AgentRoutedReply)
-      | { shopAnswer: ShopAnswerDto }
       | { status: string; requestId: string }
     >('/api/chat/messages', input),
 
@@ -365,6 +440,55 @@ export const api = {
   denyReturn: (id: string, reason: string) =>
     post<ReturnDetailDto>(`/api/admin/returns/${id}/deny`, { reason }),
 
+  /** Opening a return from the console, by the agent on the case. */
+  createStaffReturn: (body: {
+    requestId?: string;
+    orderId: string;
+    customerId: string;
+    items: readonly StaffLineChoice[];
+    reason: string;
+  }): Promise<{ return: ReturnDto }> => post('/api/admin/returns', body),
+
+  /** The order and its lines, for the console's item picker. 404 when they do not belong together. */
+  staffOrder: (customerId: string, orderId: string): Promise<StaffOrderDto> =>
+    request(`/api/staff/order?${new URLSearchParams({ customerId, orderId }).toString()}`),
+
+  /**
+   * The staff retry of the money action: reserve an authorised amount against a
+   * request. Server derives the full order total when no amount is sent.
+   */
+  authoriseFullRefund: (requestId: string, amountCents?: number): Promise<{ refund: RefundDto }> =>
+    post(`/api/admin/requests/${encodeURIComponent(requestId)}/authorise-refund`, {
+      amountCents,
+    }),
+
+  /* Exchanges: the replacement build, initiated from the console. */
+  listStaffExchanges: (
+    query: { status?: ExchangeStatus; orderId?: string; customerId?: string } = {},
+  ): Promise<{ exchanges: readonly ExchangeDto[] }> => request(`/api/staff/exchanges${exchangeQueryString(query)}`),
+  staffExchange: (id: string): Promise<ExchangeDetailDto> => request(`/api/staff/exchanges/${id}`),
+  staffExchangeByRequest: (requestId: string): Promise<ExchangeDetailDto> =>
+    request(`/api/staff/exchanges/by-request/${encodeURIComponent(requestId)}`),
+  createStaffExchange: (body: {
+    requestId?: string;
+    orderId: string;
+    customerId: string;
+    items: readonly StaffLineChoice[];
+    reason: string;
+    replacementNote?: string;
+  }): Promise<{ exchange: ExchangeDto }> => post('/api/staff/exchanges', body),
+  labelExchange: (id: string, body: { carrier: Carrier; labelUrl: string }) =>
+    post<ExchangeDetailDto>(`/api/staff/exchanges/${id}/label`, body),
+  shipExchange: (id: string, body: { carrier: Carrier; trackingNumber: string }) =>
+    post<ExchangeDetailDto>(`/api/staff/exchanges/${id}/ship`, body),
+  receiveExchange: (
+    id: string,
+    body: { lines: readonly { itemId: string; quantity: number; condition: string }[] },
+  ) => post<ExchangeDetailDto>(`/api/staff/exchanges/${id}/receive`, body),
+  replaceExchange: (id: string) => post<ExchangeDetailDto>(`/api/staff/exchanges/${id}/replace`, {}),
+  denyExchange: (id: string, reason: string) =>
+    post<ExchangeDetailDto>(`/api/staff/exchanges/${id}/deny`, { reason }),
+
   settleRefund: (id: string): Promise<{ refund: RefundDto }> => post(`/api/refunds/${id}/settle`, {}),
 
   releaseRefund: (id: string, reason: string): Promise<{ refund: RefundDto }> =>
@@ -405,11 +529,11 @@ export const api = {
   staffTakeOver: (customerId: string, orderId: string | null): Promise<{ handoff: { id: string; customerId: string; orderId: string | null; agentId: string; startedAt: string } }> =>
     post(`/api/staff/conversations/${encodeURIComponent(customerId)}/take-over`, { orderId }),
 
-  staffMessage: (customerId: string, body: string, mediaDataUrl?: string): Promise<{ message: { id: string; createdAt: string; sender: string; body: string; media: { type: string; url: string; bytes: number } | null } }> =>
-    post(`/api/staff/conversations/${encodeURIComponent(customerId)}/message`, { body, media: mediaDataUrl ? { dataUrl: mediaDataUrl } : undefined }),
+  staffMessage: (customerId: string, body: string, mediaDataUrl?: string, orderId?: string | null): Promise<{ message: { id: string; createdAt: string; sender: string; body: string; media: { type: string; url: string; bytes: number } | null } }> =>
+    post(`/api/staff/conversations/${encodeURIComponent(customerId)}/message`, { body, media: mediaDataUrl ? { dataUrl: mediaDataUrl } : undefined, orderId }),
 
-  staffHandBack: (customerId: string): Promise<{ ended: { id: string; customerId: string; orderId: string | null; agentId: string; startedAt: string } }> =>
-    post(`/api/staff/conversations/${encodeURIComponent(customerId)}/hand-back`, {}),
+  staffHandBack: (customerId: string, orderId?: string | null): Promise<{ ended: { id: string; customerId: string; orderId: string | null; agentId: string; startedAt: string } }> =>
+    post(`/api/staff/conversations/${encodeURIComponent(customerId)}/hand-back`, { orderId }),
 
   staffCloseChat: (customerId: string, orderId: string | null): Promise<{ closure: { id: string; customerId: string; orderId: string | null; requestId: string; closedAt: string; closedBy: string; finalState: Decision } }> =>
     post(`/api/staff/conversations/${encodeURIComponent(customerId)}/close`, { orderId }),
@@ -431,6 +555,21 @@ function auditQueryString(filter: AuditFilter): string {
     if (value !== undefined && value !== null && String(value).length > 0) {
       search.set(key, String(value));
     }
+  }
+  const encoded = search.toString();
+  return encoded.length > 0 ? `?${encoded}` : '';
+}
+
+function exchangeQueryString(query: { status?: ExchangeStatus; orderId?: string; customerId?: string }): string {
+  const search = new URLSearchParams();
+  if (query.status !== undefined) {
+    search.set('status', query.status);
+  }
+  if (query.orderId !== undefined && query.orderId.length > 0) {
+    search.set('orderId', query.orderId);
+  }
+  if (query.customerId !== undefined && query.customerId.length > 0) {
+    search.set('customerId', query.customerId);
   }
   const encoded = search.toString();
   return encoded.length > 0 ? `?${encoded}` : '';

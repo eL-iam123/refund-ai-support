@@ -5,8 +5,6 @@ import {
   type IntakeInput,
   type IntakeReply,
   type AttemptObserver,
-  type ChatInput,
-  type ChatReply,
 } from './analyzer.js';
 import { scanForInjection } from '../security/injection.js';
 import { isNoComplaint, noComplaintQuestion } from '../response/noComplaint.js';
@@ -20,7 +18,7 @@ import { readClaim } from './reasonVocabulary.js';
  * language model: it reads reason words, a currency figure and an item name out
  * of the message and returns them as a claim. It is genuinely useful for two
  * things - running the whole product on a machine with no credentials, and
- * exercising the deterministic policy engine on all eighteen scenarios without a
+ * exercising the deterministic policy engine on the scenario suite without a
  * network - and it is never a safe substitute for a model, which is why
  * `readEnv` refuses it in production.
  *
@@ -34,7 +32,7 @@ import { readClaim } from './reasonVocabulary.js';
  *
  * The pattern set below is shared with the test suite, which is the reason it
  * lives here rather than in `src/test/`: there is one implementation of
- * "heuristic reading", tested by eighteen scenarios, used by both.
+ * "heuristic reading", tested by the scenario suite, used by both.
  */
 
 const MODEL = 'local-heuristic-v1';
@@ -74,9 +72,6 @@ export function LocalAnalyzer(): AIAnalyzer {
     unavailableReason: null,
     analyze(input, observer) {
       return Promise.resolve(analyzeWithHeuristics(input, observer));
-    },
-    chat(input, observer) {
-      return Promise.resolve(chatWithHeuristics(input, observer));
     },
     summariseCase(input) {
       // Written from the decision rather than generated, so the case file says
@@ -216,44 +211,3 @@ function mentionedItems(message: string, items: readonly { id: string; name: str
  * Provides a helpful, conversational response with no monetary authority.
  * Can use the remind_admin tool to notify the human agent.
  */
-function chatWithHeuristics(input: ChatInput, observer: AttemptObserver): ChatReply {
-  observer({ model: MODEL, attempt: 1, ok: true, latencyMs: 0, promptTokens: null, completionTokens: null, error: null });
-
-  // Check if the customer is pushing/waiting - use remind_admin tool
-  const isPushing = /(?:where|wait|waiting|anyone|hello|any\s+one|anybody|agent|human|admin|help|anyone\s+there|any\s+updates?|status|waiting|waited|long\s+time|taking\s+long|hurry|urgent|asap|immediately)/i.test(input.message);
-
-  if (isPushing && input.tools.some(t => t.name === 'remind_admin')) {
-    return {
-      kind: 'tool_call',
-      tool: 'remind_admin',
-      model: MODEL,
-    };
-  }
-
-  // Conversational responses based on message content
-  const isGreeting = /^(?:hi|hello|hey|hiya|howdy|good\s+(?:morning|afternoon|evening)|hi\s+there|hey\s+there)/i.test(input.message.trim());
-  const isThanks = /^(?:thanks|thank\s+you|thx|ty|thank\s+u)/i.test(input.message.trim());
-  const isWaiting = /(?:wait|waiting|waited|long\s+time|taking\s+long|any\s+updates?|status|any\s+news)/i.test(input.message);
-  const isFrustrated = /(?:frustrat|annoy|angry|upset|ridiculous|unacceptable|unprofessional|waste|wasting|worst)/i.test(input.message);
-
-  let response: string;
-
-  if (isGreeting && !isWaiting) {
-    response = "Hi there! I can see you're connected with a human agent who's looking into your case. They'll be with you shortly. Is there anything else I can help with while you wait?";
-  } else if (isThanks) {
-    response = "You're welcome! Your agent is working on this and will update you soon. Let me know if there's anything else you need.";
-  } else if (isFrustrated) {
-    response = "I understand this is frustrating, and I'm sorry for the wait. Your human agent is aware and is looking into this for you. I've let them know you're waiting. Is there anything specific you'd like me to pass along?";
-  } else if (isWaiting) {
-    response = "I know waiting is frustrating. Your agent is still reviewing this and will get back to you as soon as they can. I've given them a nudge that you're waiting. Is there anything else I can help with in the meantime?";
-  } else {
-    // Default helpful response
-    response = "I'm here to help while your agent works on this. They're reviewing the details and will get back to you soon. Is there anything specific you'd like me to pass along or any other questions I can answer while you wait?";
-  }
-
-  return {
-    kind: 'text',
-    text: response,
-    model: MODEL,
-  };
-}

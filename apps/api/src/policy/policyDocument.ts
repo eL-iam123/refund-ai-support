@@ -124,7 +124,7 @@ const SECTIONS: readonly SectionSpec[] = [
     number: '4.1',
     title: 'Human review above threshold',
     body: [
-      `A refund of more than ${money(HUMAN_REVIEW_THRESHOLD_CENTS)} against a single order requires human review. This is checked against the **order total**, before item-level denials are applied, so an order cannot be split to evade it.`,
+      `A refund of more than ${money(HUMAN_REVIEW_THRESHOLD_CENTS)} requires human review. The amount is what the request actually puts at risk: the sum of the items the customer named, or the **order total** when they named none. It is measured before item-level denials are applied, so a request cannot dodge the threshold by excluding the very items it asks to refund, and a whole-order request cannot slip under it either.`,
     ],
     ruleId: 'R-03',
   },
@@ -133,7 +133,7 @@ const SECTIONS: readonly SectionSpec[] = [
     title: 'Eligible remainder after item-level denials',
     body: [
       'When item-level clauses (§2.1, §2.2, §2.4) reduce the eligible amount below the order total, the reduction is recorded explicitly in the audit trail.',
-      'The §4.1 review threshold is evaluated against the order total, before those denials are applied, so it is not affected by them. This clause never decides anything. It exists so the eligible remainder is legible to an auditor instead of looking accidental.',
+      'The §4.1 review threshold is evaluated against the claimed amount - the sum of the items the customer named, or the order total when they name none - before those denials are applied, so it is not affected by them. This clause never decides anything. It exists so the eligible remainder is legible to an auditor instead of looking accidental.',
     ],
     ruleId: 'R-03b',
   },
@@ -208,9 +208,9 @@ const SECTIONS: readonly SectionSpec[] = [
   },
   {
     number: '6.5',
-    title: 'Order total above manual-review ceiling',
+    title: 'Amount at risk above manual-review ceiling',
     body: [
-      `When the total value of an order exceeds the configured ceiling (default ${formatCents(ESCALATION_CEILING_CENTS)}), the request is escalated to a person before any item is selected and before any model is called.`,
+      `When the amount a request puts at risk exceeds the configured ceiling (default ${formatCents(ESCALATION_CEILING_CENTS)}), it is escalated to a person before the model is called. The amount is the sum of the items the customer named, or the order total when they named none; both are computable from the order facts alone, so this check still terminates before the model.`,
     ],
     ruleId: 'R-15',
   },

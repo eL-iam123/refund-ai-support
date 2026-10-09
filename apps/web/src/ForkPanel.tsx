@@ -19,10 +19,12 @@ export function ForkPanel({
   forks,
   generation,
   refresh,
+  socketError,
 }: {
   forks: readonly CustomerFork[];
   generation: number;
   refresh: () => void;
+  socketError: string | null;
 }): ReactNode {
   if (forks.length === 0) {
     return null;
@@ -30,6 +32,9 @@ export function ForkPanel({
   return (
     <aside className="fork-panel" aria-label="Your cases with a person">
       <h2>Talking with a person</h2>
+      {socketError !== null && (
+        <p className="error-note" role="status">{socketError}</p>
+      )}
       {forks.map((fork) => (
         <ForkThread key={fork.handoffId} fork={fork} generation={generation} refresh={refresh} />
       ))}
@@ -42,15 +47,14 @@ export function useForkList(customerId: string | null): {
   forks: readonly CustomerFork[];
   generation: number;
   refresh: () => void;
+  socketError: string | null;
 } {
-  // Tagged with whose forks these are, so switching accounts hides the
-  // previous customer's cases during render instead of flashing them while
-  // the new fetch is in flight.
   const [snapshot, setSnapshot] = useState<{ customer: string | null; forks: readonly CustomerFork[] }>({
     customer: null,
     forks: [],
   });
   const [generation, setGeneration] = useState(0);
+  const [socketError, setSocketError] = useState<string | null>(null);
   const refresh = useCallback(() => {
     if (customerId === null) {
       return;
@@ -77,10 +81,13 @@ export function useForkList(customerId: string | null): {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const socket = new WebSocket(`${scheme}://${location.host}/api/shop/chat/ws`);
     socket.onmessage = () => refresh();
+    socket.onerror = () => {
+      setSocketError('The live update link dropped. Retrying in the background.');
+    };
     return () => socket.close();
   }, [customerId, refresh]);
 
-  return { forks: snapshot.customer === customerId ? snapshot.forks : [], generation, refresh };
+  return { forks: snapshot.customer === customerId ? snapshot.forks : [], generation, refresh, socketError };
 }
 
 /** One fork: what the case is about, the thread so far, and a box that writes to it. */

@@ -205,7 +205,7 @@ export function checkout(db: Db, customerId: string, lines: readonly CartLine[],
     insertOrder(db, orderId, customerId, priced, now);
     // Collected as they are inserted, because the line id is generated here and
     // the response has to name the same rows the next return request will.
-    const items = priced.map((line) => insertOrderItem(db, orderId, line));
+    const items = priced.map((line, index) => insertOrderItem(db, orderId, line, index + 1));
 
     return {
       id: orderId,
@@ -254,13 +254,18 @@ function insertOrder(db: Db, orderId: string, customerId: string, priced: readon
  * The `stock >= ?` guard makes overselling impossible even if some future path
  * reaches this without `mergeLines` first: the update simply matches no rows,
  * and the surrounding transaction rolls the whole order back.
+ *
+ * The line id embeds the order id and the line's position in the basket -
+ * `ITM-ORD-1003-01` - so lines sort with their order and stay human-readable
+ * in logs, ledger rows and support references, the same way order ids do.
  */
 function insertOrderItem(
   db: Db,
   orderId: string,
   line: PricedLine,
+  lineNumber: number,
 ): { readonly itemId: string; readonly productId: string; readonly name: string; readonly quantity: number; readonly unitPriceCents: number } {
-  const itemId = `ITM-${randomUUID()}`;
+  const itemId = `ITM-${orderId}-${String(lineNumber).padStart(2, '0')}`;
   const { product, quantity } = line;
 
   db.prepare(

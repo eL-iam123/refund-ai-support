@@ -6,8 +6,6 @@ import {
   type IntakeInput,
   type IntakeReply,
   type AttemptObserver,
-  type ChatInput,
-  type ChatReply,
 } from '../ai/analyzer.js';
 import { LocalAnalyzer } from '../ai/localAnalyzer.js';
 
@@ -93,18 +91,6 @@ function fixedAnalyzer(behaviour: { readonly extraction: Partial<ClaimExtraction
       return Promise.resolve(completeReply(extraction, 'fake-fixed-v1'));
     },
     summariseCase: fakeCaseNote,
-    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
-      observer({
-        model: 'fake-fixed-v1',
-        attempt: 1,
-        ok: true,
-        latencyMs: 0,
-        promptTokens: null,
-        completionTokens: null,
-        error: null,
-      });
-      return Promise.resolve({ kind: 'text', text: "I'm here to help while your agent reviews your case.", model: 'fake-fixed-v1' });
-    },
   };
 }
 
@@ -138,18 +124,6 @@ function askItemsAnalyzer(behaviour: {
       return Promise.resolve(completeReply(extraction, 'fake-ask-items-v1'));
     },
     summariseCase: fakeCaseNote,
-    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
-      observer({
-        model: 'fake-ask-items-v1',
-        attempt: 1,
-        ok: true,
-        latencyMs: 0,
-        promptTokens: null,
-        completionTokens: null,
-        error: null,
-      });
-      return Promise.resolve({ kind: 'text', text: "I'm here to help while your agent reviews your case.", model: 'fake-ask-items-v1' });
-    },
   };
 }
 
@@ -188,18 +162,6 @@ function askAnalyzer(behaviour: {
       return Promise.resolve(completeReply(extraction, 'fake-ask-v1'));
     },
     summariseCase: fakeCaseNote,
-    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
-      observer({
-        model: 'fake-ask-v1',
-        attempt: 1,
-        ok: true,
-        latencyMs: 0,
-        promptTokens: null,
-        completionTokens: null,
-        error: null,
-      });
-      return Promise.resolve({ kind: 'text', text: "I'm here to help while your agent reviews your case.", model: 'fake-ask-v1' });
-    },
   };
 }
 
@@ -214,10 +176,6 @@ function unavailableAnalyzer(message: string): AIAnalyzer {
       return Promise.reject(new AiUnavailableError(message));
     },
     summariseCase: fakeCaseNote,
-    chat(_input: ChatInput, observer: AttemptObserver): Promise<ChatReply> {
-      recordOk(observer, 'fake-unavailable-v1');
-      return Promise.reject(new AiUnavailableError(message));
-    },
   };
 }
 

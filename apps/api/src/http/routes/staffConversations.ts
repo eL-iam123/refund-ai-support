@@ -13,6 +13,7 @@ import {
   claimUnattendedHandoff,
   handoffById,
   listConversationCandidates,
+  liveHandoffForThread,
   recordAgentMessage,
   startHandoff,
   HandoffAlreadyActiveError,
@@ -51,7 +52,36 @@ const TakeOverSchema = z.object({
 
 const StaffMessageSchema = z.object({
   body: z.string().max(4000).optional(),
+  // Which thread the message is written for. With more than one escalated order
+  // live for a customer, the console must not guess the customer is one
+  // conversation; the client sends the order it has open. Absent (old clients),
+  // the customer-wide newest takeover is used, as before.
+  orderId: z.string().min(1).nullable().optional(),
 });
+
+const HandBackSchema = z.object({
+  orderId: z.string().min(1).nullable().optional(),
+});
+
+/**
+ * The thread a hand-back ends, from a body that may not be there.
+ *
+ * The console sends the order it has open; older clients and the raw endpoint
+ * send no body at all, which means "the whole customer", as before the forks.
+ */
+function handBackOrderId(body: unknown): string | null {
+  if (body === undefined || body === null) {
+    return null;
+  }
+  const parsed = HandBackSchema.safeParse(body);
+  if (!parsed.success) {
+    throw badRequest(
+      'invalid hand-back',
+      parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  return parsed.data.orderId ?? null;
+}
 
 const ConversationQuerySchema = z.object({
   customerId: z.string().min(1),
@@ -154,8 +184,10 @@ function takeOver(
   // An escalated thread already has the takeover that was raised for a person,
   // so taking it over is claiming that one rather than opening a second. Without
   // this the customer who escalated automatically could never be helped by a
-  // human - the very outcome the automatic takeover exists to reach.
-  const claimed = claimUnattendedHandoff(ctx.db, params.customerId, agentId);
+  // human - the very outcome the automatic takeover exists to reach. Claimed by
+  // the order in the body, so a second live escalation on another order is not
+  // grabbed along with this one.
+  const claimed = claimUnattendedHandoff(ctx.db, params.customerId, body.data.orderId, agentId);
   if (claimed !== null) {
     ctx.log.info({ customerId: params.customerId, handoffId: claimed.id, agentId }, 'staff.handoff.claimed');
     announceHandoff(hub, params.customerId, claimed, agentId);
@@ -209,6 +241,19 @@ function announceHandoff(hub: LiveHub, customerId: string, handoff: ActiveHandof
   });
 }
 
+/**
+ * The live takeover a staff verb acts on.
+ *
+ * An explicit order means the one fork for that order - the console always
+ * sends it with the order it has open. Without one (old clients), the
+ * customer-wide newest takeover is used, as before.
+ */
+function activeHandoffFor(ctx: AppContext, customerId: string, orderId: string | null): ActiveHandoff | null {
+  return orderId === null
+    ? activeHandoffForCustomer(ctx.db, customerId)
+    : liveHandoffForThread(ctx.db, customerId, orderId);
+}
+
 function messageCustomer(
   ctx: AppContext,
   hub: LiveHub,
@@ -217,11 +262,12 @@ function messageCustomer(
   const params = request.params as { customerId: string };
   const body = StaffMessageSchema.safeParse(request.body);
   const text = body.success && body.data.body !== undefined ? body.data.body.trim() : '';
+  const orderId = body.success ? body.data.orderId ?? null : null;
   if (!body.success || text.length === 0) {
     throw badRequest('invalid message', ['body: must be a non-empty message']);
   }
 
-  const active = activeHandoffForCustomer(ctx.db, params.customerId);
+  const active = activeHandoffFor(ctx, params.customerId, orderId);
   if (active === null) {
     throw new HttpError(409, 'no_active_handoff', 'only a customer agent attached to this thread can message the customer');
   }
@@ -234,6 +280,7 @@ function messageCustomer(
     sender: 'agent',
     body: text,
     now: ctx.now(),
+    injection: { detected: false, signals: [], obfuscationNoted: false },
   });
 
   hub.notifyCustomer(params.customerId, {
@@ -256,14 +303,19 @@ function handBack(
   request: FastifyRequest,
 ): { ended: ActiveHandoff } {
   const params = request.params as { customerId: string };
-  const active = activeHandoffForCustomer(ctx.db, params.customerId);
+  const orderId = handBackOrderId(request.body);
+  const active = activeHandoffFor(ctx, params.customerId, orderId);
   if (active !== null && active.agentId !== requirePrincipal(request.principal).subject) {
     throw new HttpError(409, 'handoff_not_owned', 'only the assigned agent can hand this conversation back');
   }
 
   let ended: ActiveHandoff | null;
   try {
-    ended = endHandoff(ctx.db, params.customerId, ctx.now());
+    // End the takeover the lookup above resolved, not necessarily by the order
+    // named in the body: the no-order-at-all fallback (old clients, the raw
+    // endpoint) means "the customer's current takeover", and that one may well
+    // carry an order.
+    ended = endHandoff(ctx.db, params.customerId, active?.orderId ?? null, ctx.now());
   } catch (error) {
     if (error instanceof NoActiveHandoffError) {
       throw new HttpError(409, 'no_active_handoff', 'this customer has no customer agent attached');
@@ -309,7 +361,7 @@ function closeChat(
     throw new NotFoundError('customer', params.customerId);
   }
 
-  const active = activeHandoffForCustomer(ctx.db, params.customerId);
+  const active = liveHandoffForThread(ctx.db, params.customerId, body.data.orderId);
   let closure: ReturnType<typeof closeFinalizedChat>;
   try {
     closure = closeFinalizedChat(ctx.db, {
@@ -330,7 +382,7 @@ function closeChat(
     customerId: params.customerId,
     orderId: body.data.orderId,
   });
-  if (active !== null && active.orderId === body.data.orderId) {
+  if (active !== null) {
     hub.notifyCustomer(params.customerId, {
       type: 'agent.left',
       customerId: params.customerId,

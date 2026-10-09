@@ -82,7 +82,7 @@ export default tseslint.config(
 
   // --- Test files relax function-length: table-driven cases read better long.
   {
-    files: ['**/src/test/**/*.ts', '**/*.test.ts'],
+    files: ['**/src/test/**/*.ts', '**/src/test/**/*.tsx', '**/*.test.ts', '**/*.test.tsx'],
     rules: {
       'max-lines-per-function': 'off',
       'max-statements': 'off',

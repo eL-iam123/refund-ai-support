@@ -423,25 +423,30 @@ const PRESETS: Record<AiProvider, ProviderPreset> = {
     defaultModel: 'gpt-4o-mini',
     jsonMode: true,
   },
-  nvidia: {
+nvidia: {
     // NVIDIA NIM's OpenAI-compatible endpoint. A key from build.nvidia.com; the
     // developer tier is free, and unlike OpenRouter's free router it serves a
     // named model, so a prompt that works keeps working.
     //
     // Two measured facts chose this id. First, `GET /v1/models` advertises models
     // an account cannot actually invoke - llama-3.1-nemotron-70b-instruct and
-    // nemotron-4-340b-instruct both answered 404 "not found for account" - so
-    // the catalogue is not evidence that a model works. Second, of the models
-    // this account can run, this is the one measured returning schema-valid
-    // JSON: nemotron-3-super-120b-a12b and nemotron-3.5-lightning both ignored
-    // `response_format` and spent the whole token budget on prose.
+    // nemotron-4-340b-instruct both answered 404 "not found for account", and
+    // mistralai/mistral-7b-instruct-v0.3 is advertised but answers 404 on
+    // invoke - so the catalogue is not evidence that a model works. Second, of
+    // the models this account can run, this is the one measured returning
+    // schema-valid JSON: openai/gpt-oss-20b answered 200 with the exact object
+    // under `response_format: json_object`. (meta/llama-3.1-8b-instruct used to
+    // hold this spot until NVIDIA retired it on 2026-08-26 with a 410 Gone;
+    // nemotron-3-super-120b-a12b and nemotron-3.5-lightning both ignored
+    // response_format and spent the whole token budget on prose.)
     kind: 'openai_compatible',
     baseUrl: 'https://integrate.api.nvidia.com/v1',
     apiKeyEnv: 'NVIDIA_API_KEY',
     label: 'nvidia',
-    defaultModel: 'nvidia/nemotron-3-ultra-550b-a55b',
+    defaultModel: 'openai/gpt-oss-20b',
     jsonMode: true,
-  },
+}
+,
   gemini: {
     // Google's OpenAI compatibility layer. It is a real endpoint that speaks the
     // chat-completions shape, so it reuses the OpenAI adapter rather than

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { describe } from './api';
 
 /**
@@ -29,10 +29,20 @@ interface Settled<T> {
 
 export function useAsyncData<T>(load: () => Promise<T>, key: string): Async<T> {
   const [settled, setSettled] = useState<Settled<T>>({ key, state: { status: 'loading' } });
+  const loadRef = useRef(load);
+
+  // Keep `load` out of the fetch effect's dependency list: callers pass inline
+  // closures that are new on every render, so depending on the identity would
+  // refetch on each render. The ref is refreshed in an effect instead - the
+  // legal place to write one - and is always current before the fetch effect
+  // runs in the same commit.
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
 
   useEffect(() => {
     let cancelled = false;
-    void load().then(
+    void loadRef.current().then(
       (value) => {
         if (!cancelled) {
           setSettled({ key, state: { status: 'ready', value } });
@@ -47,7 +57,7 @@ export function useAsyncData<T>(load: () => Promise<T>, key: string): Async<T> {
     return () => {
       cancelled = true;
     };
-  }, [load, key]);
+  }, [key]);
 
   return settled.key === key ? settled.state : { status: 'loading' };
 }

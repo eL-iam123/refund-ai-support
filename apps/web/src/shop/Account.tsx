@@ -29,7 +29,7 @@ export function AccountPage({
   }
 
   return (
-    <div className="two-col">
+    <div className="two-col account-page">
       <SignInForm error={error} busy={busy} setError={setError} setBusy={setBusy} onDone={onSignedIn} />
       <DemoAccounts error={error} setError={setError} setBusy={setBusy} onDone={onSignedIn} />
       <RegisterForm onDone={onSignedIn} />

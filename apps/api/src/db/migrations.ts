@@ -801,6 +801,131 @@ const MIGRATIONS: readonly Migration[] = [
       db.exec('CREATE INDEX IF NOT EXISTS idx_handoffs_request ON handoffs(request_id)');
     },
   },
+  {
+    version: 24,
+    name: 'refund_items per-line coverage',
+    up: (db) => {
+      // Which order lines a refund's money covers. One row per order id means a
+      // single multi-line refund is recorded as one parent row plus one child per
+      // covered line, so the money stays attributable to the lines it was
+      // calculated from. A refund that predates this table has no rows here, which
+      // callers read as "whole order" - the historical default.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS refund_items (
+          refund_id TEXT NOT NULL REFERENCES refunds(id) ON DELETE CASCADE,
+          item_id   TEXT NOT NULL REFERENCES order_items(id) ON DELETE CASCADE,
+          PRIMARY KEY (refund_id, item_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_refund_items_item ON refund_items(item_id);
+      `);
+    },
+  },
+  {
+    version: 25,
+    name: 'one live takeover per (customer, order)',
+    up: (db) => {
+      // Forks exist so one order's escalation stops swallowing the customer's
+      // other threads. The old customer-wide unique index made that impossible:
+      // the moment anything was live, a second order's escalation had no takeover
+      // to raise, and no human attention. So the uniqueness moves to the level a
+      // fork actually speaks at - one live takeover per escalated order - while
+      // the mid-clarify case (no order yet) and the whole-thread staff takeover
+      // stay customer-wide, because each of those legitimately claims everything.
+      db.exec(`
+        DROP INDEX IF EXISTS idx_handoffs_one_active;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_handoffs_one_active_order
+          ON handoffs(customer_id, order_id) WHERE ended_at IS NULL AND order_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_handoffs_one_active_none
+          ON handoffs(customer_id) WHERE ended_at IS NULL AND order_id IS NULL;
+      `);
+    },
+  },
+  {
+    version: 26,
+    name: 'injection flag on agent messages',
+    up: (db) => {
+      // What a routed message used to record when a takeover carried an injection
+      // probe. Nothing writes these columns today - the pipeline's injection_json
+      // is the record a decision keeps - so they stay empty, but the migration is
+      // a frozen artifact: a schema that already ran it must not be asked to run
+      // a rewritten version of the same step. Guarded like the other column adds,
+      // so replaying steps (the migration tests deliberately rewind a database to
+      // version 16 and run every step again over a current schema) is a no-op
+      // for columns that are already there.
+      if (!hasColumn(db, 'agent_messages', 'injection_detected')) {
+        db.exec('ALTER TABLE agent_messages ADD COLUMN injection_detected INTEGER DEFAULT 0');
+      }
+      if (!hasColumn(db, 'agent_messages', 'injection_signals')) {
+        db.exec('ALTER TABLE agent_messages ADD COLUMN injection_signals TEXT');
+      }
+    },
+  },
+  {
+    version: 27,
+    name: 'exchanges workflow',
+    up: (db) => {
+      // A replacement, kept separate from both the refund and the return tables.
+      // An exchange is goods coming back AND goods going out; a return is only
+      // the inbound half, and a refund is only money. Mixing the three together
+      // would make "we replaced the lamp" answerable with a restock row, which
+      // is how a customer ends up told the replacement shipped when it was only
+      // the old one that came back. So an exchange has its own status track -
+      // the inbound leg mirrors a return, then the replacement goes out - and
+      // advances the same way, through validated ledger transitions only.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS exchanges (
+          id                 TEXT PRIMARY KEY,
+          -- Nullable, and unique when present: one exchange per refund request.
+          -- An exchange can begin without a request (a customer may simply ask),
+          -- but where one exists it is the idempotency key, and the same unique
+          -- index both guarantees that and keeps request-less exchanges unclouded.
+          request_id         TEXT REFERENCES refund_requests(id) ON DELETE CASCADE,
+          order_id           TEXT NOT NULL REFERENCES orders(id),
+          customer_id        TEXT NOT NULL REFERENCES customers(id),
+          status             TEXT NOT NULL CHECK (
+                               status IN ('exchange_requested', 'exchange_label_generated', 'exchange_shipped', 'exchange_received', 'exchange_replaced', 'exchange_denied')
+                             ),
+          reason             TEXT NOT NULL,
+          replacement_note   TEXT,
+          tracking_number    TEXT,
+          carrier            TEXT,
+          label_url          TEXT,
+          shipped_at         TEXT,
+          received_at        TEXT,
+          replacement_sent_at TEXT,
+          denied_at          TEXT,
+          denied_reason      TEXT,
+          created_at         TEXT NOT NULL,
+          updated_at         TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_exchanges_order ON exchanges(order_id);
+        CREATE INDEX IF NOT EXISTS idx_exchanges_customer ON exchanges(customer_id);
+        CREATE INDEX IF NOT EXISTS idx_exchanges_status ON exchanges(status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_exchanges_request ON exchanges(request_id)
+          WHERE request_id IS NOT NULL;
+      `);
+
+      // The lines the customer is swapping, snapshotted from the order exactly
+      // like a return's items: name and price copied at initiation so the record
+      // still reads correctly if the catalogue is edited later. Received quantity
+      // is recorded separately so a short-shipped box is not silently reconciled
+      // against what was asked for.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS exchange_items (
+          id                TEXT PRIMARY KEY,
+          exchange_id       TEXT NOT NULL REFERENCES exchanges(id) ON DELETE CASCADE,
+          item_id           TEXT NOT NULL REFERENCES order_items(id),
+          name              TEXT NOT NULL,
+          quantity          INTEGER NOT NULL CHECK (quantity > 0),
+          unit_price_cents  INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+          received_quantity INTEGER NOT NULL DEFAULT 0,
+          received_condition TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_exchange_items_exchange ON exchange_items(exchange_id);
+        CREATE INDEX IF NOT EXISTS idx_exchange_items_item ON exchange_items(item_id);
+      `);
+    },
+  },
 ];
 
 /**

@@ -340,4 +340,20 @@ describe('the case note, at the boundary that decides it', () => {
     expect(CaseSummarySchema.safeParse('  a real sentence.  ').data).toBe('a real sentence.');
     expect(CaseSummarySchema.safeParse('   ').success).toBe(false);
   });
+
+  it('drops a note naming an amount that is not the fixed decision', async () => {
+    const { caseNoteMatchesOutcome } = await import('../ai/schemas.js');
+    // The deciding rule chose $450; a note that names it is fine...
+    expect(caseNoteMatchesOutcome('Refunded $450.00 for the charger, per R-04.', 45000)).toBe(true);
+    expect(caseNoteMatchesOutcome('Refunded 450 dollars for the charger.', 45000)).toBe(true);
+    expect(caseNoteMatchesOutcome('Decided approved, 450 USD.', 45000)).toBe(true);
+    // ...a note that names a different figure bases a person on a case that was
+    // never made, which is the whole reason the note exists to be trusted.
+    expect(caseNoteMatchesOutcome('Refunded $900 for the charger.', 45000)).toBe(false);
+    expect(caseNoteMatchesOutcome('Paying 900 USD.', 45000)).toBe(false);
+    // A denied case has no money to name; quoting a bare figure with no currency
+    // is an ordinal, not an offer to pay, so it does not trip the guard.
+    expect(caseNoteMatchesOutcome('Denied; three items in the order.', 0)).toBe(true);
+    expect(caseNoteMatchesOutcome('Denied after the customer asked for $90.', 0)).toBe(false);
+  });
 });

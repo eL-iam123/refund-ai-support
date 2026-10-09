@@ -356,7 +356,7 @@ describe('POST /api/chat/messages', () => {
 });
 
 describe('HTTP infrastructure guards', () => {
-  it('reports a missing provider as unavailable on the shop status endpoint', async () => {
+  it('reports a missing provider as unavailable on the health endpoint', async () => {
     const db = openMemoryDatabase();
     seedDatabase(db, new Date('2026-03-14T12:00:00.000Z'));
     const unconfigured = buildApp({
@@ -366,7 +366,7 @@ describe('HTTP infrastructure guards', () => {
       now: () => new Date('2026-03-14T12:00:00.000Z'),
     });
     try {
-      const status = await unconfigured.inject({ method: 'GET', url: '/api/shop/assistant-status' });
+      const status = await unconfigured.inject({ method: 'GET', url: '/api/health' });
       expect(status.statusCode).toBe(200);
       expect(status.json<{ aiAvailable: boolean; aiMode: string }>().aiAvailable).toBe(false);
       expect(status.json<{ aiAvailable: boolean; aiMode: string }>().aiMode).toContain('unconfigured');

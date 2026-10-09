@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { aiModeLabel, type AppContext } from '../context.js';
+import type { AppContext } from '../context.js';
 import { badRequest, conflict, HttpError, NotFoundError, UnauthorizedError } from '../errors.js';
 import {
   authenticate,
@@ -14,8 +14,6 @@ import {
 } from '../../shop/auth.js';
 import { checkout, listOrdersForCustomer, listProducts, type Product, type ShopOrder } from '../../shop/catalogue.js';
 import { searchProducts } from '../../retrieval/catalogSearch.js';
-import { listShopTurns, listShopTurnsForOrder } from '../../db/shopAssistant.js';
-import { greetingFor, toShopAnswer } from '../../shop/assistant.js';
 import { findRequestById, insertAuditEvent } from '../../db/requestRepository.js';
 import { findOrder } from '../../db/orderRepository.js';
 import { recordCustomerUpdate } from '../../db/customerUpdates.js';
@@ -24,7 +22,8 @@ import { followUpFor } from '../../response/followUp.js';
 import { AppealAlreadyPendingError, fileAppeal, openAppealForRequest } from '../../db/appeals.js';
 import { FULLY_REFUNDED } from '../../policy/constants.js';
 import { isChatClosed } from '../../db/chatClosures.js';
-import { activeHandoffForCustomer, ESCALATION_AGENT, forkScopeForHandoff, handoffById, liveClaimedForks, messagesForHandoff, recordAgentMessage, type ActiveHandoff, type AgentMessage, type ForkScope } from '../../db/handoffs.js';
+import { ESCALATION_AGENT, forkScopeForHandoff, handoffById, liveClaimedForks, liveHandoffForThread, messagesForHandoff, recordAgentMessage, type ActiveHandoff, type AgentMessage, type ForkScope } from '../../db/handoffs.js';
+import { scanForInjection } from '../../security/injection.js';
 import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
 
@@ -43,19 +42,6 @@ const ChatHistoryQuery = z.object({
   // on every page load. The API returns the most recent N, oldest-first.
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
-
-/**
- * What the storefront says when no key is configured.
- *
- * Short enough to sit in a panel, and complete enough to act on: paste the key
- * into `AI_API_KEY` in `.env` and restart. The provider is worked out from the
- * key, so there is no second step and no lookup table to get wrong. The README
- * section is named rather than linked by anchor because anchors move.
- */
-const NO_API_KEY_NOTE =
-  'No API key is set, so requests are being escalated to a person instead of read by a model. ' +
-  'To turn the model on, paste your provider\'s key into AI_API_KEY in .env and restart the ' +
-  'server - the provider is worked out from the key. README.md, "Configuration", has the details.';
 
 const RegisterSchema = z.object({
   email: z.string().min(3).max(200),
@@ -97,39 +83,6 @@ const ProductSearchQuery = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
-/** The shopping thread read-back: the whole thread fits one bounded page. */
-const AssistantHistoryQuery = z.object({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-});
-
-/** Whose thread the greeting opens, and in which mode. Both optional. */
-const GreetingQuery = z.object({
-  orderId: z.string().trim().min(1).max(120).nullable().optional(),
-  shopping: z.coerce.boolean().optional(),
-});
-
-function handleAssistantGreeting(
-  request: FastifyRequest,
-  ctx: AppContext,
-): Promise<{ greeting: string | null }> {
-  const user = currentUser(request, ctx);
-  if (user === null) {
-    throw new UnauthorizedError('sign in to see your conversations');
-  }
-  const query = GreetingQuery.safeParse(request.query);
-  if (!query.success) {
-    throw badRequest(
-      'invalid greeting filter',
-      query.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
-    );
-  }
-  return greetingFor(ctx.db, ctx.pipeline, {
-    customerId: user.customerId,
-    orderId: query.data.orderId ?? null,
-    shopping: query.data.shopping ?? false,
-    now: ctx.now(),
-  });
-}
 
 /**
  * Why the customer thinks the refusal was wrong, as the person who reads it
@@ -382,19 +335,11 @@ function handleMe(request: FastifyRequest, ctx: AppContext): { user: ShopUser | 
   return user === null ? { user: null } : { user };
 }
 
-function handleAssistantStatus(ctx: AppContext): { aiMode: string; aiAvailable: boolean; aiNote: string } {
-  return {
-    aiMode: aiModeLabel(ctx.pipeline),
-    aiAvailable: ctx.pipeline.analyzer.available,
-    aiNote: ctx.pipeline.analyzer.available ? '' : NO_API_KEY_NOTE,
-  };
-}
-
 /**
  * Whether a person is holding this thread and has not answered yet.
  *
  * True only for a handoff a *named* agent owns - an unattended escalation is not a
- * person, and the assistant keeps answering through it - and only until that agent
+ * person, so the composer stays open through it - and only until that agent
  * sends something. Both halves matter: waiting for an agent who has already replied
  * would leave a customer staring at a disabled box after being answered, and waiting
  * on the unattended slot would disable the composer in exactly the deployments where
@@ -406,7 +351,7 @@ function handleAssistantStatus(ctx: AppContext): { aiMode: string; aiAvailable: 
  * whole-thread reach and blocks everywhere.
  */
 function awaitingPersonReply(db: Db, customerId: string, orderId: string): boolean {
-  const active = activeHandoffForCustomer(db, customerId);
+  const active = liveHandoffForThread(db, customerId, orderId);
   if (active === null || active.agentId === ESCALATION_AGENT) {
     return false;
   }
@@ -496,7 +441,6 @@ export function registerShopRoutes(app: FastifyInstance, ctx: AppContext, hub: L
   app.post('/api/shop/login', (request, reply) => handleLogin(request, reply, ctx));
   app.post('/api/shop/logout', (request, reply) => handleLogout(request, reply, ctx));
   app.get('/api/shop/me', (request) => handleMe(request, ctx));
-  app.get('/api/shop/assistant-status', () => handleAssistantStatus(ctx));
   app.get('/api/shop/orders', (request) => handleOrders(request, ctx));
   app.post('/api/shop/checkout', (request, reply) => handleCheckout(request, reply, ctx));
 
@@ -538,13 +482,6 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext, hub: L
       // agent messages are *after* the customer started typing to one.
       awaitingPerson: awaitingPersonReply(ctx.db, user.customerId, query.data.orderId),
       turns: conversationForOrder(ctx.db, user.customerId, query.data.orderId, ctx.now(), query.data.limit),
-      // The order's own assistant answers - order status asked here, not while
-      // browsing - so a reload replays what the customer already read instead
-      // of dropping it. Kept beside the thread rather than inside it, because
-      // the policy transcript reads that thread and must never see them.
-      assistantTurns: listShopTurnsForOrder(ctx.db, user.customerId, query.data.orderId, query.data.limit).map(
-        (turn) => ({ message: turn.customerMessage, shopAnswer: toShopAnswer(turn) }),
-      ),
     };
   });
 
@@ -562,40 +499,6 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext, hub: L
 
   registerForkRoutes(app, ctx, hub);
 
-  /**
-   * The customer's shopping thread with the assistant.
-   *
-   * Separate from the order thread above: these turns answered no claim and
-   * wrote no request, so they must not appear inside a conversation the
-   * policy transcript reads. Session-scoped like everything else on this
-   * table.
-   */
-  app.get('/api/shop/assistant/history', (request) => {
-    const user = currentUser(request, ctx);
-    if (user === null) {
-      throw new UnauthorizedError('sign in to see your conversations');
-    }
-    const query = AssistantHistoryQuery.safeParse(request.query);
-    if (!query.success) {
-      throw badRequest(
-        'invalid history filter',
-        query.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
-      );
-    }
-    return {
-      turns: listShopTurns(ctx.db, user.customerId, query.data.limit).map((turn) => ({
-        message: turn.customerMessage,
-        shopAnswer: toShopAnswer(turn),
-      })),
-    };
-  });
-
-  /**
-   * A fresh thread's greeting, with the customer's name in it when a model is
-   * available. Best-effort: null reads as the client's static greeting, so an
-   * unreachable model degrades to the same page rather than an error.
-   */
-  app.get('/api/shop/assistant/greeting', (request) => handleAssistantGreeting(request, ctx));
 }
 
 const ForkParams = z.object({
@@ -697,8 +600,14 @@ function handleForkMessage(
     throw badRequest('message is too long', [`message: must be at most ${ctx.env.MAX_MESSAGE_LENGTH} characters`]);
   }
   const fork = forkForCustomer(ctx.db, user.customerId, handoffId);
-  const live = activeHandoffForCustomer(ctx.db, user.customerId);
-  if (live === null || live.id !== fork.id) {
+  // Posting requires the takeover to be *live*: an ended fork stays readable as
+  // history, but writing to it would silently file a message nobody answers. The
+  // fork is verified by id (not by "is it the customer's only live one"), so a
+  // customer who has two escalations with two agents can carry on both threads.
+  const stillLive = ctx.db
+    .prepare('SELECT 1 AS present FROM handoffs WHERE id = ? AND ended_at IS NULL')
+    .get(fork.id);
+  if (stillLive === undefined) {
     throw new NotFoundError('fork', handoffId);
   }
   const message = recordAgentMessage(ctx.db, {
@@ -706,6 +615,7 @@ function handleForkMessage(
     sender: 'customer',
     body: parsed.data.message,
     now: ctx.now(),
+    injection: scanForInjection(parsed.data.message),
   });
   hub.notifyStaff({ type: 'customer.message', customerId: fork.customerId, message });
   hub.notifyStaff({ type: 'conversation.updated', customerId: fork.customerId, orderId: fork.orderId });

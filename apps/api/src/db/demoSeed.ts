@@ -391,14 +391,14 @@ function writeOrder(db: Db, spec: OrderSpec, customerIds: readonly string[], now
       spec.subscription === true ? 0 : 1,
     );
 
-    for (const line of spec.lines) {
+    for (const [lineNumber, line] of spec.lines.entries()) {
       db.prepare(
         `INSERT INTO order_items (
            id, order_id, product_id, name, unit_price_cents, quantity,
            final_sale, digital, downloaded, is_subscription
          ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 0, ?)`,
       ).run(
-        `ITM-${spec.id}-${line.productId}`,
+        `ITM-${spec.id}-${String(lineNumber + 1).padStart(2, '0')}`,
         spec.id,
         line.productId,
         line.name,

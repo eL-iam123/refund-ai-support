@@ -22,7 +22,7 @@ import { disputeCeiling, identifyOrder, type Identification } from './retrieval/
 import { scanForInjection } from './security/injection.js';
 import { transcriptForOrder } from './retrieval/conversation.js';
 import { adoptDialogueToOrder } from './db/dialogue.js';
-import { activeHandoffForCustomer } from './db/handoffs.js';
+import { liveHandoffForThread } from './db/handoffs.js';
 import { runFactGates, type GateResult } from './policy/gates.js';
 import { evaluateRule, evaluateRules } from './policy/engine.js';
 import { DEFAULT_DISCRETION } from './policy/discretion.js';
@@ -33,6 +33,7 @@ import { ESCALATION_CEILING_CENTS } from './policy/constants.js';
 import type { PolicyContext } from './policy/types.js';
 import { composeDeterministicResponse } from './response/compose.js';
 import { isNoComplaint, noComplaintQuestion, NO_COMPLAINT_MODEL } from './response/noComplaint.js';
+import { isPolicyQuestion, policyAnswerForOrder } from './response/policyQuestion.js';
 import { clarifySparseDamage } from './response/claimClarification.js';
 import { assistantLines, refineQuestion } from './response/questionGuard.js';
 import { nextMissingField, questionForField, type NextQuestionInput } from './response/nextQuestion.js';
@@ -240,6 +241,15 @@ export async function processRefundRequest(
     return askedResult(clarification, retrieval.order, retrieval.found.items.map((item) => item.id), intake, false, mode, log);
   }
 
+  if (retrieval.order !== null && isPolicyQuestion(input.message)) {
+    const gates = runFactGates(retrieval.context, input.itemIds);
+    const answer = policyAnswerForOrder(retrieval.order, input.itemIds, gates.blockedItems);
+    if (answer !== null) {
+      log.record('ai_analysis', 'policy question; answered from the deterministic floor, no claim filed');
+      return askedResult(answer, retrieval.order, input.itemIds, intake, false, mode, log);
+    }
+  }
+
   const gates = runFactGates(
     retrieval.context,
     input.itemIds,
@@ -281,6 +291,10 @@ async function decidedByGates(
   if (customerRequestedAgent) {
     log.record('intake', 'the customer asked to speak to an agent');
   }
+  const order = retrieval.order;
+  const validItemIds = order
+    ? input.itemIds.filter((id) => order.items.some((item) => item.id === id))
+    : input.itemIds;
   const decision = resolveDecision(
     db,
     retrieval.found,
@@ -290,9 +304,9 @@ async function decidedByGates(
     { extraction: null, grounding: null, proposal: null },
     intake.customer,
     deps.discretion ?? DEFAULT_DISCRETION,
-    // No claim was read, so the floor has nothing to apply to.
     undefined,
     customerRequestedAgent,
+    validItemIds,
   );
   log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
   // Decided by a rule, without the model: the claim was never read, so the ladder
@@ -343,7 +357,7 @@ async function afterGates(
     return pickerResult(analysis, retrieval, intake, mode, log);
   }
 
-  const reasonEvaluations = runReasonRules(retrieval.context, gates, analysis, log);
+  const reasonEvaluations = runReasonRules(retrieval.context, gates, analysis, log, input.itemIds);
   const customerRequestedAgent = wantsAnAgent(input.message);
   if (customerRequestedAgent) {
     log.record('intake', 'the customer asked to speak to an agent');
@@ -359,6 +373,7 @@ async function afterGates(
     deps.discretion ?? DEFAULT_DISCRETION,
     deps.minConfidence,
     customerRequestedAgent,
+    input.itemIds,
   );
   log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
 
@@ -368,7 +383,7 @@ async function afterGates(
   }
 
   const history = transcriptForOrder(db, input.customerId, orderIdFor(retrieval.order), input.now, HISTORY_LIMIT);
-  const consent = consentCheck(input, history, decision);
+  const consent = consentCheck(db, input, orderIdFor(retrieval.order), history, decision);
   if (consent !== null) {
     return askedResult(consent, retrieval.order, retrieval.found.items.map((item) => item.id), intake, true, mode, log);
   }
@@ -397,7 +412,9 @@ async function afterGates(
  * customer who simply says "yes" is confirmed without restating anything.
  */
 function consentCheck(
+  db: Db,
   input: ProcessInput,
+  orderId: string | null,
   history: readonly DialogueLine[],
   decision: RefundDecision,
 ): string | null {
@@ -411,13 +428,17 @@ function consentCheck(
     .map((turn) => turn.text)
     .join('\n');
 
-  // Already answered, two ways: money back in so many words, or agreement
-  // with this confirmation one turn ago. A stated fault is deliberately not
-  // consent - the remedy is the customer's to choose, whatever broke.
-  if (picksRefund(customerText)) {
+  // Already answered, two ways: money back in this message, in so many words,
+  // or agreement with this confirmation one turn ago. The ask is read off the
+  // message alone, not the thread: money asked for one problem is not consent
+  // for the next, and a thread that remembered every past ask would approve
+  // each new claim on the strength of an old one. A stated fault is
+  // deliberately not consent - the remedy is the customer's to choose,
+  // whatever broke.
+  if (picksRefund(input.message)) {
     return null;
   }
-  if (wasConfirmedJustNow(history, input.message)) {
+  if (wasConfirmedJustNow(db, input.customerId, orderId, input.message)) {
     return null;
   }
 
@@ -425,20 +446,55 @@ function consentCheck(
 }
 
 /**
+ * The claim a confirmation answer is answering, if it is answering one.
+ *
+ * A "yes" carries no claim of its own: analysed on its own words it evaporates
+ * into an escalation, and matched as a duplicate it collides with every other
+ * short answer on the order. So when the thread's latest dialogue turn is the
+ * remedy confirmation and the message confirms it, the claim that turn records
+ * stands in for analysis. Returns null for anything else, and analysis
+ * proceeds on the message itself.
+ *
+ * Read straight from the dialogue table in rowid order, not off the merged
+ * transcript: the transcript sorts ties by kind, so under a fixed clock the
+ * "last" turn is whichever kind ranked highest rather than what was actually
+ * said last. Insertion order is the only order that means latest here.
+ */
+export function confirmingClaimText(
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+  message: string,
+): string | null {
+  if (orderId === null || !confirmsIntent(message)) {
+    return null;
+  }
+  const row = db
+    .prepare(
+      `SELECT customer_message, assistant_question FROM shop_dialogue
+        WHERE customer_id = ? AND order_id IS ?
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(customerId, orderId) as
+    | { customer_message: string; assistant_question: string }
+    | undefined;
+  if (row === undefined || !row.assistant_question.includes(CONFIRMATION_MARK)) {
+    return null;
+  }
+  return row.customer_message.trim().length > 0 ? row.customer_message : null;
+}
+/**
  * Did the customer agree with the confirmation asked one turn ago?
  *
- * The transcript ends where the current message begins, so the agreement is
- * read off the request and the question off the last history line. Only the
- * *immediately* preceding question counts: an affirmative to a question about
- * which item is not consent to a refund, and treating it as consent is the
- * failure this whole feature exists to prevent.
+ * Read off the latest dialogue row rather than the merged transcript, for the
+ * same rowid-ordering reason as `confirmingClaimText`: only the *immediately*
+ * preceding question counts, and insertion order is what "preceding" means.
+ * An affirmative to a question about which item is not consent to a refund,
+ * and treating it as consent is the failure this whole feature exists to
+ * prevent.
  */
-function wasConfirmedJustNow(history: readonly DialogueLine[], message: string): boolean {
-  const asked = history.at(-1);
-  if (asked === undefined || asked.role !== 'assistant') {
-    return false;
-  }
-  return asked.text.includes(CONFIRMATION_MARK) && confirmsIntent(message);
+function wasConfirmedJustNow(db: Db, customerId: string, orderId: string | null, message: string): boolean {
+  return confirmingClaimText(db, customerId, orderId, message) !== null;
 }
 
 /**
@@ -918,10 +974,16 @@ async function analyseClaim(
   const order = retrieval.order;
   const history = transcriptForOrder(db, input.customerId, orderIdFor(order), input.now, HISTORY_LIMIT);
 
-  const facts = threadFacts(db, input.customerId, order, history, input.message);
+  // A confirmation answer carries no claim of its own: analyse the claim it
+  // answers instead of the bare affirmation, or "yes" evaporates into an
+  // escalation and the confirmation can never complete.
+  const claimedMessage =
+    confirmingClaimText(db, input.customerId, orderIdFor(order), input.message) ?? input.message;
+
+  const facts = threadFacts(db, input.customerId, order, history, claimedMessage);
   const resolvedItemIds = retrieval.found.items.map((item) => item.id);
 
-  const askedFirst = clarifyBeforeIntake(input.message, order, history, facts, resolvedItemIds, log);
+  const askedFirst = clarifyBeforeIntake(claimedMessage, order, history, facts, resolvedItemIds, log);
   if (askedFirst !== null) {
     return askedFirst;
   }
@@ -930,7 +992,7 @@ async function analyseClaim(
   try {
     reply = await deps.analyzer.analyze(
       {
-        message: input.message,
+        message: claimedMessage,
         order: toAnalyzerOrder(order),
         history,
         // The engine already knows whether the line is settled, so the picker is
@@ -1010,7 +1072,7 @@ function offerItemPicker(
     identification: retrieval.found,
     gates,
     injectionDetected: intake.injection.detected,
-    handoffActive: activeHandoffForCustomer(db, input.customerId) !== null,
+    handoffActive: liveHandoffForThread(db, input.customerId, retrieval.order?.id ?? null) !== null,
     request: { candidates: reply.candidates },
     config: deps.itemPicker ?? DEFAULT_ITEM_PICKER,
   });
@@ -1348,6 +1410,7 @@ function runReasonRules(
   gates: GateResult,
   analysis: Analysis,
   log: StageLog,
+  claimedItemIds?: readonly string[],
 ): RuleEvaluation[] {
   if (gates.terminal) {
     log.record('reason_rules', 'not reached: fact gates terminated the request');
@@ -1360,6 +1423,7 @@ function runReasonRules(
 
   const evaluations = evaluateRules(REASON_RULES, {
     ...context,
+    ...(claimedItemIds !== undefined ? { claimedItemIds } : {}),
     eligibleItems: gates.eligibleItems,
     blockedItems: gates.blockedItems,
     eligibleAmountCents: gates.eligibleAmountCents,
@@ -1388,6 +1452,7 @@ function resolveDecision(
   discretion: DiscretionConfig,
   minConfidence: number | undefined,
   customerRequestedAgent: boolean = false,
+  claimedItemIds?: readonly string[],
 ): RefundDecision {
   const order = found.order;
   return resolve({
@@ -1406,6 +1471,7 @@ function resolveDecision(
     discretion,
     minConfidence,
     customerRequestedAgent,
+    claimedItemIds,
   });
 }
 

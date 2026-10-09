@@ -49,16 +49,6 @@ async function runScenario(
       );
       return;
     }
-    if ('shopAnswer' in reply) {
-      // Scenarios exercise the refund pipeline, so a shopping answer here means
-      // the router misread a fixture. Recorded, not rendered as a decision: a
-      // shop answer id in the request column would link at a request that was
-      // never made.
-      setRunning((previous) =>
-        previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: 'answered as shopping' } : row)),
-      );
-      return;
-    }
     if ('status' in reply) {
       // The fixture's case is already open with a person: no new decision row,
       // so the row points at the open case instead of a request that was never made.

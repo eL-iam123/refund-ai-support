@@ -1,48 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { isSafeGeneralReply } from '../ai/replyGuard.js';
 import { inferTone } from '../response/tone.js';
 import type { DialogueLine } from '../ai/analyzer.js';
 
 /**
- * The conversational contract, both halves.
+ * Tone, as a pure function of the thread.
  *
- * The guard decides what model prose may reach a customer; tone decides how
- * the deterministic and prompted words sound. Both are pure functions of
- * their inputs, so both are pinned here rather than through HTTP.
+ * How the deterministic and prompted words sound: brief or warm, from the
+ * customer's own turns. Pinned here rather than through HTTP.
  */
-describe('isSafeGeneralReply', () => {
-  const safe: readonly string[] = [
-    'Hi! We sell lamps, mugs and kettles. Anything catch your eye?',
-    'Our return policy allows returns within 45 days of delivery.',
-    'Exchanges are possible for non-final-sale items - tell me what you have in mind.',
-    'We ship to most countries; delivery times vary by destination.',
-  ];
-  for (const text of safe) {
-    it(`allows "${text.slice(0, 40)}..."`, () => {
-      expect(isSafeGeneralReply(text)).toBe(true);
-    });
-  }
-
-  const unsafe: readonly [string, string][] = [
-    ['outcome verb', 'Your refund has been approved!'],
-    ['denial', 'Your claim was denied under R-02.'],
-    ['escalation', 'This has been escalated to a person.'],
-    ['figure', 'You will get $24.00 back.'],
-    ['figure words', 'The amount is 2400 cents.'],
-    ['first-person promise', 'We will refund you tomorrow.'],
-    ['their case', 'Your return is on its way.'],
-    ['order fact', 'Your order shipped yesterday and arrives Tuesday.'],
-    ['tracking', 'Your tracking number is 1Z999.'],
-    ['account access', 'I checked your account and found the order.'],
-    ['empty', '   '],
-  ];
-  for (const [name, text] of unsafe) {
-    it(`rejects ${name}`, () => {
-      expect(isSafeGeneralReply(text)).toBe(false);
-    });
-  }
-});
-
 describe('inferTone', () => {
   function lines(...texts: string[]): readonly DialogueLine[] {
     return texts.map((text) => ({ role: 'customer' as const, text }));

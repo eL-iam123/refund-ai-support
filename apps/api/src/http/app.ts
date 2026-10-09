@@ -16,6 +16,7 @@ import { registerCatalogRoutes } from './routes/catalog.js';
 import { registerShopRoutes } from './routes/shop.js';
 import { registerRefundRoutes } from './routes/refunds.js';
 import { registerReturnsRoutes } from './routes/returns.js';
+import { registerExchangeRoutes } from './routes/exchanges.js';
 import { registerAdminAuthRoutes } from './routes/adminAuth.js';
 import { registerStaffConversationRoutes } from './routes/staffConversations.js';
 import { registerStaffAnalyticsRoutes } from './routes/staffAnalytics.js';
@@ -128,6 +129,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   registerShopRoutes(app, ctx, hub);
   registerRefundRoutes(app, ctx);
   registerReturnsRoutes(app, ctx);
+  registerExchangeRoutes(app, ctx);
   registerStaffConversationRoutes(app, ctx, hub);
   registerStaffAnalyticsRoutes(app, ctx);
   // Unconditional, because a sign-in route that vanished on an unconfigured

@@ -6,10 +6,13 @@ import { createUser } from '../shop/auth.js';
 import { checkout } from '../shop/catalogue.js';
 import { insertRequest, type NewRequestRow } from '../db/requestRepository.js';
 import {
+  claimUnattendedHandoff,
   endHandoff,
   forkForMessage,
   forkScopeForHandoff,
   liveClaimedForks,
+  liveHandoffForThread,
+  liveHandoffsForCustomer,
   startHandoff,
   takeoverForEscalated,
   type ActiveHandoff,
@@ -190,10 +193,10 @@ describe('fork matching', () => {
     expect(forkForMessage(f.db, f.customerId, { orderId: f.orderId, itemIds: [f.lampItemId] })).toBeNull();
 
     // Claiming turns the marker into the fork; ending it resolves to nothing.
-    endHandoff(f.db, f.customerId, TEST_NOW);
+    endHandoff(f.db, f.customerId, f.orderId, TEST_NOW);
     const claimed = claimedFork(f, 'REQ-WAITING');
     expect(liveClaimedForks(f.db, f.customerId).map((entry) => entry.handoff.id)).toEqual([claimed.id]);
-    endHandoff(f.db, f.customerId, TEST_NOW);
+    endHandoff(f.db, f.customerId, f.orderId, TEST_NOW);
     expect(liveClaimedForks(f.db, f.customerId)).toEqual([]);
     f.db.close();
   });
@@ -206,6 +209,40 @@ describe('fork matching', () => {
 
     expect(liveClaimedForks(f.db, f.customerId).map((entry) => entry.scope)).toEqual([null]);
     expect(forkForMessage(f.db, f.customerId, { orderId: f.orderId, itemIds: [f.lampItemId] })).toBeNull();
+    f.db.close();
+  });
+
+  it('raises its own takeover for a second order instead of dropping it', () => {
+    const f = fixture();
+    const second = checkout(f.db, f.customerId, [{ productId: MUG_PRODUCT, quantity: 1 }], TEST_NOW);
+    const secondLine = second.items.find((line) => line.productId === MUG_PRODUCT);
+    if (secondLine === undefined) {
+      throw new Error('checkout did not return the mug line');
+    }
+    insertRequest(f.db, escalatedRow(f.customerId, f.orderId, 'REQ-A', [f.lampItemId], [f.lampItemId]));
+    insertRequest(f.db, escalatedRow(f.customerId, second.id, 'REQ-B', [secondLine.itemId], [secondLine.itemId]));
+
+    const firstFork = takeoverForEscalated(f.db, f.customerId, f.orderId, TEST_NOW);
+    const secondFork = takeoverForEscalated(f.db, f.customerId, second.id, TEST_NOW);
+    expect(firstFork?.unattended).toBe(true);
+    expect(secondFork?.unattended).toBe(true);
+    expect(firstFork?.id).not.toBe(secondFork?.id);
+
+    // Both live at once: the second order's escalation is no longer swallowed by
+    // the first order's takeover.
+    expect(liveHandoffsForCustomer(f.db, f.customerId)).toHaveLength(2);
+    expect(liveHandoffForThread(f.db, f.customerId, f.orderId)?.id).toBe(firstFork?.id);
+    expect(liveHandoffForThread(f.db, f.customerId, second.id)?.id).toBe(secondFork?.id);
+    // A follow-up on a handled thread reuses its own takeover, not a second one.
+    expect(takeoverForEscalated(f.db, f.customerId, f.orderId, TEST_NOW)?.id).toBe(firstFork?.id);
+
+    // A person claiming one thread leaves the other's marker waiting for its own
+    // person, and each order can be claimed in turn.
+    expect(claimUnattendedHandoff(f.db, f.customerId, f.orderId, AGENT)?.id).toBe(firstFork?.id);
+    expect(liveHandoffForThread(f.db, f.customerId, second.id)?.unattended).toBe(true);
+    expect(claimUnattendedHandoff(f.db, f.customerId, second.id, AGENT)?.id).toBe(secondFork?.id);
+    // The same-order race still loses: one person per escalated case.
+    expect(claimUnattendedHandoff(f.db, f.customerId, second.id, 'agent-2')).toBeNull();
     f.db.close();
   });
 });
@@ -337,7 +374,7 @@ describe('the forked thread', () => {
     expect(elsewhere.decision).not.toBeNull();
   });
 
-  it('answers status questions during a fork instead of filing them', async () => {
+  it('routes status questions during a fork to the person instead of filing them', async () => {
     const setup = await setupFork();
     const app = (harness as AppHarness).app;
 
@@ -348,9 +385,11 @@ describe('the forked thread', () => {
       payload: { customerId: setup.session.customerId, orderId: setup.multiOrderId, message: 'where is my order?' },
     });
     expect(status.statusCode).toBe(201);
-    const body = status.json<{ received?: boolean; shopAnswer?: unknown }>();
-    expect(body.received).toBeUndefined();
-    expect(body.shopAnswer).toBeDefined();
+    const body = status.json<{ received?: boolean }>();
+    // The fork holds the thread, so the person gets the message and nothing
+    // new is filed: a status question on a live case is conversation, not a
+    // second claim to triage.
+    expect(body.received).toBe(true);
   });
 
   it('locks only the forked thread, leaving other orders open', async () => {

@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
-import { Bot, Headset, Send, ShieldCheck } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import {  Headset, Send, ShieldCheck } from 'lucide-react';
 import { ErrorNote } from './components';
 import { formatCents } from './format';
+import { api } from './api';
 import { useConversation, type Conversation, type ReplyBody, type Turn } from './useConversation';
-import { money, shopApi, type Product, type ShopOrder, describe } from './shop/api';
-import { addToCart, cartLines, subscribeToCart } from './shop/cartStore';
-import type { DuplicateNotice, ItemChoice, ItemPickerOffer } from './api';
-import { reasonFor, REASONS } from './shop/issueReasons';
+import { money, shopApi, describe, type ShopOrder } from './shop/api';
 import { useAsyncData } from './shop/hooks';
-import { ForkPanel, forkTitle, useForkList } from './ForkPanel';
+import { reasonFor, REASONS } from './shop/issueReasons';
+import type { DuplicateNotice, ItemChoice, ItemPickerOffer } from './api';
 import type { CustomerFork } from './shop/api';
+import { ForkPanel, forkTitle, useForkList } from './ForkPanel';
 
 /**
  * The customer's assistant.
@@ -46,22 +46,14 @@ export function ChatPage(): ReactNode {
   const orders = useAsyncData(() => shopApi.orders(), ['help-orders']);
   const orderList = useMemo(() => orders.data?.orders ?? [], [orders.data]);
   const selected = useSelectedOrder(orderList, handoffOrderId(handoff));
-  // Support is the refund conversation about one order; shopping is order
-  // status, return logistics and browsing with no order selected. The server
-  // re-classifies every message either way, so the toggle is a lens for the
-  // customer rather than a promise about which pipeline answers.
-  const [mode, setMode] = useState<AssistantMode>('support');
-  const shopping = mode === 'shopping';
-
   const context = useMemo(
-    () => helpContext(orderList, selected.orderId, shopping),
-    [orderList, selected.orderId, shopping],
+    () => helpContext(orderList, selected.orderId),
+    [orderList, selected.orderId],
   );
   const chat = useConversation(
     customerId,
     context.chatOrderId,
     complaintFor(handoff?.issue ?? null),
-    shopping,
   );
   // Settled and awaiting are different things, and treating them as one cost the
   // customer the ability to talk about the item they had just complained about: an
@@ -70,24 +62,15 @@ export function ChatPage(): ReactNode {
   // may only complain about the subscription".
   const claimScope = useMemo(() => claimState(chat.turns), [chat.turns]);
   const ticks = useItemTicks(context.order, claimScope.settled);
-  const [retrying, setRetrying] = useState(false);
-  const showRetrying = useCallback(() => setRetrying(true), []);
-  useShopSocket(customerId, chat.refresh, showRetrying);
-  // A fresh thread opens on a greeting with the customer's name in it when a
-  // model is available. Fetched only while the thread is empty: once anything
-  // is said the greeting has no place, and refetching it would flash it back.
-  const greeting = useThreadGreeting(customerId, shopping, context.chatOrderId, chat);
   // Forks live beside the thread: when this order's case is with a person, the
   // composer's wait text points at the side panel instead of a bare wait, and
   // names the case so a second escalation does not read as the first one again.
-  const forkState = useForkList(shopping ? null : customerId);
-  const threadChat = chatWithForkNotice(forkState.forks, context.chatOrderId, chat, shopping);
+  const forkState = useForkList(customerId);
+  const threadChat = chatWithForkNotice(forkState.forks, context.chatOrderId, chat);
 
   return (
     <div className="chat-layout">
       <HelpAside
-        shopping={shopping}
-        onMode={setMode}
         orders={orderList}
         ordersLoading={orders.data === null && orders.error === null}
         selected={selected.orderId}
@@ -100,12 +83,9 @@ export function ChatPage(): ReactNode {
         order={context.order}
         ticks={ticks}
         claimScope={claimScope}
-        retrying={retrying && chat.busy}
-        shopping={shopping}
-        greeting={greeting}
       />
 
-      <ForkPanel forks={forkState.forks} generation={forkState.generation} refresh={forkState.refresh} />
+      <ForkPanel forks={forkState.forks} generation={forkState.generation} refresh={forkState.refresh} socketError={forkState.socketError} />
     </div>
   );
 }
@@ -122,9 +102,8 @@ function chatWithForkNotice(
   forks: readonly CustomerFork[],
   chatOrderId: string | null,
   chat: Conversation,
-  shopping: boolean,
 ): Conversation {
-  if (shopping || chat.blocked === null) {
+  if (chat.blocked === null) {
     return chat;
   }
   const orderFork = forks.find((fork) => fork.orderId === chatOrderId);
@@ -138,84 +117,20 @@ function chatWithForkNotice(
 }
 
 /**
- * The model's greeting for a fresh thread, or null while it loads or fails.
- *
- * One fetch per empty thread, not a subscription: the greeting is read once
- * for the moment, and nothing later invalidates it. A failure is not an
- * error state - the static greeting covers it, so the page never waits on
- * a sentence.
- */
-function useAssistantGreeting(
-  customerId: string | null,
-  orderId: string | null,
-  shopping: boolean,
-  active: boolean,
-): string | null {
-  const [greeting, setGreeting] = useState<string | null>(null);
-  useEffect(() => {
-    if (!active || customerId === null) {
-      return;
-    }
-    let cancelled = false;
-    void shopApi.assistantGreeting(orderId, shopping).then(
-      (result) => {
-        if (!cancelled) {
-          setGreeting(result.greeting);
-        }
-      },
-      () => {
-        if (!cancelled) {
-          setGreeting(null);
-        }
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [customerId, orderId, shopping, active]);
-  return greeting;
-}
-
-/**
- * The thread's greeting, read from the model while the thread is empty.
- *
- * Split out because the page is at its complexity budget: choosing the order
- * and the moment inline would tip it over, and neither choice belongs to the
- * page's own job of laying out the thread.
- */
-function useThreadGreeting(
-  customerId: string | null,
-  shopping: boolean,
-  chatOrderId: string | null,
-  chat: Conversation,
-): string | null {
-  return useAssistantGreeting(
-    customerId,
-    shopping ? null : chatOrderId,
-    shopping,
-    chat.turns.length === 0 && !chat.loading,
-  );
-}
-
-/**
- * The page's sidelong half: title, mode toggle, and whichever context the mode
- * needs - the order picker for support, catalogue search for shopping.
+ * The page's sidelong half: title and whichever context the page needs - the
+ * order picker for support.
  *
  * Split out because the page owns the mode and the thread owns the scroll, and
  * neither should also own this markup: a page that renders everything it knows
  * in one function stops being readable at exactly this size.
  */
 function HelpAside({
-  shopping,
-  onMode,
   orders,
   ordersLoading,
   selected,
   onSelect,
   order,
 }: {
-  shopping: boolean;
-  onMode: (mode: AssistantMode) => void;
   orders: readonly ShopOrder[];
   ordersLoading: boolean;
   selected: string | null;
@@ -224,15 +139,10 @@ function HelpAside({
 }): ReactNode {
   return (
     <aside className="chat-context">
-      <h1>{shopping ? 'Shopping help' : 'Get help with an order'}</h1>
-      <ModeToggle shopping={shopping} onChange={onMode} />
-      {shopping ? (
-        <ShoppingPanel />
-      ) : (
-        <OrderScope orders={orders} loading={ordersLoading} selected={selected} onSelect={onSelect} order={order} />
-      )}
+      <h1>Get help with an order</h1>
+      <OrderScope orders={orders} loading={ordersLoading} selected={selected} onSelect={onSelect} order={order} />
       <AssistantStatus />
-      <PolicyNote shopping={shopping} />
+      <PolicyNote />
     </aside>
   );
 }
@@ -243,50 +153,17 @@ function HelpAside({
  * A lens for the customer rather than a promise about which pipeline answers:
  * the server re-classifies every message either way.
  */
-type AssistantMode = 'support' | 'shopping';
-
-function ModeToggle({ shopping, onChange }: { shopping: boolean; onChange: (mode: AssistantMode) => void }): ReactNode {
-  return (
-    <div className="row" role="group" aria-label="Assistant mode">
-      <button
-        type="button"
-        className={shopping ? 'chip' : 'chip chip-active'}
-        aria-pressed={!shopping}
-        // The active mode is disabled rather than clickable: pressing it again
-        // changes nothing, and a control that silently does nothing reads as broken.
-        disabled={!shopping}
-        onClick={() => onChange('support')}
-      >
-        Refund help
-      </button>
-      <button
-        type="button"
-        className={shopping ? 'chip chip-active' : 'chip'}
-        aria-pressed={shopping}
-        disabled={shopping}
-        onClick={() => onChange('shopping')}
-      >
-        Shopping help
-      </button>
-    </div>
-  );
-}
 
 /**
- * The order the thread is about, or none in shopping mode.
+ * The order the thread is about, or none if none is selected.
  *
- * Shopping questions need no basket, so there is nothing to resolve: the
- * server classifies each message on its own. Support keeps the handoff-then
+ * The server classifies each message on its own. Support keeps the handoff-then
  * latest-order default from the picker below.
  */
 function orderForMode(
   orders: readonly ShopOrder[],
   selectedId: string | null,
-  shopping: boolean,
 ): ShopOrder | null {
-  if (shopping) {
-    return null;
-  }
   return orders.find((candidate) => candidate.id === selectedId) ?? null;
 }
 
@@ -392,7 +269,12 @@ function handleAttachPhoto(deps: ChatThreadDeps): void {
     }
     const reader = new FileReader();
     reader.onload = async () => {
-      const dataUrl = reader.result as string;
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        alert('Could not read that image file.');
+        return;
+      }
+      const dataUrl = result;
       const requestTurn = deps.chat.turns.find((t) => t.kind === 'replied' || t.kind === 'stored');
       const orderId = requestTurn ? null : undefined;
       try {
@@ -401,6 +283,9 @@ function handleAttachPhoto(deps: ChatThreadDeps): void {
       } catch (cause) {
         alert(describe(cause));
       }
+    };
+    reader.onerror = () => {
+      alert('Could not read that image file.');
     };
     reader.readAsDataURL(file);
   };
@@ -429,27 +314,12 @@ function ChatThread({
   order,
   ticks,
   claimScope,
-  retrying,
-  shopping,
-  greeting,
 }: {
   chat: Conversation;
   order: ShopOrder | null;
   ticks: ItemTicks;
   /** Which lines are done with, and which are still with a person. */
   claimScope: ClaimScope;
-  /**
-   * The server is retrying after a model failure, and said so.
-   *
-   * Already gated on the request being in flight by the caller: a flag that had to be
-   * cleared when the reply arrived would need an effect to clear it, and a flag that
-   * outlives its request is worse than one that is simply not shown.
-   */
-  retrying: boolean;
-  /** Shopping mode: greeting starters and composer wording follow the toggle. */
-  shopping: boolean;
-  /** The model's greeting for a fresh thread, or null while it loads or fails. */
-  greeting: string | null;
 }): ReactNode {
   const logRef = useScrollToBottom(chat.turns);
   const inHandoff = chat.turns.some((turn) => turn.kind === 'handoff');
@@ -467,10 +337,7 @@ function ChatThread({
             customer can already see makes the page look like it forgot them.
             While loading, both it and the thread are absent, so the emptiness is
             brief and states itself. */}
-        {chat.loading || chat.turns.length > 0 ? null : <Greeting onPick={chat.setDraft} shopping={shopping} greeting={greeting} />}
-        {/* Announced, not just drawn: the customer is waiting, and the reason for
-            the wait is the whole thing. */}
-        <RetryingNotice visible={retrying} />
+        {chat.loading || chat.turns.length > 0 ? null : <Greeting onPick={chat.setDraft} />}
         {chat.turns.map((turn) => (
           <TurnView key={turn.id} turn={turn} chat={chat} {...appealFor(turn, (id: string) => handleAppeal(deps, id))} />
         ))}
@@ -493,7 +360,6 @@ function ChatThread({
         onSend={sendFromComposer}
         inHandoff={inHandoff}
         onAttachPhoto={() => handleAttachPhoto(deps)}
-        {...(shopping ? { placeholder: 'Ask about an order, a return, or the catalogue…' } : {})}
       />
       {appealState && <p className="muted small">Sending your appeal…</p>}
       {chat.error.length > 0 ? <ErrorNote error={chat.error} /> : null}
@@ -677,16 +543,6 @@ function ItemChoiceButton({
  * Its own component because the thread is about what is in the log and this
  * is about something happening now that is not in storage.
  */
-function RetryingNotice({ visible }: { visible: boolean }): ReactNode {
-  if (!visible) {
-    return null;
-  }
-  return (
-    <p className="bubble-them" role="status" aria-live="polite">
-      Having trouble reading your message - trying once more.
-    </p>
-  );
-}
 
 /**
  * Whether the thread is sitting on an unanswered offer.
@@ -782,72 +638,6 @@ function useSelectedOrder(
 }
 
 /**
- * The live part of the conversation: somebody is *here* now.
- *
- * The shop socket only announces that something changed - "an agent is with
- * you", "an agent wrote back", "the takeover is over". The thread itself is
- * always re-read over REST, so what the customer sees is exactly what is stored,
- * which is exactly what the agent sees. The socket is small and one-directional;
- * the customer's own messages already go over the same REST call the pipeline
- * used, the server routes them to the agent, and this channel is just how they
- * learn the reply landed.
- */
-/**
- * The thread's socket.
- *
- * Most events mean the stored thread changed, so the page re-reads it - one path for
- * every event, because a re-read cannot be wrong about what is in storage. The
- * exception is `assistant.retrying`, which describes something happening *now* and
- * is not in storage: it raises a status line for as long as the request is in
- * flight, so a customer waiting through a retry sees why rather than watching a
- * spinner and guessing.
- */
-function useShopSocket(customerId: string | null, onEvent: () => void, onRetrying: () => void): void {
-  const handler = useRef(onEvent);
-  const retrying = useRef(onRetrying);
-
-  // Written in an effect, not during render: a ref that is updated while the
-  // component draws can be stale for a render the socket fires between, and it
-  // is what the refs rule is about.
-  useEffect(() => {
-    handler.current = onEvent;
-    retrying.current = onRetrying;
-  }, [onEvent, onRetrying]);
-
-  useEffect(() => {
-    if (customerId === null) {
-      return;
-    }
-    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(`${scheme}://${location.host}/api/shop/chat/ws`);
-    socket.onmessage = (event: MessageEvent<string>) => {
-      if (isRetryingEvent(event.data)) {
-        retrying.current();
-        return;
-      }
-      handler.current();
-    };
-    // `onclose` needs no special handling: the thread is re-read on every event,
-    // so a dropped socket costs nothing but the notice arriving later.
-    return () => socket.close();
-  }, [customerId]);
-}
-
-/** Read off the wire without trusting it: a message we cannot read is a re-read. */
-function isRetryingEvent(data: string): boolean {
-  try {
-    const parsed: unknown = JSON.parse(data);
-    return (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      (parsed as { readonly type?: unknown }).type === 'assistant.retrying'
-    );
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Keeps the thread pinned to its newest turn.
  *
  * Its own hook because the thread component is about *what* is in the log and this is
@@ -903,7 +693,7 @@ function claimState(turns: readonly Turn[]): ClaimScope {
  * The order being asked about, its lines, and the only way to change either.
  *
  * The list is the shopper's own, loaded over their session. When it arrives empty
- * the page says so and links to the shop, because "the assistant is not working"
+ * the page says so, because "the assistant is not working"
  * and "you have not bought anything yet" need different answers and a disabled
  * composer alone communicates neither.
  */
@@ -927,9 +717,7 @@ function OrderScope({
     return (
       <div className="note">
         <p className="small">
-          You have not bought anything yet, so there is nothing to check a refund against.{' '}
-          <Link to="/">Have a look at the shop</Link> - every product there exists to make a
-          different policy decision.
+          You have not bought anything yet, so there is nothing to check a refund against.
         </p>
       </div>
     );
@@ -955,95 +743,8 @@ function OrderScope({
   );
 }
 
-/**
- * Catalogue search beside the shopping thread.
- *
- * A shortcut, not the assistant: typing here never sends a message, it only
- * fills the cart. Anything needing words - tracking, returns, advice - goes
- * through the composer so the answer is persisted in the thread.
- *
- * The search states its own progress: a button that goes quiet on a slow
- * network reads as broken, and yesterday's results under today's query read
- * as the assistant disagreeing with itself.
- */
-function ShoppingPanel(): ReactNode {
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState<readonly Product[]>([]);
-  const [error, setError] = useState('');
-  const [searching, setSearching] = useState(false);
-  const [searched, setSearched] = useState('');
 
-  async function search(): Promise<void> {
-    const text = query.trim();
-    if (text.length === 0 || searching) {
-      return;
-    }
-    setSearching(true);
-    setError('');
-    try {
-      const found = await shopApi.searchProducts(text, { limit: 6 });
-      setResults(found.products);
-      setSearched(text);
-    } catch (cause: unknown) {
-      setError(describe(cause));
-    } finally {
-      setSearching(false);
-    }
-  }
 
-  return (
-    <div className="order-scope">
-      <form
-        className="stack-sm"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void search();
-        }}
-      >
-        <label className="stack-sm">
-          <span className="label">Search the catalogue</span>
-          <input
-            value={query}
-            maxLength={200}
-            aria-label="Search the catalogue"
-            placeholder="Lamp, mug, kettle…"
-            disabled={searching}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-        <button type="submit" className="button-secondary small" disabled={searching}>
-          {searching ? 'Searching…' : 'Search'}
-        </button>
-      </form>
-      {error.length > 0 ? <ErrorNote error={error} /> : null}
-      {searching ? (
-        <p className="muted small" role="status">
-          Searching the catalogue…
-        </p>
-      ) : null}
-      {!searching && searched !== '' ? <SearchResults query={searched} results={results} /> : null}
-    </div>
-  );
-}
-
-/** What one catalogue search found, or the honest admission that it found nothing. */
-function SearchResults({ query, results }: { query: string; results: readonly Product[] }): ReactNode {
-  if (results.length === 0) {
-    return <p className="muted small">No products match “{query}”. Try different words.</p>;
-  }
-  return (
-    <ul className="lines">
-      {results.map((item) => (
-        <li key={item.id}>
-          <span>
-            {item.name} <span className="num">{money(item.priceCents)}</span>
-          </span>
-          <ThreadAddButton productId={item.id} name={item.name} stock={item.stock} />
-        </li>
-      ))}
-    </ul>
-  );
-}
 
 function OrderFacts({ order }: { order: ShopOrder }): ReactNode {
   return (
@@ -1074,16 +775,14 @@ function OrderFacts({ order }: { order: ShopOrder }): ReactNode {
 /**
  * The order the thread is about, with the id the conversation hook needs.
  *
- * One derivation so the page does not repeat it: shopping questions need no
- * basket, so both come back null, while support resolves the selected order
+ * One derivation so the page does not repeat it: support resolves the selected order
  * and names it for the thread that follows.
  */
 function helpContext(
   orders: readonly ShopOrder[],
   selectedId: string | null,
-  shopping: boolean,
 ): { readonly order: ShopOrder | null; readonly chatOrderId: string | null } {
-  const order = orderForMode(orders, selectedId, shopping);
+  const order = orderForMode(orders, selectedId);
   return { order, chatOrderId: order === null ? null : order.id };
 }
 
@@ -1121,32 +820,11 @@ function complaintFor(issue: string | null): string {
 }
 
 const GREETING = "Tell me what went wrong with this order and I'll check what the refund policy allows.";
-const SHOPPING_GREETING = 'Ask about an order, a return, or anything we sell.';
-const SHOPPING_STARTERS: readonly string[] = ['Where is my order?', 'How do I send something back?', 'Do you sell kettles?', 'What can you do?'];
 
-function Greeting({ onPick, shopping, greeting }: { onPick: (text: string) => void; shopping: boolean; greeting: string | null }): ReactNode {
-  // The model's line when it arrived, the static one otherwise: a greeting is
-  // for the moment, so a failed fetch degrades to the same page, not an error.
-  const line = greeting ?? (shopping ? SHOPPING_GREETING : GREETING);
-  if (shopping) {
-    return (
-      <div className="bubble-them">
-        <p>{line}</p>
-        <ul className="quick-actions">
-          {SHOPPING_STARTERS.map((starter) => (
-            <li key={starter}>
-              <button type="button" className="chip" onClick={() => onPick(starter)}>
-                {starter}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
-  }
+function Greeting({ onPick }: { onPick: (text: string) => void }): ReactNode {
   return (
     <div className="bubble-them">
-      <p>{line}</p>
+      <p>{GREETING}</p>
       <ul className="quick-actions">
         {REASONS.filter((reason) => reason.id !== 'other').map((reason) => (
           <li key={reason.id}>
@@ -1170,11 +848,11 @@ function Greeting({ onPick, shopping, greeting }: { onPick: (text: string) => vo
  * is no key configured, so a person reviews this one".
  */
 function AssistantStatus(): ReactNode {
-  const status = useAsyncData(() => shopApi.assistantStatus(), ['assistant-status']);
+  const status = useAsyncData(() => api.health(), ['assistant-status']);
   if (status.data === null) {
     return null;
   }
-  const { aiMode, aiAvailable, aiNote } = status.data;
+  const { aiMode, aiAvailable, aiUnavailableReason: aiNote } = status.data;
   if (aiAvailable) {
     return (
       <div className="note note-sm">
@@ -1229,7 +907,9 @@ function Composer({
         void onSend();
       }}
     >
+      <label className="chat-composer-label" htmlFor="chat-message">Your message</label>
       <input
+        id="chat-message"
         value={draft}
         maxLength={4000}
         aria-label="Describe the problem"
@@ -1237,27 +917,41 @@ function Composer({
         disabled={closed}
         onChange={(event) => onDraft(event.target.value)}
       />
-      {inHandoff && (
-        <button
-          type="button"
-          disabled={busy || closed}
-          aria-label="Attach a photo"
-          onClick={onAttachPhoto}
-          className="composer-photo"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-            <circle cx="8.5" cy="8.5" r="1.5" />
-            <polyline points="21 15 16 10 5 21" />
-          </svg>
-        </button>
-      )}
+      {inHandoff ? (
+        <PhotoAttachButton busy={busy} closed={closed} onAttachPhoto={onAttachPhoto} />
+      ) : null}
       <button type="submit" disabled={busy || blocked !== null} aria-label="Send">
         <Send size={16} />
         <span className="sr-only">Send</span>
       </button>
       {blocked !== null ? <p className="muted small">{blocked}</p> : null}
     </form>
+  );
+}
+
+function PhotoAttachButton({
+  busy,
+  closed,
+  onAttachPhoto,
+}: {
+  busy: boolean;
+  closed: boolean;
+  onAttachPhoto: () => void;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      disabled={busy || closed}
+      aria-label="Attach a photo"
+      onClick={onAttachPhoto}
+      className="composer-photo"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+        <circle cx="8.5" cy="8.5" r="1.5" />
+        <polyline points="21 15 16 10 5 21" />
+      </svg>
+    </button>
   );
 }
 
@@ -1287,9 +981,6 @@ function TurnView({
   }
   if (turn.kind === 'storedAsk' || turn.kind === 'asked') {
     return <QuestionBubble turn={turn} chat={chat} />;
-  }
-  if (turn.kind === 'shop') {
-    return <ShopAnswerBubble turn={turn} />;
   }
   // An acknowledgement, not a case: the server answered about the open
   // escalation instead of deciding anything, so the thread notes what was
@@ -1411,7 +1102,7 @@ function LiveDecisionBubble({
 function TypingBubble(): ReactNode {
   return (
     <div className="bubble-them bubble-typing" role="status" aria-live="polite">
-      <Bot size={16} />
+      
       <span className="typing-dots" aria-hidden="true">
         <span className="typing-dot" />
         <span className="typing-dot" />
@@ -1473,108 +1164,13 @@ function AgentReply({ text, media }: { text: string; media: { type: string; url:
 function Question({ reply }: { reply: string }): ReactNode {
   return (
     <div className="bubble-them">
-      <div className="row">
-        <Bot size={16} />
-      </div>
       <p>{reply}</p>
-      <footer className="row small muted">Answer this and I can check what the refund policy allows.</footer>
     </div>
   );
 }
 
-/**
- * Add to cart from inside the assistant, with the same vocabulary as the
- * catalogue page.
- *
- * The count is live: the button subscribes to the cart store, so tapping Add
- * renames it to "Add another (N in cart)" on the spot instead of leaving the
- * shopper to wonder whether the tap registered. A missing stock figure (older
- * payloads, stubbed fixtures) reads as available rather than sold out - the
- * server is the authority on stock at checkout, and this button must never
- * refuse a sale the server would allow.
- */
-function ThreadAddButton({ productId, name, stock }: { productId: string; name: string; stock?: number }): ReactNode {
-  const inCart = useSyncExternalStore(subscribeToCart, () => quantityInCart(productId));
-  const soldOut = (stock ?? 1) <= 0;
-  return (
-    <button
-      type="button"
-      className="chip"
-      disabled={soldOut}
-      onClick={() => addToCart(productId)}
-      aria-label={`Add ${name} to cart`}
-    >
-      {threadAddLabel(soldOut, inCart)}
-    </button>
-  );
-}
 
-/** Same vocabulary as the catalogue card, so the same tap reads the same everywhere. */
-function threadAddLabel(soldOut: boolean, inCart: number): string {
-  if (soldOut) {
-    return 'Sold out';
-  }
-  if (inCart > 0) {
-    return `Add another (${inCart} in cart)`;
-  }
-  return 'Add to cart';
-}
 
-/** How many of one product this tab's cart already holds. */
-function quantityInCart(productId: string): number {
-  return cartLines().find((line) => line.productId === productId)?.quantity ?? 0;
-}
-
-/**
- * One shopping-assistant answer.
- *
- * Deliberately not a `Reply`: there is no decision, no amount authorised, and
- * no status pill from the refund vocabulary. Product cards carry an Add button
- * each, which writes to the tab's cart through the same store the catalogue
- * page uses - checkout still prices from the database, so a card can never
- * discount a basket.
- */
-function ShopAnswerBubble({ turn }: { turn: Turn & { kind: 'shop' } }): ReactNode {
-  const { shopAnswer } = turn;
-  const status = shopAnswer.orderStatus;
-  return (
-    <>
-      <p className="bubble-me">{turn.text}</p>
-      <div className="bubble-them">
-        <div className="row">
-          <Bot size={16} />
-          <span className="pill pill-escalated">Shopping help</span>
-        </div>
-        <p>{shopAnswer.answer}</p>
-        {status !== null ? (
-          <dl className="kv">
-            <dt>Order</dt>
-            <dd>{status.orderId}</dd>
-            <dt>Status</dt>
-            <dd>{status.status.replace(/_/g, ' ')}</dd>
-            <dt>Tracking</dt>
-            <dd>{status.trackingStatus.replace(/_/g, ' ')}</dd>
-          </dl>
-        ) : null}
-        {shopAnswer.products.length > 0 ? (
-          <ul className="item-choice-list">
-            {shopAnswer.products.map((item) => (
-              <li key={item.id}>
-                <span className="item-choice">
-                  <span>
-                    {item.name} <span className="num">{money(item.priceCents)}</span>
-                    {(item.stock ?? 1) <= 0 ? ' · out of stock' : ''}
-                  </span>
-                  <ThreadAddButton productId={item.id} name={item.name} stock={item.stock} />
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
-    </>
-  );
-}
 
 /**
  * The answer to a message.
@@ -1588,7 +1184,7 @@ function Reply({ result, duplicate, onAppeal, requestId }: { result: ReplyBody; 
   return (
     <div className="bubble-them">
       <div className="row">
-        <Bot size={16} />
+
         <span className={`pill pill-${result.decision}`}>{result.decision}</span>
       </div>
       {duplicate === null ? null : (
@@ -1597,6 +1193,7 @@ function Reply({ result, duplicate, onAppeal, requestId }: { result: ReplyBody; 
           same message, so it was not decided a second time.
         </p>
       )}
+      <BlockedItems decision={result.decision} items={result.blockedItems} />
       <p>{result.responseText}</p>
       <footer className="row small">
         {result.decision === 'approved' || result.decision === 'partial_refund' ? (
@@ -1626,6 +1223,36 @@ function Reply({ result, duplicate, onAppeal, requestId }: { result: ReplyBody; 
 }
 
 /**
+ * The lines a mixed-cart decision left out, as chips above the prose.
+ *
+ * Named once in words and once here so a shopper sees the excluded parts at a
+ * glance. Not shown on a `denied` reply: a whole-order refusal must not re-blame
+ * items for a reason that was about the order, and an item-scoped refusal
+ * already names the line in the reply's own words.
+ */
+function BlockedItems({
+  decision,
+  items,
+}: {
+  decision: ReplyBody['decision'];
+  items: ReplyBody['blockedItems'];
+}): ReactNode {
+  if (decision === 'denied' || items.length === 0) {
+    return null;
+  }
+  return (
+    <ul className="blocked-items">
+      {items.map((item) => (
+        <li key={item.name}>
+          <strong>{item.name}</strong>
+          <span className="muted"> — {item.reason}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
  * What a person decided, arriving in the thread afterwards.
  *
  * Styled as a note rather than a reply, and labelled, because this is the one
@@ -1647,22 +1274,13 @@ function FollowUpNotice({ text }: { text: string }): ReactNode {
 }
 
 /** What the assistant may and may not do, stated per mode so neither over-promises. */
-function PolicyNote({ shopping }: { shopping: boolean }): ReactNode {
+function PolicyNote(): ReactNode {
   return (
     <div className="note">
       <ShieldCheck size={16} />
       <p className="small">
-        {shopping ? (
-          <>
-            Suggestions come from the shop catalogue. Refund decisions still come from a written
-            policy, checked by a person.
-          </>
-        ) : (
-          <>
-            Every answer comes from a written refund rule, not from a model&apos;s opinion. A human
-            checks anything money is involved in.
-          </>
-        )}
+        Every answer comes from a written refund rule, not from a model&apos;s opinion. A human
+        checks anything money is involved in.
       </p>
     </div>
   );

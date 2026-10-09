@@ -28,6 +28,7 @@ import { composeDeterministicResponse } from '../response/compose.js';
 import { scenarioHarness, scenario, decided, TEST_NOW } from './helpers.js';
 import { daysAgo } from '../db/seed.js';
 import { R03AmountAuthority } from '../policy/rules/R-03-amount-authority.js';
+import { R15OrderTotalEscalation } from '../policy/rules/R-15-order-total-escalation.js';
 import type { PolicyContext } from '../policy/types.js';
 
 /** An already-approved request row, for the ledger to reserve against. */
@@ -1057,6 +1058,67 @@ function seedLargeMixedOrder(db: Db): void {
   insertItem.run('ITM-THR-D', 'Aurora Desk Lamp', 20000, 0, 0);
 }
 
+/** An $800 order whose lines can be claimed individually. */
+function threshOrder(): OrderRecord {
+  return {
+    id: 'ORD-THRESHOLD',
+    customerId: 'CUST-THRESHOLD',
+    placedAt: daysAgo(TEST_NOW, 5),
+    deliveredAt: daysAgo(TEST_NOW, 4),
+    ageDays: 1,
+    status: 'delivered',
+    paymentState: 'settled',
+    refundedCents: 0,
+    totalCents: 80000,
+    isSubscription: false,
+    trackingStatus: 'delivered',
+    signedByCustomer: true,
+    conditionAtDelivery: null,
+    items: [
+      {
+        id: 'ITM-THR-C',
+        name: 'Harbour Stoneware Mug',
+        unitPriceCents: 20000,
+        quantity: 1,
+        finalSale: false,
+        digital: false,
+        downloaded: false,
+        isSubscription: false,
+      },
+      {
+        id: 'ITM-THR-A',
+        name: 'Meridian Wool Coat',
+        unitPriceCents: 30000,
+        quantity: 1,
+        finalSale: true,
+        digital: false,
+        downloaded: false,
+        isSubscription: false,
+      },
+      {
+        id: 'ITM-THR-D',
+        name: 'Aurora Desk Lamp',
+        unitPriceCents: 30000,
+        quantity: 1,
+        finalSale: false,
+        digital: false,
+        downloaded: false,
+        isSubscription: false,
+      },
+    ],
+  };
+}
+
+/** An $800 order with an optional claim scope, for the amount thresholds. */
+function threshContext(claimedItemIds: readonly string[] | undefined): PolicyContext {
+  return {
+    db: openMemoryDatabase(),
+    order: threshOrder(),
+    orderTotalCents: 80000,
+    ...(claimedItemIds !== undefined ? { claimedItemIds } : {}),
+  } as unknown as PolicyContext;
+}
+
 describe('amount authority (R-03)', () => {
   const contextWith = (orderTotalCents: number, eligibleAmountCents: number): PolicyContext =>
     ({ orderTotalCents, eligibleAmountCents, blockedItems: [] }) as unknown as PolicyContext;
@@ -1086,11 +1148,86 @@ describe('amount authority (R-03)', () => {
     expect(result.decision.decision).toBe('escalated');
     expect(result.decision.refundAmountCents).toBe(0);
     expect(result.decision.eligibleAmountCents).toBe(40000);
+    expect(result.decision.refundItemIds).toEqual([]);
     expect(result.decision.policyRef).toBe('REFUND_POLICY.md §4.1');
     expect(result.decision.trace.find((evaluation) => evaluation.ruleId === 'R-03')?.outcome).toBe(
       'escalate',
     );
     expect(result.llmCalled).toBe(false);
+  });
+
+  it('measures the claimed lines, not the order total, when the customer names lines', () => {
+    expect(R03AmountAuthority.evaluate(threshContext(['ITM-THR-C'])).outcome).toBe('pass');
+  });
+
+  it('escalates when the claimed lines alone exceed the threshold', () => {
+    expect(R03AmountAuthority.evaluate(threshContext(['ITM-THR-A', 'ITM-THR-D'])).outcome).toBe(
+      'escalate',
+    );
+  });
+
+  it('keeps the order total when the claimed lines resolve to nothing', () => {
+    expect(R03AmountAuthority.evaluate(threshContext(['ITM-NOPE'])).outcome).toBe('escalate');
+  });
+
+  it('keeps the order total when the customer names no lines', () => {
+    expect(R03AmountAuthority.evaluate(threshContext(undefined)).outcome).toBe('escalate');
+  });
+
+  it('lets a small claim on a large order reach the model', async () => {
+    const h = scenarioHarness({
+      kind: 'fixed',
+      extraction: {
+        intent: 'refund',
+        reason: 'damaged',
+        condition: 'damaged',
+        confidence: 0.9,
+        claimedAmountCents: null,
+        items: ['ITM-THR-C'],
+        evidenceQuotes: ['mug arrived broken and shattered'],
+      },
+    });
+    seedLargeMixedOrder(h.db);
+    const result = decided(
+      await h.run({
+        requestId: 'REQ-THRESHOLD-SCOPED',
+        customerId: 'CUST-THRESHOLD',
+        orderId: 'ORD-THRESHOLD',
+        message: 'The mug arrived broken and shattered. I want my money back.',
+        itemIds: ['ITM-THR-C'],
+      }),
+    );
+
+    expect(result.decision.decision).toBe('approved');
+    expect(result.decision.refundAmountCents).toBe(20000);
+    expect(result.decision.refundItemIds).toEqual(['ITM-THR-C']);
+    expect(h.analyzerCalls()).toBe(1);
+    expect(result.decision.trace.find((evaluation) => evaluation.ruleId === 'R-03')?.outcome).toBe(
+      'pass',
+    );
+    expect(result.decision.trace.find((evaluation) => evaluation.ruleId === 'R-15')?.outcome).toBe(
+      'pass',
+    );
+  });
+});
+
+describe('order ceiling (R-15)', () => {
+  it('measures the claimed lines when the customer names lines', () => {
+    expect(R15OrderTotalEscalation.evaluate(threshContext(['ITM-THR-C'])).outcome).toBe('pass');
+  });
+
+  it('escalates on the claimed lines alone when they exceed the ceiling', () => {
+    expect(R15OrderTotalEscalation.evaluate(threshContext(['ITM-THR-A', 'ITM-THR-D'])).outcome).toBe(
+      'escalate',
+    );
+  });
+
+  it('keeps the order total when no lines are named', () => {
+    expect(R15OrderTotalEscalation.evaluate(threshContext(undefined)).outcome).toBe('escalate');
+  });
+
+  it('keeps the order total when the claimed lines resolve to nothing', () => {
+    expect(R15OrderTotalEscalation.evaluate(threshContext(['ITM-NOPE'])).outcome).toBe('escalate');
   });
 });
 
@@ -1173,6 +1310,7 @@ describe('response composition', () => {
         trace: [],
         overrides: [],
         eligibleItemIds: [],
+        refundItemIds: [],
         blockedItems: [],
         outstandingAmountCents: 0,
         outstandingState: 'none',

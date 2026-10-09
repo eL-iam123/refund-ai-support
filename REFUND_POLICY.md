@@ -107,9 +107,9 @@ These clauses bound what the automated flow may approve on its own. They cannot 
 | --- | --- | --- | --- | --- |
 | `R-03` | fact_gates | order | approval-authority | escalate, pass |
 
-_Refunds against orders over $500.00 require human review._
+_Refunds of more than $500.00 require human review._
 
-A refund of more than $500.00 against a single order requires human review. This is checked against the **order total**, before item-level denials are applied, so an order cannot be split to evade it.
+A refund of more than $500.00 requires human review. The amount is what the request actually puts at risk: the sum of the items the customer named, or the **order total** when they named none. It is measured before item-level denials are applied, so a request cannot dodge the threshold by excluding the very items it asks to refund, and a whole-order request cannot slip under it either.
 
 ## §4.2 — Eligible remainder after item-level denials
 
@@ -121,7 +121,7 @@ _Records the eligible amount after item-level denials reduce it below the order 
 
 When item-level clauses (§2.1, §2.2, §2.4) reduce the eligible amount below the order total, the reduction is recorded explicitly in the audit trail.
 
-The §4.1 review threshold is evaluated against the order total, before those denials are applied, so it is not affected by them. This clause never decides anything. It exists so the eligible remainder is legible to an auditor instead of looking accidental.
+The §4.1 review threshold is evaluated against the claimed amount - the sum of the items the customer named, or the order total when they name none - before those denials are applied, so it is not affected by them. This clause never decides anything. It exists so the eligible remainder is legible to an auditor instead of looking accidental.
 
 # §5 — Reason rules
 
@@ -131,7 +131,7 @@ These clauses decide whether a *reasoned* refund is warranted. They require a gr
 
 | Rule | Stage | Scope | Class | May return |
 | --- | --- | --- | --- | --- |
-| `R-04` | reason_rules | order | eligibility | deny, pass, approve |
+| `R-04` | reason_rules | item | eligibility | deny, pass, approve |
 
 _Verified damage or an incorrect item qualifies for automatic approval._
 
@@ -151,7 +151,7 @@ Where a same-day, same-value sibling order exists for the customer, one of the t
 
 | Rule | Stage | Scope | Class | May return |
 | --- | --- | --- | --- | --- |
-| `R-12` | reason_rules | order | approval-authority | escalate, pass |
+| `R-12` | reason_rules | item | approval-authority | escalate, pass |
 
 _A request with no verifiable reason escalates to a human._
 
@@ -203,15 +203,15 @@ _An unmatched order reference escalates rather than denies._
 
 A request naming an order that does not exist, or that belongs to a different customer, escalates. It is not denied: a mistyped or mistated reference is not an attempt to defraud, and a human can find the right order.
 
-## §6.5 — Order total above manual-review ceiling
+## §6.5 — Amount at risk above manual-review ceiling
 
 | Rule | Stage | Scope | Class | May return |
 | --- | --- | --- | --- | --- |
 | `R-15` | fact_gates | order | risk | escalate, pass |
 
-_This order requires a person to review it before anything is approved._
+_A claim or order above the manual-review ceiling requires a person to review it before anything is approved._
 
-When the total value of an order exceeds the configured ceiling (default $500.00), the request is escalated to a person before any item is selected and before any model is called.
+When the amount a request puts at risk exceeds the configured ceiling (default $500.00), it is escalated to a person before the model is called. The amount is the sum of the items the customer named, or the order total when they named none; both are computable from the order facts alone, so this check still terminates before the model.
 
 # §7 — Request integrity
 
@@ -277,7 +277,7 @@ The layer is off by default and every bound is an operator-controlled environmen
 | §6.4 | `R-13` | Order reference cannot be resolved | risk | fact_gates |
 | §4.1 | `R-03` | Human review above threshold | approval-authority | fact_gates |
 | §4.2 | `R-03b` | Eligible remainder after item-level denials | approval-authority | fact_gates |
-| §6.5 | `R-15` | Order total exceeds manual-review ceiling | risk | fact_gates |
+| §6.5 | `R-15` | Amount at risk exceeds manual-review ceiling | risk | fact_gates |
 | §3.1 | `R-01b` | Standard refund window | approval-authority | reason_rules |
 | §5.1 | `R-04` | Damaged or incorrect goods | eligibility | reason_rules |
 | §6.3 | `R-09` | Conflicting customer and fulfilment evidence | risk | reason_rules |

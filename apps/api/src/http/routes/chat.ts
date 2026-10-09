@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { CreateRefundRequestSchema, type CreateRefundRequest, type RefundRequestDto, type ShopAnswerDto, type Stage } from '@refund/shared';
+import { CreateRefundRequestSchema, type CreateRefundRequest, type RefundRequestDto, type Stage } from '@refund/shared';
 import type { AppContext } from '../context.js';
-import { processRefundRequest, type ProcessResult } from '../../orchestrator.js';
-import { answerShopTurn, toShopAnswer } from '../../shop/assistant.js';
+import { confirmingClaimText, processRefundRequest, type ProcessResult } from '../../orchestrator.js';
 import type { ItemPickerOffer } from '../../retrieval/itemPicker.js';
 import { findRequestById, latestRequestForThread, insertAuditEvent } from '../../db/requestRepository.js';
 import type { PersistedRequest } from '../../db/records.js';
@@ -65,7 +64,6 @@ async function handleChatMessage(
       progressStage: Stage;
     }
   | { request: RefundRequestDto }
-  | { shopAnswer: ShopAnswerDto }
   | { status: string; requestId: string }
 > {
   const body = parseChatBody(request, ctx);
@@ -96,28 +94,10 @@ async function handleChatMessage(
   // So the person is still told, and the customer still gets an answer. Escalation
   // is meant to *add* a person to a conversation that the assistant is still having.
   if (takeover !== null && takeover.agentId !== ESCALATION_AGENT) {
-    const forkReply = await claimedTakeoverReply(ctx, reply, hub, takeover, resolved, identification, now);
+    const forkReply = claimedTakeoverReply(ctx, reply, hub, takeover, resolved, identification, now);
     if (forkReply !== null) {
       return forkReply;
     }
-  }
-
-  // The shopping assistant answers order-status, return-logistics and
-  // browsing questions here, before duplicate suppression and the refund
-  // pipeline. A shop turn writes a `shop_assistant_turns` row and nothing
-  // else, so anything it handles can never become a decision. Null means the
-  // message could be a claim, and the pipeline below decides that instead.
-  const shopTurn = await answerShopTurn(ctx.db, ctx.pipeline, {
-    customerId: session.customerId,
-    orderId: resolved.orderId,
-    message: resolved.message,
-    shoppingMode: resolved.shopping,
-    identification,
-    now,
-  });
-  if (shopTurn !== null) {
-    reply.code(201);
-    return { shopAnswer: toShopAnswer(shopTurn) };
   }
 
   const duplicate = duplicateForSubmission(ctx, resolved, now, identification);
@@ -141,15 +121,12 @@ async function handleChatMessage(
 /**
  * Answers a message that arrived while a person has the thread.
  *
- * Two gates before the message lands on the agent thread. First the shopping
- * assistant: "where is my refund" over an escalated order needs a status
- * answer, not a silent filing on a thread nobody may be reading yet. Then the
- * fork scope: a takeover forked from a decided escalation answers only for
- * its own case's follow-ups, so a message about anything else falls through
- * (null) to the pipeline below and starts its own case. A pre-fork takeover
- * has no recorded scope and keeps the old whole-thread reach.
+ * The fork scope decides: a takeover forked from a decided escalation answers
+ * only for its own case's follow-ups, so a message about anything else falls
+ * through (null) to the pipeline below and starts its own case. A pre-fork
+ * takeover has no recorded scope and keeps the old whole-thread reach.
  */
-async function claimedTakeoverReply(
+function claimedTakeoverReply(
   ctx: AppContext,
   reply: FastifyReply,
   hub: LiveHub,
@@ -157,19 +134,7 @@ async function claimedTakeoverReply(
   resolved: CreateRefundRequest,
   identification: Identification,
   now: Date,
-): Promise<HandoffBody | { shopAnswer: ShopAnswerDto } | null> {
-  const shopTurn = await answerShopTurn(ctx.db, ctx.pipeline, {
-    customerId: resolved.customerId,
-    orderId: resolved.orderId,
-    message: resolved.message,
-    shoppingMode: resolved.shopping,
-    identification,
-    now,
-  });
-  if (shopTurn !== null) {
-    reply.code(201);
-    return { shopAnswer: toShopAnswer(shopTurn) };
-  }
+): HandoffBody | null {
   if (takeover.requestId === null) {
     reply.code(201);
     return chatDuringHandoff(ctx, hub, takeover, resolved.message, now);
@@ -217,8 +182,14 @@ function withPendingItemScope(
     return { ...body, customerId };
   }
   const latestTurn = conversationForOrder(ctx.db, customerId, body.orderId, ctx.now(), 1).at(-1);
-  const itemIds = latestTurn?.kind === 'dialogue' ? pendingDialogueItemIds(ctx.db, customerId, body.orderId) : [];
-  return { ...body, customerId, itemIds: [...itemIds] };
+  const pending = latestTurn?.kind === 'dialogue'
+    ? pendingDialogueItemIds(ctx.db, customerId, body.orderId)
+    : [];
+  const currentItems = new Set(
+    (ctx.db.prepare('SELECT id FROM order_items WHERE order_id = ?').all(body.orderId) as { id: string }[]).map((r) => r.id),
+  );
+  const valid = pending.filter((id) => currentItems.has(id));
+  return { ...body, customerId, itemIds: [...valid] };
 }
 
 async function decideOrAsk(
@@ -328,6 +299,16 @@ function duplicateForSubmission(
   now: Date,
   identification: Identification,
 ): DuplicateReport | null {
+  // A confirmation answer is never a repeat: "yes" collides with every other
+  // short answer on the order, and suppressing it would answer a question the
+  // customer just said yes to with a decision made for someone else's words.
+  const orderId = input.orderId ?? identification.order?.id ?? null;
+  if (
+    orderId !== null &&
+    confirmingClaimText(ctx.db, input.customerId, orderId, input.message) !== null
+  ) {
+    return null;
+  }
   return findDuplicateReport(
     ctx.db,
     input.customerId,
@@ -353,10 +334,18 @@ const OPEN_CASE_STATUS =
  * Answers a follow-up from the open case instead of opening a second one.
  *
  * Returns null unless all three hold: the thread's latest request is an
- * escalation nobody has overridden, and the message states no new claim.
- * Anything else — a fault described, money asked, a person requested, an
- * injection probe — runs the full pipeline, because that message may be a new
- * case wearing a familiar thread.
+ * escalation nobody has overridden, the message states no new claim, and it
+ * names no item outside the open case's claim. Anything else - a fault
+ * described, money asked, a person requested, an injection probe, or a
+ * different line named - runs the full pipeline, because that message may be
+ * a new case wearing a familiar thread.
+ *
+ * The item check is the part patterns cannot do: "what about the lamp?" has
+ * no fault words, so the signal gate calls it a follow-up - but when the open
+ * case is about the mug, it is a new case about the lamp, and answering it
+ * with the open-case status would quietly lose a complaint. Bias is
+ * deliberate: a duplicate case is triage noise, a swallowed one is a refund
+ * quietly lost.
  *
  * Nothing is persisted except an audit event on the open request, so there is
  * no second decision row and no second takeover for staff to triage. A 200,
@@ -373,11 +362,17 @@ function openCaseStatus(
   if (orderId === null) {
     return null;
   }
-  const latest = latestRequestForThread(db, customerId, orderId);
-  if (latest === null || latest.decision !== 'escalated' || latest.overriddenBy !== null) {
+  // A confirmation answer is not a follow-up: it completes the case the
+  // confirmation question offered, so answering it with the open-case status
+  // would swallow the "yes" and the case would never close.
+  if (confirmingClaimText(db, customerId, orderId, input.message) !== null) {
     return null;
   }
-  if (statesNewClaim(input.message)) {
+  const latest = openEscalation(db, customerId, orderId);
+  if (latest === null || statesNewClaim(input.message)) {
+    return null;
+  }
+  if (aboutDifferentItems(input, identification, latest.claimItemIdsJson)) {
     return null;
   }
   insertAuditEvent(
@@ -407,6 +402,60 @@ function statesNewClaim(message: string): boolean {
 }
 
 /**
+ * The thread's open escalation, if the thread has one.
+ *
+ * Open means decided-escalated with nobody overriding it since: anything
+ * else is either still being decided or already resolved, and neither wants
+ * the follow-up treatment.
+ */
+function openEscalation(
+  db: Db,
+  customerId: string,
+  orderId: string,
+): PersistedRequest | null {
+  const latest = latestRequestForThread(db, customerId, orderId);
+  if (latest === null || latest.decision !== 'escalated' || latest.overriddenBy !== null) {
+    return null;
+  }
+  return latest;
+}
+
+/**
+ * Whether the message names lines outside the open case's claim.
+ *
+ * Both scopes have to be known: an empty identification means the message
+ * named nothing resolvable, and an empty claim means the case itself never
+ * scoped - either way there is nothing to compare, so it stays a follow-up.
+ * Disjoint non-empty scopes mean different items, which is a different case
+ * no matter how politely it is phrased.
+ */
+function aboutDifferentItems(
+  input: CreateRefundRequest,
+  identification: Identification,
+  claimItemIdsJson: string,
+): boolean {
+  const ticked = input.itemIds.length > 0 ? input.itemIds : [];
+  const named = ticked.length > 0 ? ticked : identification.items.map((item) => item.id);
+  if (named.length === 0) {
+    return false;
+  }
+  let claimed: unknown;
+  try {
+    claimed = JSON.parse(claimItemIdsJson) as unknown;
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(claimed)) {
+    return false;
+  }
+  const claimedIds = claimed.filter((id): id is string => typeof id === 'string');
+  if (claimedIds.length === 0) {
+    return false;
+  }
+  return !named.some((id) => claimedIds.includes(id));
+}
+
+/**
  * An escalated thread is now genuinely handed to the staff queue. The model
  * never answers in a human's place: while awaiting a person the customer gets
  * no repeated boilerplate, and after a person claims it only that person may
@@ -427,11 +476,13 @@ function chatDuringHandoff(
   message: string,
   now: Date,
 ): HandoffBody {
+  const injection = scanForInjection(message);
   const customerMessage = recordAgentMessage(ctx.db, {
     handoffId: active.id,
     sender: 'customer',
     body: message,
     now,
+    injection,
   });
 
   hub.notifyStaff({ type: 'customer.message', customerId: active.customerId, message: customerMessage });
@@ -483,7 +534,7 @@ function storeDecided(
     orderId: result.resolvedOrderId,
     customerId: input.customerId,
     now: ctx.now(),
-  });
+  }, result.decision.refundItemIds);
 
   ctx.log.info(
     { requestId: input.requestId, decision: row.decision, llmCalled: row.llmCalled },

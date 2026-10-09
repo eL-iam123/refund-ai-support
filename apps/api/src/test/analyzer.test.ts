@@ -371,6 +371,7 @@ describe('the extraction wire format', () => {
         'intent',
         'items',
         'language',
+        'lineClaims',
         'orderRef',
         'policyOverrideAttempted',
         'reason',

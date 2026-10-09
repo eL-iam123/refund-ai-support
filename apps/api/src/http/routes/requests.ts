@@ -177,6 +177,7 @@ function reserveIfNeeded(
     orderId: previous.orderId,
     customerId: previous.customerId,
     amountCents,
+    itemIds: JSON.parse(previous.eligibleItemIdsJson) as string[],
     now: ctx.now(),
   });
   insertAuditEvent(

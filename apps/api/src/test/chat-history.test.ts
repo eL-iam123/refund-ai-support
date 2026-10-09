@@ -1,7 +1,8 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import type { AppHarness } from './helpers.js';
-import { authHeader } from './helpers.js';
+import { authHeader, TEST_NOW } from './helpers.js';
 import type { Db } from '../db/connection.js';
+import { insertRequest, type NewRequestRow } from '../db/requestRepository.js';
 import { cookiesOf, shopHarness, signIn, type SignedIn } from './shop-helpers.js';
 
 /**
@@ -36,6 +37,45 @@ function countRequests(db: Db, orderId: string): number {
     .prepare('SELECT COUNT(*) AS total FROM refund_requests WHERE order_id = ?')
     .get(orderId) as { total: number };
   return row.total;
+}
+
+/** A stored escalated request, so the test is about routing and not about what escalates. */
+function escalatedRow(
+  customerId: string,
+  orderId: string,
+  requestId: string,
+  claim: readonly string[],
+  eligible: readonly string[],
+): NewRequestRow {
+  const at = TEST_NOW.toISOString();
+  return {
+    id: requestId,
+    createdAt: at,
+    customerId,
+    customerName: 'Test Customer',
+    orderId,
+    message: 'fixture claim',
+    messageSha256: '0'.repeat(64),
+    messageFingerprint: '0'.repeat(64),
+    decision: 'escalated',
+    refundAmountCents: 0,
+    eligibleAmountCents: 0,
+    summary: 'fixture',
+    policyRef: 'REFUND_POLICY.md §5.1',
+    traceJson: '[]',
+    overridesJson: '[]',
+    eligibleItemIdsJson: JSON.stringify(eligible),
+    claimItemIdsJson: JSON.stringify(claim),
+    blockedItemsJson: '[]',
+    responseText: 'fixture',
+    extractionJson: null,
+    groundingJson: null,
+    injectionJson: '{"detected":false,"signals":[],"obfuscationNoted":false}',
+    aiMode: 'fake',
+    llmCalled: false,
+    timingsJson: '[]',
+    scenarioId: null,
+  };
 }
 
 /**
@@ -110,22 +150,8 @@ async function threadFor(h: AppHarness, session: SignedIn, orderId: string): Pro
   return response.json<{ turns: readonly Turn[] }>().turns;
 }
 
-/** The shopping thread, which is where conversational answers live. */
-async function assistantFor(
-  h: AppHarness,
-  session: SignedIn,
-): Promise<readonly { message: string; shopAnswer: { kind: string; answer: string } }[]> {
-  const response = await h.app.inject({
-    method: 'GET',
-    url: '/api/shop/assistant/history',
-    headers: { cookie: cookiesOf(session) },
-  });
-  expect(response.statusCode).toBe(200);
-  return response.json<{ turns: readonly { message: string; shopAnswer: { kind: string; answer: string } }[] }>().turns;
-}
-
-describe('a greeting is not a request', () => {
-  it('answers "hello" conversationally and files no request', async () => {
+describe('a courtesy is not a request', () => {
+  it('answers "hello" with a question and files no request', async () => {
     harness = await shopHarness();
     const session = await signIn(harness, 'sam@shop.demo');
 
@@ -135,27 +161,27 @@ describe('a greeting is not a request', () => {
       headers: { cookie: cookiesOf(session) },
       payload: { customerId: session.customerId, orderId: session.orderId, message: 'hello' },
     });
-    expect(sent.statusCode).toBe(201);
-    const answer = sent.json<{ shopAnswer: { kind: string; answer: string } }>().shopAnswer;
-    expect(answer.kind).toBe('general');
-    // A courtesy, not a canned model opener: it names concrete next steps -
-    // an order, a return, the catalogue - instead of asking the customer to
-    // restate what they never stated.
-    expect(answer.answer).toMatch(/order|return|catalogue/i);
+    expect(sent.statusCode).toBe(200);
+    const body = sent.json<{ question?: string; request?: unknown }>();
+    // A courtesy, not a claim: the deterministic floor asks what went wrong
+    // instead of running the complaint through the claim path.
+    expect(body.request).toBeUndefined();
+    expect(body.question).toMatch(/what has gone wrong with it/i);
 
-    // Nothing was decided, so the order thread is empty and the exchange lives
-    // in the shopping thread, where the refund transcript never reads it.
-    expect(await threadFor(harness, session, session.orderId)).toHaveLength(0);
-    const thread = await assistantFor(harness, session);
+    // Nothing was filed, so the thread holds only the dialogue turn and the
+    // ledger is untouched. There is no work for a person either: no request
+    // row means no case to pick up.
+    expect(countRequests(harness.db, session.orderId)).toBe(0);
+    const thread = await threadFor(harness, session, session.orderId);
     expect(thread).toHaveLength(1);
-    expect(thread[0]?.message).toBe('hello');
+    expect(thread[0]?.kind).toBe('dialogue');
   });
 
   it('answers a greeting even against a provider that would claim it', async () => {
-    // The floor lives in the router, not in one extractor: a fixed analyzer
-    // that submits a claim for everything must still not be consulted for a
-    // greeting, because that is precisely the case where running the pipeline
-    // at all is the wrong answer.
+    // The floor lives in the pipeline, not in one extractor: a fixed analyzer
+    // that submits a claim for everything must still not consult the model for
+    // a greeting, because that is precisely the case where running a claim
+    // is the wrong answer.
     harness = await shopHarness({ kind: 'fixed', extraction: { reason: 'other' } });
     const session = await signIn(harness, 'sam@shop.demo');
 
@@ -165,10 +191,8 @@ describe('a greeting is not a request', () => {
       headers: { cookie: cookiesOf(session) },
       payload: { customerId: session.customerId, orderId: session.orderId, message: 'hello' },
     });
-    expect(sent.statusCode).toBe(201);
-    const answer = sent.json<{ shopAnswer: { kind: string; answer: string } }>().shopAnswer;
-    expect(answer.kind).toBe('general');
-    expect(answer.answer).not.toMatch(/how can i help|welcome/i);
+    expect(sent.statusCode).toBe(200);
+    expect(sent.json<{ question: string }>().question).not.toMatch(/how can i help|welcome/i);
     expect(harness.analyzerCalls()).toBe(0);
     const requests = harness.db.prepare('SELECT COUNT(*) AS n FROM refund_requests').get() as { n: number };
     expect(requests.n).toBe(0);
@@ -186,7 +210,8 @@ describe('a greeting is not a request', () => {
     });
     // A courtesy, answered without the pipeline: the floor this test guards is
     // that a greeting never becomes a claim, whatever a model would do with it.
-    expect(hello.json<{ shopAnswer: { kind: string } }>().shopAnswer.kind).toBe('general');
+    expect(hello.statusCode).toBe(200);
+    expect(hello.json<{ question: string }>().question).toMatch(/what has gone wrong with it/i);
 
     const damage = await harness.app.inject({
       method: 'POST',
@@ -213,12 +238,14 @@ describe('a greeting is not a request', () => {
     });
 
     const staff = await harness.app.inject({ method: 'GET', url: '/api/staff/conversations', headers: { authorization: authHeader('agent') } });
-    const rows = staff.json<{ conversations: readonly { customerId: string; activeHandoff: unknown }[] }>().conversations;
+    const rows = staff.json<{ conversations: readonly { customerId: string; activeHandoff: object | null }[] }>().conversations;
     const row = rows.find((candidate) => candidate.customerId === session.customerId);
-    // A courtesy is answered and filed in the shopping thread, which the staff
-    // queue never reads: no claim was filed, so there is nobody to hand work
-    // to and no case file pretending otherwise.
-    expect(row).toBeUndefined();
+    // A courtesy is answered with a question and handed to nobody: the staff
+    // list may still show the conversation (the dialogue turn counts as
+    // activity), but there is no handoff, no takeover, and no claim filed -
+    // nothing for a person to pick up.
+    expect(row?.activeHandoff).toBeNull();
+    expect(countRequests(harness.db, session.orderId)).toBe(0);
   });
 });
 
@@ -291,7 +318,7 @@ describe('per-order chat history', () => {
         reason: 'damaged',
         condition: 'damaged',
         confidence: 0.9,
-        evidenceQuotes: ['I want to return this package'],
+        evidenceQuotes: ['I have a problem with this package'],
       },
     });
     const session = await signIn(harness, 'sam@shop.demo');
@@ -326,7 +353,7 @@ describe('per-order chat history', () => {
       payload: {
         customerId: session.customerId,
         orderId: order.id,
-        message: 'I want to return this package',
+        message: 'I have a problem with this package',
         itemIds: [lamp.itemId],
       },
     });
@@ -381,7 +408,7 @@ describe('per-order chat history', () => {
       payload: {
         customerId: session.customerId,
         orderId: order.id,
-        message: 'I want to return this package',
+        message: 'I want to return this package for a refund',
         itemIds: [coat.itemId],
       },
     });
@@ -438,6 +465,138 @@ describe('per-order chat history', () => {
     const openCase = stillEscalated.json<{ status: string; requestId: string }>();
     expect(openCase.requestId).toBe(escalatedId);
     expect(countRequests(harness.db, session.orderId)).toBe(rowsBefore);
+  });
+
+  it('treats a different item on an open-escalation thread as a new case, not a follow-up', async () => {
+    // No fault words, no money ask - just a polite question about another
+    // line. The signal gate reads it as a follow-up, but the open case is
+    // about the mug and this names the lamp, so swallowing it as a follow-up
+    // would quietly lose a complaint. Disjoint scopes mean different cases.
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+    const app = harness.app;
+
+    const bought = await app.inject({
+      method: 'POST',
+      url: '/api/shop/checkout',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        lines: [
+          { productId: 'PRD-LAMP-01', quantity: 1 },
+          { productId: 'PRD-MUG-01', quantity: 1 },
+        ],
+      },
+    });
+    expect(bought.statusCode).toBe(201);
+    const boughtOrder = bought.json<{
+      order: { id: string; items: readonly { itemId: string; name: string }[] };
+    }>().order;
+    const orderId = boughtOrder.id;
+    const lampItemId = boughtOrder.items.find((item) => item.name === 'Aurora Desk Lamp')?.itemId ?? '';
+    const mugItemId = boughtOrder.items.find((item) => item.name === 'Harbour Stoneware Mug')?.itemId ?? '';
+    expect(lampItemId).not.toBe('');
+    expect(mugItemId).not.toBe('');
+
+    // An open escalation scoped to the mug, written directly so the test is
+    // about routing follow-ups rather than about what escalates.
+    insertRequest(
+      harness.db,
+      escalatedRow(session.customerId, orderId, 'REQ-OPEN-MUG', [mugItemId], [mugItemId, lampItemId]),
+    );
+
+    const rowsBefore = countRequests(harness.db, orderId);
+    const lamp = await app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId, message: 'what about the lamp?', itemIds: [lampItemId] },
+    });
+    // Not the open-case status: the message reached the pipeline, which asks
+    // rather than swallows. Either a question or a decision proves routing;
+    // only the status shape proves swallowing.
+    const lampBody = lamp.json<{ status?: string; question?: string; request?: unknown }>();
+    expect(lampBody.status).toBeUndefined();
+    expect(lampBody.question ?? lampBody.request).toBeDefined();
+    expect(countRequests(harness.db, orderId)).toBe(rowsBefore);
+  });
+
+  it('completes a confirmation past an older open escalation, and answers the next one too', async () => {
+    // The open-case status and the duplicate gate must both stand aside for a
+    // confirmation answer: the "yes" completes the case its question offered,
+    // and answering it with the old escalation's status - or with another
+    // case's "yes" - would leave the confirmation permanently unanswerable.
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+    const app = harness.app;
+
+    const bought = await app.inject({
+      method: 'POST',
+      url: '/api/shop/checkout',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        lines: [
+          { productId: 'PRD-LAMP-01', quantity: 1 },
+          { productId: 'PRD-MUG-01', quantity: 1 },
+        ],
+      },
+    });
+    expect(bought.statusCode).toBe(201);
+    const boughtOrder = bought.json<{
+      order: { id: string; items: readonly { itemId: string; name: string }[] };
+    }>().order;
+    const orderId = boughtOrder.id;
+    const mugItemId = boughtOrder.items.find((item) => item.name === 'Harbour Stoneware Mug')?.itemId ?? '';
+    const lampItemId = boughtOrder.items.find((item) => item.name === 'Aurora Desk Lamp')?.itemId ?? '';
+    expect(mugItemId).not.toBe('');
+    expect(lampItemId).not.toBe('');
+
+    const old = await session.send(orderId, 'The charger never arrived and I want my money back');
+    expect(old.decision).toBe('escalated');
+
+    const ask = await app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId, message: 'the mug is not what i ordered', itemIds: [mugItemId] },
+    });
+    expect(ask.statusCode).toBe(200);
+    expect(ask.json<{ question: string }>().question).toContain('Before we refund anything:');
+
+    const rowsBefore = countRequests(harness.db, orderId);
+    // The client answers with the question's scope, exactly as a tap would:
+    // a typed "yes" names nothing, so it carries the pending scope along.
+    const first = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId, message: 'yes please', itemIds: [mugItemId] },
+    });
+    expect(first.statusCode).toBe(201);
+    expect(first.json<{ request: { decision: { decision: string } } }>().request.decision.decision).toBe('approved');
+    expect(countRequests(harness.db, orderId)).toBe(rowsBefore + 1);
+
+    // A second "yes" on the same order answers its own confirmation, not the
+    // first one: the fingerprints match, so only the pending-confirmation skip
+    // keeps it from being suppressed as a repeat. A different line, so the
+    // refundable balance is not the question here.
+    const askAgain = await app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId, message: 'the lamp is not what i ordered', itemIds: [lampItemId] },
+    });
+    expect(askAgain.statusCode).toBe(200);
+    expect(askAgain.json<{ question: string }>().question).toContain('Before we refund anything:');
+
+    const second = await harness.app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId, message: 'yes please', itemIds: [lampItemId] },
+    });
+    expect(second.statusCode).toBe(201);
+    expect(second.json<{ request: { decision: { decision: string } } }>().request.decision.decision).toBe('approved');
+    expect(countRequests(harness.db, orderId)).toBe(rowsBefore + 2);
   });
 
   it('returns the same thread after a reload, and still declines a repeat', async () => {
@@ -582,6 +741,73 @@ describe('per-order chat history', () => {
       headers: { cookie: cookiesOf(session) },
     });
     expect(spoofed.statusCode).toBe(200);
+  });
+
+  it('answers a policy question about the scoped item instead of escalating it', async () => {
+    // The picker asked "What's the issue with the Meridian Wool Coat?" and the
+    // customer answers with a policy question. That is a question, not a fault
+    // report: it must be answered from the floor and must not file a claim.
+    // Before the floor existed the pending scope carried the coat to the fact
+    // gates, R-02 marked it final sale, and the thread was handed to a person.
+    harness = await shopHarness();
+    const session = await signIn(harness, 'sam@shop.demo');
+    const app = harness.app;
+
+    const bought = await app.inject({
+      method: 'POST',
+      url: '/api/shop/checkout',
+      headers: { cookie: cookiesOf(session) },
+      payload: {
+        lines: [
+          { productId: 'PRD-LAMP-01', quantity: 1 },
+          { productId: 'PRD-JACKET-01', quantity: 1 },
+        ],
+      },
+    });
+    expect(bought.statusCode).toBe(201);
+    const orderId = bought.json<{ order: { id: string } }>().order.id;
+    const coatItemId = bought.json<{
+      order: { items: readonly { itemId: string; name: string }[] };
+    }>().order.items.find((item) => item.name.startsWith('Meridian Wool Coat'))?.itemId ?? '';
+    expect(coatItemId).not.toBe('');
+
+    // The pending scope the picker left behind: a dialogue turn carrying the
+    // coat so the next unticked message is read as being about it.
+    harness.db
+      .prepare(
+        `INSERT INTO shop_dialogue
+           (id, created_at, customer_id, order_id, customer_message, assistant_question,
+            assistant_offer_json, item_ids_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'DLG-POLICY-SCOPE',
+        TEST_NOW.toISOString(),
+        session.customerId,
+        orderId,
+        "what's wrong with the coat",
+        "So I can look at this properly - what's the issue with the Meridian Wool Coat?",
+        null,
+        JSON.stringify([coatItemId]),
+      );
+
+    const before = countRequests(harness.db, orderId);
+    const policy = await app.inject({
+      method: 'POST',
+      url: '/api/chat/messages',
+      headers: { cookie: cookiesOf(session) },
+      payload: { customerId: session.customerId, orderId, message: 'what does yor policy say about that item' },
+    });
+    expect(policy.statusCode).toBe(200);
+
+    // No request row, no takeover text: a question, answered about the coat.
+    const policyBody = policy.json<{ question?: string; picker?: unknown; notice?: string }>();
+    expect(policyBody.question).toBeDefined();
+    expect(policyBody.picker).toBeNull();
+    expect(policyBody.notice).toBeNull();
+    expect(policyBody.question ?? '').toContain('Meridian Wool Coat');
+    expect(policyBody.question ?? '').toMatch(/final sale/i);
+    expect(countRequests(harness.db, orderId)).toBe(before);
   });
 
   it('404s an order that is not the caller’s, and 400s one that is not named', async () => {

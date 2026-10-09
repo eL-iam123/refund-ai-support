@@ -336,7 +336,7 @@ describe('a customer can buy, then talk to us, whatever they send', () => {
 
       const status = await j.harness.app.inject({
         method: 'GET',
-        url: '/api/shop/assistant-status',
+        url: '/api/health',
       });
       expect(status.statusCode).toBe(200);
       expect(typeof status.json<{ aiAvailable: boolean }>().aiAvailable).toBe('boolean');

@@ -41,12 +41,6 @@ export const CreateRefundRequestSchema = z.object({
    * is used, so this narrows what is claimed and can never widen it.
    */
   itemIds: z.array(z.string().min(1)).max(25).optional().default([]),
-  /**
-   * The storefront's shopping surface. Advisory to the router only: a refund
-   * claim typed in shopping mode still runs the refund pipeline, and a shop
-   * question typed in support mode is still answered as one.
-   */
-  shopping: z.boolean().optional().default(false),
 });
 export type CreateRefundRequest = z.infer<typeof CreateRefundRequestSchema>;
 
@@ -244,6 +238,14 @@ export const RefundDecisionSchema = z.object({
 });
 export type RefundDecisionDto = z.infer<typeof RefundDecisionSchema>;
 
+export const LineClaimSchema = z.object({
+  itemId: z.string(),
+  reason: z.enum(REASON_CODES),
+  condition: z.enum(ITEM_CONDITIONS),
+  confidence: z.number().min(0).max(1),
+  evidenceQuotes: z.array(z.string()).max(10),
+});
+
 export const ClaimExtractionSchema = z.object({
   intent: z.enum(INTENTS),
   reason: z.enum(REASON_CODES),
@@ -256,60 +258,24 @@ export const ClaimExtractionSchema = z.object({
   language: z.string().max(32),
   urgency: z.enum(['low', 'normal', 'high']),
   policyOverrideAttempted: z.boolean(),
+  lineClaims: z.array(LineClaimSchema).max(20).default([]),
 });
 export type ClaimExtractionDto = z.infer<typeof ClaimExtractionSchema>;
+
+export const LineGroundingSchema = z.object({
+  itemId: z.string(),
+  grounded: z.boolean(),
+  verifiedQuotes: z.array(z.string()),
+  rejectedQuotes: z.array(z.string()),
+});
 
 export const GroundingSchema = z.object({
   grounded: z.boolean(),
   verifiedQuotes: z.array(z.string()),
   rejectedQuotes: z.array(z.string()),
+  lines: z.array(LineGroundingSchema).default([]),
 });
 export type GroundingDto = z.infer<typeof GroundingSchema>;
-
-/**
- * One shopping-assistant answer, as the customer reads it.
- *
- * A sibling of the refund reply, never a field on it: shop turns write no
- * `refund_requests` row, so they must not be renderable as one. `products`
- * and `orderStatus` freeze what was shown, re-resolved from the database at
- * answer time rather than priced or narrated by a model.
- */
-export const ShopCardSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  priceCents: z.number().int().nonnegative(),
-  stock: z.number().int().nonnegative(),
-});
-export type ShopCardDto = z.infer<typeof ShopCardSchema>;
-
-export const ShopOrderSnapshotSchema = z.object({
-  orderId: z.string(),
-  status: z.string(),
-  paymentState: z.string(),
-  trackingStatus: z.string(),
-  totalCents: z.number().int().nonnegative(),
-  items: z
-    .array(
-      z.object({
-        name: z.string(),
-        quantity: z.number().int().positive(),
-        unitPriceCents: z.number().int().nonnegative(),
-      }),
-    )
-    .readonly(),
-});
-export type ShopOrderSnapshotDto = z.infer<typeof ShopOrderSnapshotSchema>;
-
-export const ShopAnswerSchema = z.object({
-  id: z.string(),
-  kind: z.enum(['order_status', 'return_help', 'product_help', 'general']),
-  answer: z.string().max(2000),
-  products: z.array(ShopCardSchema).max(5),
-  orderStatus: ShopOrderSnapshotSchema.nullable(),
-  orderId: z.string().nullable(),
-  createdAt: z.string(),
-});
-export type ShopAnswerDto = z.infer<typeof ShopAnswerSchema>;
 
 export const InjectionSignalSchema = z.object({
   category: z.enum(INJECTION_CATEGORIES),

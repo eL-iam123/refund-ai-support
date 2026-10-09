@@ -73,6 +73,57 @@ function refusedWholeOrder(decision: RefundDecision): boolean {
   return decision.trace.some((rule) => rule.scope === 'order' && rule.outcome === 'deny');
 }
 
+/**
+ * What a partial refund left behind, named or not.
+ *
+ * Where an approval can name the blocked lines ("NAME is not eligible..."), a
+ * partial refund is the same situation plus the money being sent, so the
+ * sentence must say which lines are excluded and why, rather than trailing a
+ * vague "the rest is not refundable" over what might be a very informative line.
+ *
+ * A line can be blocked for two reasons, and the two need different sentences:
+ * "not eligible" is the policy refusing it, while an R-12 review line is going
+ * to a person and the customer should not be told it is refused before anyone
+ * has read the claim for it.
+ */
+function partialExcluded(decision: RefundDecision): string {
+  const { ineligible, review } = partitionBlocked(decision);
+  const sentences: string[] = [];
+  if (ineligible.length > 0) {
+    sentences.push(
+      `${ineligible.map((item) => item.name).join(' and ')} ${
+        ineligible.length === 1 ? 'is' : 'are'
+      } not eligible for a refund on this order.`,
+    );
+  } else if (review.length === 0) {
+    sentences.push('The rest of the order is not refundable under our policy.');
+  }
+  if (review.length > 0) {
+    sentences.push(
+      `${review.map((item) => item.name).join(' and ')} ${
+        review.length === 1 ? 'is' : 'are'
+      } being checked by a member of our team before anything for ${review.length === 1 ? 'it' : 'them'} is refunded.`,
+    );
+  }
+  return sentences.join(' ');
+}
+
+/**
+ * Splits the blocked lines into the two things they can be: a line the policy
+ * refused ("not eligible") and a line R-12 sent for a person to read ("being
+ * reviewed"). They must not share a sentence, because one says no and the other
+ * says "not yet".
+ */
+function partitionBlocked(decision: RefundDecision): {
+  ineligible: RefundDecision['blockedItems'];
+  review: RefundDecision['blockedItems'];
+} {
+  return {
+    ineligible: decision.blockedItems.filter((item) => item.ruleId !== 'R-12'),
+    review: decision.blockedItems.filter((item) => item.ruleId === 'R-12'),
+  };
+}
+
 export function composeDeterministicResponse(
   decision: RefundDecision,
   order: OrderRecord | null,
@@ -107,11 +158,12 @@ function decisionBody(
   prefix: string,
   order: OrderRecord | null,
 ): string {
+  const { ineligible } = partitionBlocked(decision);
   const excluded =
-    decision.blockedItems.length === 0 || (decision.decision === 'denied' && refusedWholeOrder(decision))
+    ineligible.length === 0 || (decision.decision === 'denied' && refusedWholeOrder(decision))
       ? ''
-      : ` ${decision.blockedItems.map((item) => item.name).join(' and ')} ${
-          decision.blockedItems.length === 1 ? 'is' : 'are'
+      : ` ${ineligible.map((item) => item.name).join(' and ')} ${
+          ineligible.length === 1 ? 'is' : 'are'
         } not eligible for a refund on this order.`;
 
   switch (decision.decision) {
@@ -127,8 +179,8 @@ function decisionBody(
       return (
         prefix +
         `We have refunded ${formatCents(decision.refundAmountCents)}${reference} for the items that ` +
-        'are eligible. The rest of the order is not refundable under our policy.' +
-        ' If you think we have the details wrong, reply to this message and a person will review it.'
+        `are eligible. ${partialExcluded(decision)} ` +
+        'If you think we have the details wrong, reply to this message and a person will review it.'
       );
     case 'exchange':
       return (
@@ -159,13 +211,16 @@ function decisionBody(
  * Why this went to a person, in the customer's language.
  *
  * "A person is reviewing your request" tells a customer nothing they can act on, and an
- * escalation they cannot explain is one they take to someone else. So the deciding rule
- * is spoken in plain words - never by its number, never with a policy citation - and the
- * sentence stays safe to send verbatim while still telling the person what to expect.
+ * escalation they cannot explain is one they take to someone else. So the message has
+ * two reason-specific parts: the deciding rule spoken in plain words - never by its
+ * number, never with a policy citation - and what the person will do next, so a
+ * routine handoff reads differently from a history check or a mismatch review.
+ * The sentence stays safe to send verbatim while still telling the person what to expect.
  */
 function escalationReason(decision: RefundDecision): string {
   return (
     `A person is reviewing your request and will reply within one business day, because ${reasonFor(decision)} ` +
+    `${expectationFor(decision)} ` +
     'Nothing further is needed from you.'
   );
 }
@@ -180,23 +235,67 @@ function escalationReason(decision: RefundDecision): string {
  */
 const REASON_BY_RULE: Readonly<Record<string, string>> = {
   'R-01': 'it falls outside the window we can decide on our own.',
-  'R-01b': 'it falls outside the window we can decide on our own.',
-  'R-02': 'the item cannot be refunded automatically.',
+  'R-01b': 'it is past the standard window and needs a person to weigh the reason.',
+  'R-02': 'the item is marked final sale, which we cannot decide on our own.',
   'R-03': 'the amount is above what we can approve without a person checking it.',
-  'R-03b': 'the amount needs someone to look at the detail.',
+  'R-03b': 'the amount changed as lines were excluded, so it needs a person to check it.',
   'R-04': 'the reason needs someone to look at the detail.',
-  'R-05': 'the item cannot be refunded automatically.',
+  'R-05': 'the item is a digital good that has already been downloaded.',
   'R-06': 'the payment needs checking against this order.',
-  'R-06b': 'the payment needs checking against this order.',
-  'R-07': 'we need to check the history of this order before refunding it.',
+  'R-06b': 'the amount goes beyond what was paid on this case.',
+  'R-07': 'there is an open payment dispute on this case.',
   'R-08': 'we need to check the history of this order before refunding it.',
   'R-09': 'what you have told us does not match what we already have on file.',
-  'R-10': 'the item cannot be refunded automatically.',
+  'R-10': 'recurring charges are handled by billing rather than refunds.',
   'R-11': 'there is already a request open for this order.',
   'R-12': 'we could not read the detail of your message well enough to decide it ourselves.',
   'R-13': 'we could not work out which order this is about.',
   'R-14': 'the message asked us to change our policy, which we cannot do.',
+  'R-15': 'the total on this case is above what we can decide on our own.',
 };
+
+/**
+ * What the person will do next, per deciding rule.
+ *
+ * The reason says why a person is needed; this says what happens now, so two
+ * escalations with different causes do not read as the same message. Risk
+ * reasons (history, mismatch, policy-change) get deliberately neutral words -
+ * "look at", "compare", "confirm" - because the customer is owed the next step,
+ * not an accusation, and the person has not decided anything yet.
+ *
+ * Each sentence must stay inside the phrasing guard's vocabulary: no decision
+ * verbs (approve, deny, partial, exchange, store credit), no money words or
+ * figures, no "your order", no timelines or promises, no rule ids. The guard
+ * only checks model output, but the deterministic text is what no-model
+ * deployments send, so it holds itself to the same bar.
+ */
+const EXPECTATION_BY_RULE: Readonly<Record<string, string>> = {
+  'R-01': 'They will check the dates on this case and explain what options are still open.',
+  'R-01b': 'They will weigh the reason against the age of the case and reply here.',
+  'R-02': 'They will look at the item and confirm what can be done for it.',
+  'R-03': 'They will go over the amount and confirm it here before anything moves.',
+  'R-03b': 'They will go over the remaining amount and reply here.',
+  'R-04': 'They will read through what you told us and reply here with the next step.',
+  'R-05': 'They will look at the download record and confirm what can be done.',
+  'R-06': 'They will match the payment against this case and reply here.',
+  'R-06b': 'They will go over the balance and reply here.',
+  'R-07': 'They will look at the dispute and reply here with the next step.',
+  'R-08': 'They will look at the earlier requests on this case and reply here.',
+  'R-09': 'They will compare what you told us with what is on file and reply here.',
+  'R-10': 'They will check the billing side of this case and reply here.',
+  'R-11': 'They will pick up the request that is already open, so there is no need to send it again.',
+  'R-12': 'They will read it again carefully and reply here.',
+  'R-13': 'They will work out which case this belongs to and reply here.',
+  'R-14': 'They will reply here to confirm what the policy allows.',
+  'R-15': 'They will go over the total and confirm it here before anything moves.',
+};
+
+const DEFAULT_EXPECTATION = 'They will read the case from the start and reply here.';
+
+/** The rule that concluded the decision, if any rule did. */
+function decidingRuleId(decision: RefundDecision): string | undefined {
+  return decision.trace.find((rule) => rule.outcome !== 'pass')?.ruleId;
+}
 
 /**
  * The sentence for whichever rule reached a conclusion.
@@ -210,7 +309,13 @@ const REASON_BY_RULE: Readonly<Record<string, string>> = {
  * escalation. Saying so is the truth, and a vague reassurance would be a small lie.
  */
 export function reasonFor(decision: RefundDecision): string {
-  const deciding = decision.trace.find((rule) => rule.outcome !== 'pass');
-  const sentence = deciding === undefined ? undefined : REASON_BY_RULE[deciding.ruleId];
+  const ruleId = decidingRuleId(decision);
+  const sentence = ruleId === undefined ? undefined : REASON_BY_RULE[ruleId];
   return sentence ?? 'it needs a person to decide rather than a rule.';
+}
+
+/** The next-step sentence for whichever rule reached a conclusion. */
+function expectationFor(decision: RefundDecision): string {
+  const ruleId = decidingRuleId(decision);
+  return ruleId === undefined ? DEFAULT_EXPECTATION : (EXPECTATION_BY_RULE[ruleId] ?? DEFAULT_EXPECTATION);
 }

@@ -1,4 +1,4 @@
-import type { ClaimExtraction, GroundingResult } from '@refund/shared';
+import type { ClaimExtraction, GroundingResult, LineGrounding } from '@refund/shared';
 import { MIN_EVIDENCE_QUOTE_LENGTH, MIN_GROUNDED_QUOTES } from '../policy/constants.js';
 
 /**
@@ -56,5 +56,66 @@ export function verifyGrounding(
     grounded: verified.length >= MIN_GROUNDED_QUOTES,
     verifiedQuotes: verified,
     rejectedQuotes: rejected,
+    ...lineExtras(verifyLineClaims(extraction, corpus)),
   };
+}
+
+/**
+ * Attaches the per-line result only when there is one.
+ *
+ * With `exactOptionalPropertyTypes`, an absent field is not the same as a field
+ * set to `undefined`, and `lines` absent is exactly how the reason rules tell
+ * "no per-line reading" from "every line failed".
+ */
+function lineExtras(lines: readonly LineGrounding[]): { lines: readonly LineGrounding[] } | Record<string, never> {
+  return lines.length === 0 ? {} : { lines };
+}
+
+/**
+ * The same verification, per claimed line.
+ *
+ * `lineClaims` is what lets a mixed basket be paid line by line - "the mug
+ * arrived broken and the lamp shade is cracked" grounds the mug and not the
+ * lamp only if the two reasons are checked apart, which is what a per-line
+ * quote list exists for. A line with no verified quote is an escalation, not an
+ * exclusion: its claim is merely unsupported, and a person still reads it.
+ *
+ * Returns an empty array when the extraction carried no `lineClaims`, which the
+ * caller leaves off the result - `lines` absent is how a consumer tells "no
+ * per-line data at all" from "every line's quotes were rejected": the first
+ * falls back to the whole-message reading, the second must not.
+ */
+function verifyLineClaims(
+  extraction: ClaimExtraction,
+  corpus: readonly string[],
+): readonly LineGrounding[] {
+  const claims = extraction.lineClaims;
+  if (claims === undefined || claims.length === 0) {
+    return [];
+  }
+  return claims.map((claim) => {
+    const line = verifyQuotes(claim.evidenceQuotes, corpus);
+    return {
+      itemId: claim.itemId,
+      grounded: line.verified.length >= MIN_GROUNDED_QUOTES,
+      verifiedQuotes: line.verified,
+      rejectedQuotes: line.rejected,
+    };
+  });
+}
+
+function verifyQuotes(
+  quotes: readonly string[],
+  corpus: readonly string[],
+): { verified: string[]; rejected: string[] } {
+  const verified: string[] = [];
+  const rejected: string[] = [];
+  for (const quote of quotes) {
+    if (verifyQuote(corpus, quote)) {
+      verified.push(quote);
+    } else {
+      rejected.push(quote);
+    }
+  }
+  return { verified, rejected };
 }

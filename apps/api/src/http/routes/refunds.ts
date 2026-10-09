@@ -8,6 +8,7 @@ import type { Principal } from '../../auth/tokens.js';
 import { NotFoundError, badRequest, conflict } from '../errors.js';
 import {
   RefundLedgerError,
+  authoriseRefund,
   findRefundById,
   listRefundsByStatus,
   releaseRefund,
@@ -16,6 +17,7 @@ import {
   type RefundRecord,
 } from '../../db/refundLedger.js';
 import { findRequestById, listAuditEvents } from '../../db/requestRepository.js';
+import { findOrder } from '../../db/orderRepository.js';
 import type { PersistedRequest } from '../../db/records.js';
 import { recordCustomerUpdate } from '../../db/customerUpdates.js';
 import { followUpFor } from '../../response/followUp.js';
@@ -356,7 +358,88 @@ const FulfilBody = z.object({
     .pipe(z.string().min(1, 'say what was done - the customer is told this').max(2000)),
 });
 
+const AuthoriseBody = z.object({
+  /**
+   * The amount to reserve. Absent, the full order total: an agent on a case who
+   * decides the whole order is owed should not have to type a figure that the
+   * order already knows. Anything sent is still checked against the order's
+   * coverage, so "full refund" can never mean "more than the order".
+   */
+  amountCents: z.number().int().positive().optional(),
+});
+
+/**
+ * The staff retry of the money action: reserve an authorised amount.
+ *
+ * The automated pipeline reserves `pending_verification` for an approval already.
+ * This is the human half of the same ledger call - the agent holding a case who
+ * has decided, against an escalation or a denial the resolver clamped, that the
+ * customer is owed. It goes through the exact same `authoriseRefund`, which is
+ * idempotent on the request and priced against what the order's lines cover, so
+ * retrying is safe and "full" is derived from the order, not typed.
+ *
+ * It still does not pay anyone: settlement stays a distinct admin act with the
+ * person-check between, exactly as with an automatic approval.
+ */
+function registerStaffAuthoriseRoutes(app: FastifyInstance, ctx: AppContext): void {
+  const staff = staffOnly(ctx.env, 'agent', ctx.now);
+
+  app.post<{ Params: unknown; Body: unknown }>(
+    '/api/admin/requests/:requestId/authorise-refund',
+    { preHandler: staff },
+    (request) => {
+      const params = request.params as { requestId: string };
+      const requestId = requestIdParam(params);
+      const body = parseOr(AuthoriseBody.safeParse(request.body ?? {}), 'authorisation');
+
+      const row = findRequestById(ctx.db, requestId);
+      if (row === null) {
+        throw new NotFoundError('request', requestId);
+      }
+      if (row.orderId === null) {
+        throw badRequest('this request has no order to refund');
+      }
+      const order = findOrder(ctx.db, row.customerId, row.orderId, ctx.now());
+      if (order === null) {
+        throw new NotFoundError('order', row.orderId);
+      }
+
+      const agentId = requirePrincipal(request.principal).subject;
+      const amountCents = body.amountCents ?? order.totalCents;
+
+      let authorised: RefundRecord;
+      try {
+        authorised = authoriseRefund(ctx.db, {
+          requestId,
+          orderId: row.orderId,
+          customerId: row.customerId,
+          amountCents,
+          now: ctx.now(),
+        });
+      } catch (error: unknown) {
+        throw toConflict(error);
+      }
+
+      audit(ctx, requestId, ctx.now().toISOString(), 'refund_authorised', `${amountCents} cents reserved by ${agentId}`);
+      ctx.log.info(
+        { requestId, refundId: authorised.id, amountCents, by: agentId },
+        'staff.refund.authorised',
+      );
+      return { refund: toRefundDto(authorised) };
+    },
+  );
+}
+
+function requestIdParam(params: { requestId?: unknown }): string {
+  const parsed = z.object({ requestId: z.string().trim().min(1).max(120) }).safeParse(params);
+  if (!parsed.success) {
+    throw badRequest('invalid request id', parsed.error.issues.map((issue) => issue.message));
+  }
+  return parsed.data.requestId;
+}
+
 export function registerRefundRoutes(app: FastifyInstance, ctx: AppContext): void {
   registerRefundReadRoutes(app, ctx);
   registerRefundWriteRoutes(app, ctx);
+  registerStaffAuthoriseRoutes(app, ctx);
 }

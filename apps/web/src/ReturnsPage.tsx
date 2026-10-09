@@ -139,8 +139,8 @@ function ReturnTable({
               </td>
               <td>{record.reason}</td>
               <td className="actions">
-                <button type="button" onClick={(): void => onOpen(record.id)}>
-                  Open
+                <button type="button" onClick={(): void => onOpen(record.id)} aria-label={`Review return ${record.id}`}>
+                  Review return
                 </button>
               </td>
             </tr>
@@ -239,7 +239,10 @@ function ReturnDetailBody({
     <Panel title={`Return ${detail.return.id}`}>
       {error.length > 0 ? <ErrorNote error={error} /> : null}
       <ReturnFacts detail={detail} />
-      <div className="row">
+      <p className="note">
+        Return handling updates stock only. Refund decisions and payments are recorded separately.
+      </p>
+      <div className="row return-actions">
         {detail.nextStates.map((state) => (
           <ReturnAction
             key={state}
@@ -382,13 +385,19 @@ function LabelAction({ record, busy, onAct }: ActionProps): ReactNode {
       title="Issue a return label"
       help="Bought from the carrier and pasted here. A URL that looks right and 404s is worse than a visible failure - the customer finds out after the box is packed."
     >
-      <CarrierPicker carrier={carrier} onCarrier={setCarrier} />
-      <input
-        value={labelUrl}
-        aria-label="label url"
-        placeholder="https://carrier.example/label/abc"
-        onChange={(event): void => setLabelUrl(event.target.value)}
-      />
+      <label className="return-field">
+        Carrier
+        <CarrierPicker carrier={carrier} onCarrier={setCarrier} />
+      </label>
+      <label className="return-field">
+        Label URL
+        <input
+          value={labelUrl}
+          aria-label="label url"
+          placeholder="https://carrier.example/label/abc"
+          onChange={(event): void => setLabelUrl(event.target.value)}
+        />
+      </label>
       <button
         type="button"
         disabled={busy || !isWebUrl(labelUrl)}
@@ -407,13 +416,19 @@ function ShipAction({ record, busy, onAct }: ActionProps): ReactNode {
   const [tracking, setTracking] = useState('');
   return (
     <ActionCard title="Mark as sent back" help="Only once the parcel is actually with the carrier.">
-      <CarrierPicker carrier={carrier} onCarrier={setCarrier} />
-      <input
-        value={tracking}
-        aria-label="tracking number"
-        placeholder="tracking number"
-        onChange={(event): void => setTracking(event.target.value)}
-      />
+      <label className="return-field">
+        Carrier
+        <CarrierPicker carrier={carrier} onCarrier={setCarrier} />
+      </label>
+      <label className="return-field">
+        Tracking number
+        <input
+          value={tracking}
+          aria-label="tracking number"
+          placeholder="Enter the carrier tracking number"
+          onChange={(event): void => setTracking(event.target.value)}
+        />
+      </label>
       <button
         type="button"
         disabled={busy || tracking.trim().length < 4}
@@ -437,11 +452,14 @@ function ReceiveAction({ record, items, busy, onAct }: ActionProps): ReactNode {
       {items.map((item) => (
         <div key={item.id} className="row">
           <span className="grow">{lineLabel(item)}</span>
-          <input
-            value={condition}
-            aria-label={`condition for ${item.name}`}
-            onChange={(event): void => setCondition(event.target.value)}
-          />
+          <label className="return-field">
+            Condition
+            <input
+              value={condition}
+              aria-label={`condition for ${item.name}`}
+              onChange={(event): void => setCondition(event.target.value)}
+            />
+          </label>
         </div>
       ))}
       <button
@@ -475,16 +493,19 @@ function ProcessAction({ record, items, busy, onAct }: ActionProps): ReactNode {
       {items.map((item) => (
         <div key={item.id} className="row">
           <span className="grow">{item.name}</span>
-          <input
-            type="number"
-            min={0}
-            max={item.quantity}
-            aria-label={`restock ${item.name}`}
-            value={String(restock[item.itemId] ?? item.quantity)}
-            onChange={(event): void =>
-              setRestock({ ...restock, [item.itemId]: Number(event.target.value) })
-            }
-          />
+          <label className="return-field">
+            Quantity to restock
+            <input
+              type="number"
+              min={0}
+              max={item.quantity}
+              aria-label={`restock ${item.name}`}
+              value={String(restock[item.itemId] ?? item.quantity)}
+              onChange={(event): void =>
+                setRestock({ ...restock, [item.itemId]: Number(event.target.value) })
+              }
+            />
+          </label>
         </div>
       ))}
       <button
@@ -522,12 +543,15 @@ function DenyAction({
       title="Decline this return"
       help="With a reason the customer could be shown. Any return that is not closed can be declined."
     >
-      <input
-        value={reason}
-        aria-label="decline reason"
-        placeholder="why - the customer reads this"
-        onChange={(event): void => setReason(event.target.value)}
-      />
+      <label className="return-field">
+        Reason shown to the customer
+        <input
+          value={reason}
+          aria-label="decline reason"
+          placeholder="Explain why this return is declined"
+          onChange={(event): void => setReason(event.target.value)}
+        />
+      </label>
       <button
         type="button"
         disabled={busy || reason.trim().length === 0}
@@ -549,7 +573,7 @@ function ActionCard({
   children: ReactNode;
 }): ReactNode {
   return (
-    <div className="card">
+    <div className="card return-action">
       <h3>{title}</h3>
       <p className="muted small">{help}</p>
       {children}

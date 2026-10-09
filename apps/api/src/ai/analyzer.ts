@@ -130,64 +130,9 @@ export type IntakeReply =
       readonly model: string;
     };
 
-/**
- * One catalogue row as the shopping model sees it.
- *
- * Id, name and price only: no stock totals, no order facts, no customer data.
- * A model that can see takings can produce a plausible figure the customer
- * never mentioned, so the catalogue snapshot is the minimum that still lets
- * it match words to products.
- */
-export interface ShopProduct {
-  readonly id: string;
-  readonly name: string;
-  readonly priceCents: number;
-}
-
-/** Input for shopping nomination: match the message to catalogue rows. */
-export interface ShopInput {
-  readonly message: string;
-  readonly history: readonly DialogueLine[];
-  readonly products: readonly ShopProduct[];
-}
-
-/**
- * The model's product nomination.
- *
- * Advisory in the strong sense: ids, not products. The server re-resolves
- * every id against the `products` table and drops what is not there, so a
- * nomination can narrow what is shown and can never invent a price, a product
- * or an order. An empty list is a valid answer and means "nothing matches".
- */
-export interface ShopSuggestion {
-  readonly productIds: readonly string[];
-  readonly model: string;
-}
-
-/** One public catalogue name the conversational model may mention. */
-export interface ConverseProduct {
-  readonly name: string;
-}
-
-/** One public policy point the conversational model may cite. */
-export interface ConversePolicy {
-  readonly title: string;
-  readonly summary: string;
-}
-
 /** How to talk: inferred from the customer's own turns, never stored. */
 export interface ConverseStyle {
   readonly tone: 'concise' | 'friendly' | 'detailed';
-}
-
-/** Input for general conversation: small talk, help, and policy questions. */
-export interface ConverseInput {
-  readonly message: string;
-  readonly history: readonly DialogueLine[];
-  /** Public context only: catalogue names and policy summaries. Never an order. */
-  readonly products: readonly ConverseProduct[];
-  readonly policy: readonly ConversePolicy[];
-  readonly style: ConverseStyle;
 }
 
 /**
@@ -222,44 +167,6 @@ export interface PhraseInput {
   readonly history: readonly DialogueLine[];
   readonly style: ConverseStyle;
 }
-
-/**
- * Input for chat mode (escalated conversations).
- *
- * The AI acts as a helpful conversational assistant with no monetary authority.
- * It can respond naturally and has one tool: remind_admin.
- */
-export interface ChatInput {
-  readonly message: string;
-  readonly order: AnalyzerOrder | null;
-  readonly history: readonly DialogueLine[];
-  readonly tools: readonly ChatTool[];
-}
-
-/**
- * Tool available in chat mode.
- */
-export interface ChatTool {
-  readonly name: 'remind_admin';
-  readonly description: 'Notify the human agent that the customer is waiting or pushing for a response.';
-}
-
-/**
- * Reply in chat mode.
- *
- * Two options: a conversational text response, or a tool call to remind the admin.
- */
-export type ChatReply =
-  | {
-      readonly kind: 'text';
-      readonly text: string;
-      readonly model: string;
-    }
-  | {
-      readonly kind: 'tool_call';
-      readonly tool: 'remind_admin';
-      readonly model: string;
-    };
 
 export interface ProviderAttempt {
   readonly model: string;
@@ -321,37 +228,6 @@ export interface AIAnalyzer {
    * escalate - the decision is computed from order facts either way.
    */
   analyze(input: IntakeInput, observer: AttemptObserver): Promise<IntakeReply>;
-  /**
-   * Chat mode for escalated conversations.
-   *
-   * Used when a human agent has taken over but the customer is still chatting.
-   * The AI acts as a helpful conversational assistant with no monetary authority.
-   * It can respond naturally and has one tool: remind_admin (notifies the human
-   * agent that the customer is waiting/pushing).
-   */
-  chat(input: ChatInput, observer: AttemptObserver): Promise<ChatReply>;
-  /**
-   * Shopping nomination: which catalogue rows match the customer's words.
-   *
-   * Optional because not every analyzer nominates: the local matcher and the
-   * unavailable placeholder have nothing to rank with. Absence is a normal
-   * outcome, not an error - the caller answers from keyword search instead,
-   * the way it does when a provider call fails. Best-effort by the same
-   * contract as the case summary: null means "no nomination", never an
-   * exception, so a missing suggestion can never fail a conversation.
-   */
-  suggestProducts?(input: ShopInput, observer: AttemptObserver): Promise<ShopSuggestion | null>;
-  /**
-   * General conversation: small talk, help, and abstract policy questions.
-   *
-   * Optional like nomination, for the same reason: absence is a normal outcome
-   * and the caller answers deterministically instead. Best-effort by contract:
-   * null means "no reply", never an exception. The reply is prose, so the
-   * caller validates it before anyone reads it - no money language, no order
-   * facts, no promises - and falls back when it fails. A missing sentence must
-   * never fail a conversation.
-   */
-  converse?(input: ConverseInput, observer: AttemptObserver): Promise<string | null>;
   /**
    * Phrases a decided outcome into customer-facing prose.
    *
