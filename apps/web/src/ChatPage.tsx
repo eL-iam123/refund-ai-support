@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import {  Headset, Send, ShieldCheck } from 'lucide-react';
+import { Check, Copy, Headset, Send, ShieldCheck, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { ErrorNote } from './components';
 import { formatCents } from './format';
 import { api } from './api';
@@ -61,7 +61,11 @@ export function ChatPage(): ReactNode {
   // every option greyed out except lines nobody had claimed - which reads as "you
   // may only complain about the subscription".
   const claimScope = useMemo(() => claimState(chat.turns), [chat.turns]);
-  const ticks = useItemTicks(context.order, claimScope.settled);
+  // A deep link from the order's report wizard names the line: it arrives
+  // ticked, and the derived filter below still drops it when it is not on
+  // this order or is already decided, so a crafted URL cannot widen scope.
+  const initialTicks = handoff !== null && handoff.itemId !== null ? [handoff.itemId] : [];
+  const ticks = useItemTicks(context.order, claimScope.settled, initialTicks);
   // Forks live beside the thread: when this order's case is with a person, the
   // composer's wait text points at the side panel instead of a bare wait, and
   // names the case so a second escalation does not read as the first one again.
@@ -142,7 +146,6 @@ function HelpAside({
       <h1>Get help with an order</h1>
       <OrderScope orders={orders} loading={ordersLoading} selected={selected} onSelect={onSelect} order={order} />
       <AssistantStatus />
-      <PolicyNote />
     </aside>
   );
 }
@@ -187,8 +190,12 @@ interface ItemTicks {
   readonly clear: () => void;
 }
 
-function useItemTicks(order: ShopOrder | null, reportedItemIds: readonly string[] = []): ItemTicks {
-  const [chosen, setChosen] = useState<readonly string[]>([]);
+function useItemTicks(
+  order: ShopOrder | null,
+  reportedItemIds: readonly string[] = [],
+  initialItemIds: readonly string[] = [],
+): ItemTicks {
+  const [chosen, setChosen] = useState<readonly string[]>(initialItemIds);
   const onThisOrder = new Set((order?.items ?? []).map((item) => item.itemId));
   const itemIds = chosen.filter((id) => onThisOrder.has(id) && !reportedItemIds.includes(id));
 
@@ -309,11 +316,70 @@ async function handleAppeal(deps: ChatThreadDeps, requestId: string): Promise<vo
   }
 }
 
+/** The reply to stream: the trailing assistant turn, unless it was there on arrival. */
+function latestStreamableTurnId(turns: readonly Turn[], initialIds: ReadonlySet<string>): string | null {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (turn === undefined) {
+      continue;
+    }
+    if (!isStreamable(turn)) {
+      return null;
+    }
+    return initialIds.has(turn.id) ? null : turn.id;
+  }
+  return null;
+}
+
+/** The turn ids present on arrival, snapshotted once the thread first has turns. */
+function useInitialTurnIds(turns: readonly Turn[], loading: boolean): ReadonlySet<string> | null {
+  const [initialIds, setInitialIds] = useState<ReadonlySet<string> | null>(null);
+  if (initialIds === null && !loading && turns.length > 0) {
+    setInitialIds(new Set(turns.map((turn) => turn.id)));
+  }
+  return initialIds;
+}
+
+/** This order's verdicts plus an optimistic local layer, for the thumbs. */
+function useReplyRatings(orderId: string | null): {
+  ratingFor: (requestId: string) => Rating | null;
+  castRate: (requestId: string, rating: Rating) => void;
+} {
+  const ratings = useAsyncData(
+    () =>
+      orderId === null
+        ? Promise.resolve({ ratings: [] as readonly { requestId: string; rating: Rating }[] })
+        : shopApi.orderRatings(orderId),
+    [orderId],
+  );
+  const ratingMap = useMemo(
+    () => new Map((ratings.data?.ratings ?? []).map((row) => [row.requestId, row.rating] as const)),
+    [ratings.data],
+  );
+  const [votes, setVotes] = useState<Readonly<Record<string, Rating>>>({});
+  const castRate = (requestId: string, rating: Rating): void => {
+    setVotes((previous) => ({ ...previous, [requestId]: rating }));
+    void shopApi.rateReply(requestId, rating).then(
+      () => {
+        ratings.reload();
+      },
+      () => {
+        // The vote stays local: the next thread read reconciles it, and a
+        // failed vote must not unwind the thumb the customer just set.
+      },
+    );
+  };
+  return {
+    ratingFor: (requestId: string): Rating | null => votes[requestId] ?? ratingMap.get(requestId) ?? null,
+    castRate,
+  };
+}
+
 function ChatThread({
   chat,
   order,
   ticks,
-  claimScope,
+ 
 }: {
   chat: Conversation;
   order: ShopOrder | null;
@@ -330,6 +396,19 @@ function ChatThread({
   const clarificationItemIds = clarificationFrom(chat.turns.at(-1));
   const sendFromComposer = (): Promise<void> => composerSend(chat, ticks.itemIds, clarificationItemIds);
 
+  // Turns present on arrival render instantly; only a reply that lands while
+  // watching streams in. The snapshot is taken once the thread first has
+  // turns rather than on mount, because the thread loads asynchronously -
+  // snapshotting the empty loading state would replay the whole history
+  // typing itself out. Without it, every reload would do exactly that.
+  const initialIds = useInitialTurnIds(chat.turns, chat.loading);
+  const streamId = useMemo(
+    () => (initialIds === null ? null : latestStreamableTurnId(chat.turns, initialIds)),
+    [chat.turns, initialIds],
+  );
+  const seenId = useMemo(() => seenTurnId(chat.turns), [chat.turns]);
+  const { ratingFor, castRate } = useReplyRatings(order?.id ?? null);
+
   return (
     <section className="chat-main">
       <div className="chat-log" ref={logRef}>
@@ -338,17 +417,18 @@ function ChatThread({
             While loading, both it and the thread are absent, so the emptiness is
             brief and states itself. */}
         {chat.loading || chat.turns.length > 0 ? null : <Greeting onPick={chat.setDraft} />}
-        {chat.turns.map((turn) => (
-          <TurnView key={turn.id} turn={turn} chat={chat} {...appealFor(turn, (id: string) => handleAppeal(deps, id))} />
-        ))}
+        <ThreadTurns
+          chat={chat}
+          streamId={streamId}
+          seenId={seenId}
+          ratingFor={ratingFor}
+          castRate={castRate}
+          deps={deps}
+        />
+        {chat.busy && !chat.turns.some((turn) => turn.kind === 'pending') ? <TypingBubble /> : null}
       </div>
 
-      <ScopeChips
-        order={order}
-        scope={claimScope}
-        ticks={ticks}
-        pending={pendingPickerOpen(chat.turns)}
-      />
+     
 
       {chat.notice ? <p className="muted small">{chat.notice}</p> : null}
       <Composer
@@ -364,6 +444,42 @@ function ChatThread({
       {appealState && <p className="muted small">Sending your appeal…</p>}
       {chat.error.length > 0 ? <ErrorNote error={chat.error} /> : null}
     </section>
+  );
+}
+
+/** The scrollable turns: streamed arrivals, read marks, and the typing bubble. */
+function ThreadTurns({
+  chat,
+  streamId,
+  seenId,
+  ratingFor,
+  castRate,
+  deps,
+}: {
+  chat: Conversation;
+  streamId: string | null;
+  seenId: string | null;
+  ratingFor: (requestId: string) => Rating | null;
+  castRate: (requestId: string, rating: Rating) => void;
+  deps: ChatThreadDeps;
+}): ReactNode {
+  return (
+    <>
+      {chat.turns.map((turn) => (
+        <Fragment key={turn.id}>
+          <TurnView
+            turn={turn}
+            chat={chat}
+            stream={turn.id === streamId}
+            rating={ratingFor(turn.id)}
+            {...appealFor(turn, (id: string) => handleAppeal(deps, id))}
+            onRate={castRate}
+          />
+          {turn.id === seenId ? <p className="seen">Seen</p> : null}
+        </Fragment>
+      ))}
+      {chat.busy && !chat.turns.some((turn) => turn.kind === 'pending') ? <TypingBubble /> : null}
+    </>
   );
 }
 
@@ -537,76 +653,7 @@ function ItemChoiceButton({
   );
 }
 
-/**
- * The retry is visible rather than a silent pause.
- *
- * Its own component because the thread is about what is in the log and this
- * is about something happening now that is not in storage.
- */
 
-/**
- * Whether the thread is sitting on an unanswered offer.
- *
- * The chips below the composer stand down while it is, so the customer is never
- * given two places to say the same thing about the same order.
- */
-function pendingPickerOpen(turns: readonly Turn[]): boolean {
-  const last = turns.at(-1);
-  return last !== undefined && (last.kind === 'asked' || last.kind === 'storedAsk') && last.picker !== null;
-}
-
-/**
- * Optional per-line scope, under the composer.
- *
- * The assistant normally asks which item is at issue, and that is the path worth
- * defaulting to. These chips exist because "proactively" and "only when asked" are
- * different products: a customer who knows exactly which line is wrong should not
- * have to wait to be offered a choice they were already going to make. They are a
- * modifier on the message, never a gate in front of it.
- */
-function ScopeChips({
-  order,
-  scope,
-  ticks,
-  pending,
-}: {
-  order: ShopOrder | null;
-  scope: ClaimScope;
-  ticks: ItemTicks;
-  pending: boolean;
-}): ReactNode {
-  if (order === null || order.items.length <= 1 || pending) {
-    return null;
-  }
-  const settled = new Set(scope.settled);
-  const awaiting = new Set(scope.awaiting);
-  return (
-    <div className="scope-chips">
-      <span className="muted small">About a specific item?</span>
-      {order.items.map((item) => (
-        <button
-          key={item.itemId}
-          type="button"
-          className="chip"
-          aria-pressed={ticks.itemIds.includes(item.itemId)}
-          // Only a decided line is closed. A line waiting on a person stays open,
-          // because the customer is mid-conversation about it and being told "you may
-          // not discuss this item" is the opposite of what happened.
-          disabled={settled.has(item.itemId)}
-          onClick={() => ticks.toggle(item.itemId)}
-        >
-          {item.name}
-          {awaiting.has(item.itemId) ? <span className="muted small"> · with a person</span> : null}
-        </button>
-      ))}
-      {ticks.itemIds.length > 0 ? (
-        <button type="button" className="chip" onClick={() => ticks.clear()}>
-          Clear
-        </button>
-      ) : null}
-    </div>
-  );
-}
 
 /**
  * Which order the assistant is answering about.
@@ -799,13 +846,13 @@ function handoffOrderId(handoff: { readonly orderId: string } | null): string | 
  * not a place to put a sentence a customer will then read as something they
  * said.
  */
-function useHandoff(): { readonly orderId: string; readonly issue: string | null } | null {
+function useHandoff(): { readonly orderId: string; readonly issue: string | null; readonly itemId: string | null } | null {
   const [params] = useSearchParams();
   const orderId = params.get('order');
   if (orderId === null) {
     return null;
   }
-  return { orderId, issue: params.get('issue') };
+  return { orderId, issue: params.get('issue'), itemId: params.get('item') };
 }
 
 /**
@@ -955,14 +1002,226 @@ function PhotoAttachButton({
   );
 }
 
+/**
+ * The chat comforts: streaming replies, copying, rating, and read receipts.
+ *
+ * All presentation, none of it policy: the reply text is the same string the
+ * server returned either way, and nothing here changes what was decided or
+ * sent. Streaming covers hardcoded and model-written replies alike, because
+ * both arrive as finished text and both are read as they appear.
+ */
+
+/** Characters per streaming tick, and the tick length. */
+const STREAM_CHUNK_DIVISOR = 30;
+const STREAM_TICK_MS = 8;
+
+function useReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/** Typewriter reply text. Renders instantly when there is nothing to stream. */
+export function StreamedText({ text, stream }: { text: string; stream: boolean }): ReactNode {
+  const reduceMotion = useReducedMotion();
+  const active = stream && !reduceMotion;
+  const [shown, setShown] = useState(() => (active ? 0 : text.length));
+  // A newer turn landing above flips stream off for the same text: derived
+  // during render (the sanctioned alternative to setting state in an effect),
+  // so a reply behind a newer one jumps to full instead of freezing mid-type.
+  const [epoch, setEpoch] = useState({ text, active });
+  if (epoch.text !== text || epoch.active !== active) {
+    setEpoch({ text, active });
+    setShown(active ? 0 : text.length);
+  }
+  useEffect(() => {
+    if (!active) {
+      return;
+    }
+    const step = Math.max(1, Math.ceil(text.length / STREAM_CHUNK_DIVISOR));
+    const timer = window.setInterval(() => {
+      setShown((n) => {
+        const next = n + step;
+        if (next >= text.length) {
+          window.clearInterval(timer);
+          return text.length;
+        }
+        return next;
+      });
+    }, STREAM_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [active, text]);
+  return <>{text.slice(0, shown)}</>;
+}
+
+/** Copy-to-clipboard with a brief confirmation. Best-effort by design. */
+export function CopyButton({ text, label }: { text: string; label: string }): ReactNode {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) {
+        window.clearTimeout(timer.current);
+      }
+    },
+    [],
+  );
+  const copy = async (): Promise<void> => {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard !== undefined) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        throw new Error('no clipboard API');
+      }
+    } catch {
+      try {
+        const area = document.createElement('textarea');
+        area.value = text;
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand('copy');
+        area.remove();
+      } catch {
+        // Clipboard unavailable: the label still flips, because the
+        // alternative is a button that silently does nothing.
+      }
+    }
+    setCopied(true);
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+    }
+    timer.current = window.setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      className="icon-btn"
+      aria-label={copied ? 'Copied to clipboard' : label}
+      title={copied ? 'Copied' : label}
+      onClick={() => void copy()}
+    >
+      {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+    </button>
+  );
+}
+
+export type Rating = 'up' | 'down';
+
+/** Thumbs on an answer. The vote persists server-side; this only casts it. */
+export function RateWidget({
+  requestId,
+  rating,
+  onRate,
+}: {
+  requestId: string;
+  rating: Rating | null;
+  onRate: (requestId: string, rating: Rating) => void;
+}): ReactNode {
+  return (
+    <span className="rate-row" role="group" aria-label="Rate this answer">
+      <button
+        type="button"
+        className="icon-btn"
+        aria-label="Helpful answer"
+        aria-pressed={rating === 'up'}
+        onClick={() => onRate(requestId, 'up')}
+      >
+        <ThumbsUp size={14} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        className="icon-btn"
+        aria-label="Unhelpful answer"
+        aria-pressed={rating === 'down'}
+        onClick={() => onRate(requestId, 'down')}
+      >
+        <ThumbsDown size={14} aria-hidden="true" />
+      </button>
+    </span>
+  );
+}
+
+/** Turn kinds that carry the customer's own words. */
+function hasCustomerText(turn: Turn): boolean {
+  return (
+    turn.kind === 'pending' ||
+    turn.kind === 'agent' ||
+    turn.kind === 'asked' ||
+    turn.kind === 'storedAsk' ||
+    turn.kind === 'stored' ||
+    turn.kind === 'replied'
+  );
+}
+
+/** Turn kinds that answer the customer. */
+function isAssistantAnswer(turn: Turn): boolean {
+  if (turn.kind === 'agent') {
+    return turn.sender !== 'customer';
+  }
+  return (
+    turn.kind === 'replied' ||
+    turn.kind === 'stored' ||
+    turn.kind === 'asked' ||
+    turn.kind === 'storedAsk' ||
+    turn.kind === 'update'
+  );
+}
+
+/**
+ * The id of the latest customer message that has been answered, if any.
+ *
+ * Derived, never stored: a server-kept "seen" would need a write on every
+ * read and a definition of reading, while the thread already shows the truth.
+ * Most turns bundle both sides - a reply carries the message it answers - so
+ * those count as answered by themselves; a bare customer message (just sent,
+ * or written to a person) needs a later assistant turn after it. Only the
+ * newest answered message carries the mark.
+ */
+function seenTurnId(turns: readonly Turn[]): string | null {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (turn === undefined || !hasCustomerText(turn)) {
+      continue;
+    }
+    if (turn.kind !== 'pending' && !(turn.kind === 'agent' && turn.sender === 'customer')) {
+      return turn.id;
+    }
+    for (let after = index + 1; after < turns.length; after += 1) {
+      const later = turns[after];
+      if (later !== undefined && isAssistantAnswer(later)) {
+        return turn.id;
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Turn kinds whose assistant text may stream in. Human-written turns never stream. */
+function isStreamable(turn: Turn): boolean {
+  return (
+    turn.kind === 'replied' ||
+    turn.kind === 'stored' ||
+    turn.kind === 'asked' ||
+    turn.kind === 'storedAsk'
+  );
+}
+
 function TurnView({
   turn,
   chat,
+  stream,
+  rating,
   onAppeal,
+  onRate,
 }: {
   turn: Turn;
   chat: Conversation;
+  stream: boolean;
+  rating: Rating | null;
   onAppeal?: (requestId: string) => void | Promise<void>;
+  onRate?: ((requestId: string, rating: Rating) => void) | undefined;
 }): ReactNode {
   if (turn.kind === 'pending') {
     return <PendingBubble text={turn.text} />;
@@ -977,22 +1236,28 @@ function TurnView({
     return <FollowUpNotice text={turn.text} />;
   }
   if (turn.kind === 'stored') {
-    return <StoredDecisionBubble turn={turn} {...appealProps(onAppeal)} />;
-  }
-  if (turn.kind === 'storedAsk' || turn.kind === 'asked') {
-    return <QuestionBubble turn={turn} chat={chat} />;
-  }
-  // An acknowledgement, not a case: the server answered about the open
-  // escalation instead of deciding anything, so the thread notes what was
-  // said with no decision bubble and nothing to appeal.
-  if (turn.kind === 'status') {
     return (
-      <p className="bubble-them" role="status" aria-live="polite">
-        {turn.status}
-      </p>
+      <StoredDecisionBubble
+        turn={turn}
+        stream={stream}
+        rating={rating}
+        onRate={onRate}
+        {...appealProps(onAppeal)}
+      />
     );
   }
-  return <LiveDecisionBubble turn={turn} {...appealProps(onAppeal)} />;
+  if (turn.kind === 'storedAsk' || turn.kind === 'asked') {
+    return <QuestionBubble turn={turn} chat={chat} stream={stream} />;
+  }
+  return (
+    <LiveDecisionBubble
+      turn={turn}
+      stream={stream}
+      rating={rating}
+      onRate={onRate}
+      {...appealProps(onAppeal)}
+    />
+  );
 }
 
 /** The appeal control, only where a refusal can carry one. Absent otherwise. */
@@ -1007,8 +1272,8 @@ function appealProps(
  *
  * Live and stored denials alike: the refusal used to be appealable only in
  * the session that produced it, so a reload silently removed the one way to
- * contest it. Anything else - approvals, questions, statuses - has nothing
- * to appeal, and the control stays absent.
+ * contest it. Anything else - approvals, questions - has nothing to appeal,
+ * and the control stays absent.
  */
 function appealFor(
   turn: Turn,
@@ -1054,15 +1319,17 @@ function AgentBubble({ turn }: { turn: Turn & { kind: 'agent' } }): ReactNode {
 function QuestionBubble({
   turn,
   chat,
+  stream,
 }: {
   turn: Turn & { kind: 'storedAsk' | 'asked' };
   chat: Conversation;
+  stream: boolean;
 }): ReactNode {
   return (
     <>
       <p className="bubble-me">{turn.text}</p>
       {turn.picker === null ? (
-        <Question reply={turn.question} />
+        <Question reply={turn.question} stream={stream} />
       ) : (
         <ItemOfferBubble offer={turn.picker} chat={chat} busy={chat.busy} />
       )}
@@ -1072,24 +1339,58 @@ function QuestionBubble({
 
 function StoredDecisionBubble({
   turn,
+  stream,
+  rating,
   onAppeal,
-}: { turn: Turn & { kind: 'stored' }; onAppeal?: (requestId: string) => void | Promise<void> }): ReactNode {
+  onRate,
+}: {
+  turn: Turn & { kind: 'stored' };
+  stream: boolean;
+  rating: Rating | null;
+  onAppeal?: (requestId: string) => void | Promise<void>;
+  onRate?: ((requestId: string, rating: Rating) => void) | undefined;
+}): ReactNode {
   return (
     <>
       <p className="bubble-me">{turn.text}</p>
-      <Reply result={turn.result} duplicate={null} requestId={turn.id} {...(onAppeal !== undefined ? { onAppeal } : {})} />
+      <Reply
+        result={turn.result}
+        duplicate={null}
+        requestId={turn.id}
+        stream={stream}
+        rating={rating}
+        {...(onAppeal !== undefined ? { onAppeal } : {})}
+        {...(onRate !== undefined ? { onRate } : {})}
+      />
     </>
   );
 }
 
 function LiveDecisionBubble({
   turn,
+  stream,
+  rating,
   onAppeal,
-}: { turn: Turn & { kind: 'replied' }; onAppeal?: (requestId: string) => void | Promise<void> }): ReactNode {
+  onRate,
+}: {
+  turn: Turn & { kind: 'replied' };
+  stream: boolean;
+  rating: Rating | null;
+  onAppeal?: (requestId: string) => void | Promise<void>;
+  onRate?: ((requestId: string, rating: Rating) => void) | undefined;
+}): ReactNode {
   return (
     <>
       <p className="bubble-me">{turn.text}</p>
-      <Reply result={turn.result} duplicate={turn.duplicate} requestId={turn.id} {...(onAppeal !== undefined ? { onAppeal } : {})} />
+      <Reply
+        result={turn.result}
+        duplicate={turn.duplicate}
+        requestId={turn.id}
+        stream={stream}
+        rating={rating}
+        {...(onAppeal !== undefined ? { onAppeal } : {})}
+        {...(onRate !== undefined ? { onRate } : {})}
+      />
     </>
   );
 }
@@ -1148,6 +1449,7 @@ function AgentReply({ text, media }: { text: string; media: { type: string; url:
       <footer className="row small muted">
         <Headset size={14} />
         Customer agent
+        <CopyButton text={text} label="Copy agent reply" />
       </footer>
     </div>
   );
@@ -1161,10 +1463,15 @@ function AgentReply({ text, media }: { text: string; media: { type: string; url:
  * "we are still talking" from "you have an answer" at a glance - and answering
  * it is exactly what the composer stays open for.
  */
-function Question({ reply }: { reply: string }): ReactNode {
+function Question({ reply, stream }: { reply: string; stream: boolean }): ReactNode {
   return (
     <div className="bubble-them">
-      <p>{reply}</p>
+      <p>
+        <StreamedText text={reply} stream={stream} />
+      </p>
+      <div className="row">
+        <CopyButton text={reply} label="Copy question" />
+      </div>
     </div>
   );
 }
@@ -1180,7 +1487,23 @@ function Question({ reply }: { reply: string }): ReactNode {
  * replies and the customer concludes the second one was ignored - which is
  * closer to the truth than it should be, and sends them off to try a third time.
  */
-function Reply({ result, duplicate, onAppeal, requestId }: { result: ReplyBody; duplicate: DuplicateNotice | null; onAppeal?: (requestId: string) => void | Promise<void>; requestId?: string }): ReactNode {
+function Reply({
+  result,
+  duplicate,
+  onAppeal,
+  requestId,
+  stream,
+  rating,
+  onRate,
+}: {
+  result: ReplyBody;
+  duplicate: DuplicateNotice | null;
+  onAppeal?: (requestId: string) => void | Promise<void>;
+  requestId?: string;
+  stream: boolean;
+  rating: Rating | null;
+  onRate?: ((requestId: string, rating: Rating) => void) | undefined;
+}): ReactNode {
   return (
     <div className="bubble-them">
       <div className="row">
@@ -1194,32 +1517,63 @@ function Reply({ result, duplicate, onAppeal, requestId }: { result: ReplyBody; 
         </p>
       )}
       <BlockedItems decision={result.decision} items={result.blockedItems} />
-      <p>{result.responseText}</p>
-      <footer className="row small">
-        {result.decision === 'approved' || result.decision === 'partial_refund' ? (
-          <strong>{formatCents(result.refundAmountCents)}</strong>
-        ) : null}
-        {result.decision === 'escalated' ? (
-          <span className="muted">Someone confirms this by hand before anything is paid.</span>
-        ) : null}
-        {result.decision === 'exchange' || result.decision === 'store_credit' ? (
-          <span className="muted">No money is moved by this.</span>
-        ) : null}
-        {result.decision === 'denied' && onAppeal !== undefined && requestId !== undefined && (
-          <button
-            type="button"
-            className="button-secondary small"
-            onClick={() => {
-              void onAppeal(requestId);
-            }}
-            aria-label="Appeal this decision"
-          >
-            Appeal this decision
-          </button>
-        )}
-      </footer>
+      <p>
+        <StreamedText text={result.responseText} stream={stream} />
+      </p>
+      <ReplyFooter result={result} requestId={requestId} rating={rating} onAppeal={onAppeal} onRate={onRate} />
     </div>
   );
+}
+
+/** Everything under an answer's prose: amount, appeal, copy, and thumbs. */
+function ReplyFooter({
+  result,
+  requestId,
+  rating,
+  onAppeal,
+  onRate,
+}: {
+  result: ReplyBody;
+  requestId?: string | undefined;
+  rating: Rating | null;
+  onAppeal?: ((requestId: string) => void | Promise<void>) | undefined;
+  onRate?: ((requestId: string, rating: Rating) => void) | undefined;
+}): ReactNode {
+  return (
+    <footer className="row small">
+      <DecisionNote result={result} />
+      {result.decision === 'denied' && onAppeal !== undefined && requestId !== undefined && (
+        <button
+          type="button"
+          className="button-secondary small"
+          onClick={() => {
+            void onAppeal(requestId);
+          }}
+          aria-label="Appeal this decision"
+        >
+          Appeal this decision
+        </button>
+      )}
+      <CopyButton text={result.responseText} label="Copy answer" />
+      {requestId !== undefined && onRate !== undefined ? (
+        <RateWidget requestId={requestId} rating={rating} onRate={onRate} />
+      ) : null}
+    </footer>
+  );
+}
+
+/** The one-line consequence under an answer: amount, wait, or no-money note. */
+function DecisionNote({ result }: { result: ReplyBody }): ReactNode {
+  if (result.decision === 'approved' || result.decision === 'partial_refund') {
+    return <strong>{formatCents(result.refundAmountCents)}</strong>;
+  }
+  if (result.decision === 'escalated') {
+    return <span className="muted">Someone confirms this by hand before anything is paid.</span>;
+  }
+  if (result.decision === 'exchange' || result.decision === 'store_credit') {
+    return <span className="muted">No money is moved by this.</span>;
+  }
+  return null;
 }
 
 /**
@@ -1273,15 +1627,3 @@ function FollowUpNotice({ text }: { text: string }): ReactNode {
   );
 }
 
-/** What the assistant may and may not do, stated per mode so neither over-promises. */
-function PolicyNote(): ReactNode {
-  return (
-    <div className="note">
-      <ShieldCheck size={16} />
-      <p className="small">
-        Every answer comes from a written refund rule, not from a model&apos;s opinion. A human
-        checks anything money is involved in.
-      </p>
-    </div>
-  );
-}

@@ -64,8 +64,4 @@ export function rulesForScope(scope: RuleScope): PolicyRule[] {
   return POLICY_RULES.filter((rule) => rule.scope === scope);
 }
 
-export function findRule(id: string): PolicyRule | null {
-  return POLICY_RULES.find((rule) => rule.id === id) ?? null;
-}
-
 export { ALLOWED_OUTCOMES } from '@refund/shared';

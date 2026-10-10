@@ -38,7 +38,7 @@ export interface AppContext {
  * built inside it. A null notifier simply means no hub - a script, a seed run, a
  * test that does not care - and the pipeline carries on either way.
  */
-export interface CustomerEvents {
+interface CustomerEvents {
   notify: ((customerId: string) => void) | null;
 }
 

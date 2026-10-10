@@ -250,6 +250,92 @@ describe('the consent gate', () => {
     expect(completed.decision.refundAmountCents).toBe(2400);
   });
 
+  it.each([
+    ['okay that would be great', 'REQ-CONSENT-OKAY'],
+    ['ok', 'REQ-CONSENT-OK'],
+    ['sounds good', 'REQ-CONSENT-SOUNDS'],
+    ['that works', 'REQ-CONSENT-WORKS'],
+  ])('hears %s as confirmation', async (message, requestId) => {
+    // The reported transcript: "okay that would be great" restated the
+    // confirmation question instead of completing it, and the repeat drove
+    // the customer to "i said okay" and then to an escalation. The claim
+    // names the mug outright so the heuristic reader resolves it on the
+    // confirm turn; "it" would leave it asking which item, which is a
+    // different test.
+    deps = makeDeps(fixedAnalyzer(['the mug is not what i ordered'], 'wrong_item'));
+    const asked = await processRefundRequest(f.db, deps, {
+      requestId: `${requestId}-ASK`,
+      customerId: f.customerId,
+      orderId: f.orderId,
+      message: 'the mug is not what i ordered',
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+    expect(asked.stage).toBe('asked');
+    if (asked.stage !== 'asked') {
+      return;
+    }
+    recordDialogueTurn(f.db, {
+      customerId: f.customerId,
+      orderId: f.orderId,
+      customerMessage: 'the mug is not what i ordered',
+      assistantQuestion: asked.question,
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+    const completed = await processRefundRequest(f.db, makeDeps(FakeAnalyzer({ kind: 'heuristic' })), {
+      requestId,
+      customerId: f.customerId,
+      orderId: f.orderId,
+      message,
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+    expect(completed.stage).toBe('decided');
+    if (completed.stage !== 'decided') {
+      return;
+    }
+    expect(completed.decision.decision).toBe('approved');
+    expect(completed.decision.refundAmountCents).toBe(2400);
+  });
+
+  it('hears an aggrieved restatement as confirmation', async () => {
+    deps = makeDeps(fixedAnalyzer(['the mug is not what i ordered'], 'wrong_item'));
+    const asked = await processRefundRequest(f.db, deps, {
+      requestId: 'REQ-CONSENT-AGGRIEVED-ASK',
+      customerId: f.customerId,
+      orderId: f.orderId,
+      message: 'the mug is not what i ordered',
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+    expect(asked.stage).toBe('asked');
+    if (asked.stage !== 'asked') {
+      return;
+    }
+    recordDialogueTurn(f.db, {
+      customerId: f.customerId,
+      orderId: f.orderId,
+      customerMessage: 'the mug is not what i ordered',
+      assistantQuestion: asked.question,
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+    const completed = await processRefundRequest(f.db, makeDeps(FakeAnalyzer({ kind: 'heuristic' })), {
+      requestId: 'REQ-CONSENT-AGGRIEVED',
+      customerId: f.customerId,
+      orderId: f.orderId,
+      message: 'i said okay',
+      itemIds: [f.mugItemId],
+      now: TEST_NOW,
+    });
+    expect(completed.stage).toBe('decided');
+    if (completed.stage !== 'decided') {
+      return;
+    }
+    expect(completed.decision.decision).toBe('approved');
+  });
+
   it('finds the pending claim only for a confirmation answer', () => {
     const claim = 'the mug is not what i ordered';
     recordDialogueTurn(f.db, {

@@ -2,9 +2,9 @@
 
 import type { Decision } from '@refund/shared';
 
-export type OrderStatus = 'delivered' | 'shipped' | 'processing' | 'cancelled';
-export type PaymentState = 'settled' | 'pending' | 'refunded' | 'partially_refunded' | 'chargeback_open';
-export type TrackingStatus = 'delivered' | 'in_transit' | 'not_shipped' | 'exception';
+type OrderStatus = 'delivered' | 'shipped' | 'processing' | 'cancelled';
+type PaymentState = 'settled' | 'pending' | 'refunded' | 'partially_refunded' | 'chargeback_open';
+type TrackingStatus = 'delivered' | 'in_transit' | 'not_shipped' | 'exception';
 export type CustomerTier = 'standard' | 'plus' | 'enterprise';
 
 export interface CustomerRecord {

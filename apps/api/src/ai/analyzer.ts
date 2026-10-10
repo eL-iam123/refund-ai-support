@@ -23,7 +23,7 @@ import type { BreakerState } from './breaker.js';
  * decision path.
  */
 
-export interface AnalyzerItem {
+interface AnalyzerItem {
   readonly id: string;
   readonly name: string;
   readonly quantity: number;
@@ -101,7 +101,7 @@ export type IntakeExit = 'ask' | 'ask_items' | 'decide';
  * They are re-checked against the resolved order before they are shown, so an id
  * from another order is dropped rather than offered.
  */
-export interface AskItemsReply {
+interface AskItemsReply {
   readonly kind: 'ask_items';
   readonly candidates: readonly string[];
   readonly model: string;
@@ -131,7 +131,7 @@ export type IntakeReply =
     };
 
 /** How to talk: inferred from the customer's own turns, never stored. */
-export interface ConverseStyle {
+interface ConverseStyle {
   readonly tone: 'concise' | 'friendly' | 'detailed';
 }
 
@@ -166,6 +166,22 @@ export interface PhraseInput {
   readonly quote: string | null;
   readonly history: readonly DialogueLine[];
   readonly style: ConverseStyle;
+}
+
+/** One missing field, worded for the customer. The field set mirrors the engine's. */
+export type ClarifyField = 'order' | 'item' | 'reason' | 'condition';
+
+/** What a clarification question may name: products and their kind, never money. */
+export interface ClarifyItem {
+  readonly name: string;
+  readonly kind: 'subscription' | 'digital' | 'physical';
+}
+
+/** Input for wording one missing detail as a question. */
+export interface ClarifyInput {
+  readonly field: ClarifyField;
+  readonly items: readonly ClarifyItem[];
+  readonly message: string;
 }
 
 export interface ProviderAttempt {
@@ -241,6 +257,21 @@ export interface AIAnalyzer {
    * means "no phrasing", never an exception.
    */
   phrase?(input: PhraseInput, observer: AttemptObserver): Promise<string | null>;
+  /**
+   * Words a missing detail in the customer's language.
+   *
+   * The engine derives *which* field is missing; this only phrases the ask.
+   * Best-effort like `phrase`: null means "no wording", never an exception,
+   * and the caller falls back to the deterministic question. Optional, so
+   * analyzers without a model - local, unavailable, test doubles - simply do
+   * not implement it and every existing test keeps passing unchanged.
+   *
+   * The input carries product names and kinds but never money: a question has
+   * no legitimate use for a figure, and a model that cannot see one cannot
+   * state one. The caller validates length and loop-safety before anyone
+   * reads the result.
+   */
+  askClarification?(input: ClarifyInput, observer: AttemptObserver): Promise<string | null>;
   /**
    * The agent-facing case summary: what the customer reported, and what it means.
    *

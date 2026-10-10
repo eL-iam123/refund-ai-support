@@ -151,6 +151,10 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 
 .lines { margin: 14px 0; border-top: 1px solid var(--line); }
 .lines li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: .88rem; }
+/* The report wizard's rows carry a status pill or a report button after the
+   price, so the row centres and the control never wraps or shrinks. */
+.lines-report li { align-items: center; }
+.lines-report .pill, .lines-report .chip { flex: none; }
   .lines li.total { font-weight: 750; }
   .cart-line > span:first-child { display: grid; gap: 2px; min-width: 0; }
   .cart-line-end { display: inline-flex; align-items: center; gap: 10px; flex: 0 0 auto; }
@@ -265,6 +269,15 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 .scope-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .chip { min-height: 36px; padding: 0 10px; color: var(--ink-soft); background: #fff; border: 1px solid var(--line); border-radius: 6px; font-size: .82rem; font-weight: 600; text-align: left; }.chip:hover, .chip-on { color: var(--brand-deep); border-color: var(--brand); background: var(--brand-soft); }
 .composer { display: flex; align-items: center; gap: var(--space-2); padding-top: var(--space-4); border-top: 1px solid var(--line); }.composer input { flex: 1; }.composer-photo { width: 42px; padding: 0; color: var(--ink-soft); background: #fff; border-color: var(--line-strong); }.composer button[type="submit"] { width: 42px; padding: 0; }.chat-composer-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+/* Answer furniture: the copy button, the thumbs, and the read mark. Icon
+   buttons stay ghosted until hovered or pressed, so a thread of answers does
+   not read as a toolbar. */
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; min-height: 26px; padding: 0; color: var(--ink-faint); background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+.icon-btn:hover { color: var(--ink); border-color: var(--line); }
+.icon-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.icon-btn[aria-pressed="true"] { color: var(--brand-deep); border-color: var(--brand); background: var(--brand-soft); }
+.rate-row { display: inline-flex; gap: 4px; align-items: center; }
+.seen { margin: 2px 4px 0 0; text-align: right; font-size: .72rem; color: var(--ink-faint); }
 .order-facts { padding-top: var(--space-3); border-top: 1px solid var(--line); }.kv { display: grid; grid-template-columns: minmax(74px, auto) 1fr; gap: var(--space-1) var(--space-3); margin: 0; font-size: .82rem; }.kv dt { color: var(--ink-faint); }.kv dd { margin: 0; font-weight: 600; }.chat-media { max-width: min(78%, 420px); border: 1px solid var(--line); border-radius: 6px; }
 
 .admin-app { background: #fafafa; }

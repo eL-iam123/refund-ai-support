@@ -18,7 +18,7 @@ import {
 import { toRequestDto } from '../serialize.js';
 import { HttpError, badRequest } from '../errors.js';
 import { resolveShopSession, SESSION_COOKIE, type ShopUser } from '../../shop/auth.js';
-import { ESCALATION_AGENT, forkForMessage, recordAgentMessage, takeoverForEscalated, type ActiveHandoff, type AgentMessage } from '../../db/handoffs.js';
+import { ESCALATION_AGENT, forkForMessage, latestHandoffForThread, liveHandoffForThread, recordAgentMessage, takeoverForEscalated, type ActiveHandoff, type AgentMessage } from '../../db/handoffs.js';
 import { isChatClosed } from '../../db/chatClosures.js';
 import type { LiveHub } from '../hub.js';
 import type { Db } from '../../db/connection.js';
@@ -64,7 +64,6 @@ async function handleChatMessage(
       progressStage: Stage;
     }
   | { request: RefundRequestDto }
-  | { status: string; requestId: string }
 > {
   const body = parseChatBody(request, ctx);
   const session = signedInSession(ctx, request);
@@ -109,7 +108,7 @@ async function handleChatMessage(
   // one: without this, every "thanks" or "you said it was escalated" after a
   // hand-back runs a fresh pipeline, persists a fresh escalation, and raises a
   // fresh takeover for the same complaint.
-  const openCase = openCaseStatus(ctx.db, session.customerId, resolved, now, identification);
+  const openCase = openCaseStatus(ctx.db, session.customerId, resolved, now, identification, takeover, hub);
   if (openCase !== null) {
     reply.code(200);
     return openCase;
@@ -320,18 +319,7 @@ function duplicateForSubmission(
 }
 
 /**
- * What the customer is told when they write back on a thread whose case is
- * already open.
- *
- * Worded to match the escalation it refers to: the case is open, nobody needs
- * anything from them, and new information still has somewhere to go.
- */
-const OPEN_CASE_STATUS =
-  'A person is still reviewing your request — nothing further is needed from you. ' +
-  'If something new has gone wrong, just describe it here.';
-
-/**
- * Answers a follow-up from the open case instead of opening a second one.
+ * Journals a follow-up onto the open case instead of opening a second one.
  *
  * Returns null unless all three hold: the thread's latest request is an
  * escalation nobody has overridden, the message states no new claim, and it
@@ -342,14 +330,18 @@ const OPEN_CASE_STATUS =
  *
  * The item check is the part patterns cannot do: "what about the lamp?" has
  * no fault words, so the signal gate calls it a follow-up - but when the open
- * case is about the mug, it is a new case about the lamp, and answering it
- * with the open-case status would quietly lose a complaint. Bias is
- * deliberate: a duplicate case is triage noise, a swallowed one is a refund
- * quietly lost.
+ * case is about the mug, it is a new case about the lamp, and journaling it
+ * quietly would lose a complaint. Bias is deliberate: a duplicate case is
+ * triage noise, a swallowed one is a refund quietly lost.
  *
- * Nothing is persisted except an audit event on the open request, so there is
- * no second decision row and no second takeover for staff to triage. A 200,
- * like the duplicate path: nothing was created.
+ * The follow-up lands on the case's handoff thread - live takeover if one
+ * holds it, else the newest thread the case has - so the person who picks the
+ * case up reads everything that arrived while nobody held it. No policy runs
+ * on it and no new takeover is raised: it is journaling, not a claim, and the
+ * reply says so rather than pasting a parking paragraph into the thread.
+ * Nothing is persisted except the thread message and an audit event on the
+ * open request, so there is no second decision row. A 200, like the duplicate
+ * path: nothing was created.
  */
 function openCaseStatus(
   db: Db,
@@ -357,32 +349,90 @@ function openCaseStatus(
   input: CreateRefundRequest,
   now: Date,
   identification: Identification,
-): { status: string; requestId: string } | null {
+  takeover: ActiveHandoff | null,
+  hub: LiveHub,
+): HandoffBody | null {
+  const parked = parkableCase(db, customerId, input, identification);
+  if (parked === null) {
+    return null;
+  }
+  const handoff =
+    takeover ?? liveHandoffForThread(db, customerId, parked.orderId) ?? latestHandoffForThread(db, customerId, parked.orderId);
+  if (handoff === null) {
+    return null;
+  }
+  return journalFollowUp(db, hub, handoff, customerId, parked.orderId, parked.escalation.id, input.message, now);
+}
+
+/**
+ * The open escalation a follow-up may park on, if this message is parkable.
+ *
+ * The three gates in one place so the parker stays a straight line: a thread
+ * is named, the message is not a confirmation answer, and an open escalation
+ * stands that the message neither re-claims nor outgrows by naming other
+ * lines. Anything failing any gate runs the full pipeline instead.
+ */
+function parkableCase(
+  db: Db,
+  customerId: string,
+  input: CreateRefundRequest,
+  identification: Identification,
+): { orderId: string; escalation: PersistedRequest } | null {
   const orderId = input.orderId ?? identification.order?.id ?? null;
   if (orderId === null) {
     return null;
   }
   // A confirmation answer is not a follow-up: it completes the case the
-  // confirmation question offered, so answering it with the open-case status
-  // would swallow the "yes" and the case would never close.
+  // confirmation question offered, so journaling it would swallow the "yes"
+  // and the case would never close.
   if (confirmingClaimText(db, customerId, orderId, input.message) !== null) {
     return null;
   }
-  const latest = openEscalation(db, customerId, orderId);
-  if (latest === null || statesNewClaim(input.message)) {
+  const escalation = openEscalation(db, customerId, orderId);
+  if (escalation === null || statesNewClaim(input.message)) {
     return null;
   }
-  if (aboutDifferentItems(input, identification, latest.claimItemIdsJson)) {
+  if (aboutDifferentItems(input, identification, escalation.claimItemIdsJson)) {
     return null;
   }
+  return { orderId, escalation };
+}
+
+/**
+ * Files a parked follow-up where its person will read it.
+ *
+ * The message lands on the case's handoff thread - live takeover if one holds
+ * it, else the newest thread the case has - plus an audit event on the open
+ * request and a staff nudge. No policy runs on it and no new takeover is
+ * raised: it is journaling, not a claim.
+ */
+function journalFollowUp(
+  db: Db,
+  hub: LiveHub,
+  handoff: ActiveHandoff,
+  customerId: string,
+  orderId: string,
+  requestId: string,
+  message: string,
+  now: Date,
+): HandoffBody {
+  const recorded = recordAgentMessage(db, {
+    handoffId: handoff.id,
+    sender: 'customer',
+    body: message,
+    now,
+    injection: scanForInjection(message),
+  });
   insertAuditEvent(
     db,
-    latest.id,
+    requestId,
     now.toISOString(),
     'followup_on_open_case',
-    JSON.stringify({ message: input.message.slice(0, 200) }),
+    JSON.stringify({ message: message.slice(0, 200) }),
   );
-  return { status: OPEN_CASE_STATUS, requestId: latest.id };
+  hub.notifyStaff({ type: 'customer.message', customerId, message: recorded });
+  hub.notifyStaff({ type: 'conversation.updated', customerId, orderId });
+  return { received: true, agentConnected: false, message: recorded, aiResponse: null };
 }
 
 /**

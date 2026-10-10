@@ -221,6 +221,7 @@ export const RefundDecisionSchema = z.object({
   trace: z.array(RuleEvaluationSchema),
   overrides: z.array(OverrideRecordSchema),
   eligibleItemIds: z.array(z.string()),
+  claimedItemIds: z.array(z.string()).optional(),
   blockedItems: z.array(BlockedItemSchema),
   /**
    * Money already committed to this order by earlier claims: refunded, or

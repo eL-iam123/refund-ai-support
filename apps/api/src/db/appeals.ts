@@ -94,25 +94,6 @@ export function openAppealsForCustomer(db: Db, customerId: string): readonly App
   return rows.map(hydrate);
 }
 
-export function openAppealsForThread(
-  db: Db,
-  customerId: string,
-  orderId: string | null,
-): readonly Appeal[] {
-  const rows = queryAll<AppealRow>(
-    db.prepare(
-      `SELECT a.id, a.created_at, a.customer_id, a.request_id, a.reason
-         FROM appeals a
-         JOIN refund_requests r ON r.id = a.request_id
-        WHERE a.customer_id = ? AND r.order_id IS ? AND a.decided_at IS NULL
-        ORDER BY a.created_at ASC`,
-    ),
-    customerId,
-    orderId,
-  );
-  return rows.map(hydrate);
-}
-
 export function closeAppealsForRequest(
   db: Db,
   requestId: string,

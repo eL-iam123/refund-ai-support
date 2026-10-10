@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { openMemoryDatabase, type Db } from '../db/connection.js';
 import { seedDatabase } from '../db/seed.js';
+import { seedShop } from '../shop/seed.js';
+import { createUser } from '../shop/auth.js';
+import { checkout } from '../shop/catalogue.js';
 import { TEST_NOW } from './helpers.js';
 import {
   ChatNotFinalizedError,
@@ -345,6 +348,115 @@ describe('the closure records what was decided', () => {
       .all() as { detail: string }[];
     expect(events).toHaveLength(1);
     expect(events[0]?.detail).toContain('partial_refund');
+    f.db.close();
+  });
+});
+describe('a closure finalises lines, not threads', () => {
+  function shopFixture(): Fixture {
+    const db = openMemoryDatabase();
+    seedDatabase(db, TEST_NOW);
+    seedShop(db, TEST_NOW);
+    const user = createUser(
+      db,
+      { email: 'lines@shop.test', password: 'a-good-password', name: 'Lines Tester' },
+      TEST_NOW,
+    );
+    const order = checkout(
+      db,
+      user.customerId,
+      [
+        { productId: 'PRD-LAMP-01', quantity: 1 },
+        { productId: 'PRD-MUG-01', quantity: 1 },
+      ],
+      TEST_NOW,
+    );
+    return { db, customerId: user.customerId, orderId: order.id };
+  }
+
+  function lineIds(f: Fixture): string[] {
+    const rows = f.db
+      .prepare('SELECT id FROM order_items WHERE order_id = ? ORDER BY id')
+      .all(f.orderId) as { id: string }[];
+    return rows.map((row) => row.id);
+  }
+
+  function deniedLineRequest(f: Fixture, requestId: string, itemIds: readonly string[]): void {
+    insertRequest(
+      f.db,
+      requestRow(f, 'denied', requestId, 0),
+    );
+    // The fixture row carries no scope; the denial below speaks for these lines.
+    f.db
+      .prepare('UPDATE refund_requests SET claim_item_ids_json = ?, eligible_item_ids_json = ? WHERE id = ?')
+      .run(JSON.stringify(itemIds), JSON.stringify(itemIds), requestId);
+  }
+
+  function close(f: Fixture) {
+    return closeFinalizedChat(f.db, {
+      customerId: f.customerId,
+      orderId: f.orderId,
+      closedBy: 'agent@example.com',
+      now: TEST_NOW,
+    });
+  }
+
+  it('leaves unreported lines reportable after a scoped case closes', () => {
+    const f = shopFixture();
+    const [first, second] = lineIds(f);
+    if (first === undefined || second === undefined) {
+      throw new Error('seed order needs two lines for this test');
+    }
+    deniedLineRequest(f, 'REQ-LINE-1', [first]);
+    const closure = close(f);
+
+    // The closure names the decided line, and the thread stays open for the other.
+    expect([...(closure.closedItemIds ?? [])]).toEqual([first]);
+    expect(isChatClosed(f.db, f.customerId, f.orderId)).toBe(false);
+    f.db.close();
+  });
+
+  it('merges later decisions into the same closure row until every line is closed', () => {
+    const f = shopFixture();
+    const [first, second] = lineIds(f);
+    if (first === undefined || second === undefined) {
+      throw new Error('seed order needs two lines for this test');
+    }
+    deniedLineRequest(f, 'REQ-LINE-1', [first]);
+    const before = close(f);
+    expect(isChatClosed(f.db, f.customerId, f.orderId)).toBe(false);
+
+    deniedLineRequest(f, 'REQ-LINE-2', [second]);
+    const after = close(f);
+    expect(after.id).toBe(before.id);
+    expect([...(after.closedItemIds ?? [])].sort()).toEqual([first, second].sort());
+    expect(after.requestId).toBe('REQ-LINE-2');
+    expect(isChatClosed(f.db, f.customerId, f.orderId)).toBe(true);
+    f.db.close();
+  });
+
+  it('reads a pre-line-scope row as fully closed', () => {
+    const f = shopFixture();
+    deniedLineRequest(f, 'REQ-LEGACY', lineIds(f));
+    close(f);
+    // A row from before line-scoping carries no line set.
+    f.db.prepare('UPDATE chat_closures SET closed_item_ids_json = NULL').run();
+
+    expect(chatClosureForThread(f.db, f.customerId, f.orderId)?.closedItemIds).toBeNull();
+    expect(isChatClosed(f.db, f.customerId, f.orderId)).toBe(true);
+    f.db.close();
+  });
+
+  it('re-closing with nothing new is idempotent', () => {
+    const f = shopFixture();
+    const [first] = lineIds(f);
+    if (first === undefined) {
+      throw new Error('seed order needs a line for this test');
+    }
+    deniedLineRequest(f, 'REQ-LINE-1', [first]);
+    const before = close(f);
+    const again = close(f);
+    expect(again.id).toBe(before.id);
+    expect(again.closedAt).toBe(before.closedAt);
     f.db.close();
   });
 });

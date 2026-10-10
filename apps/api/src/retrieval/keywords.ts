@@ -89,7 +89,7 @@ export function canonical(token: string): string {
 }
 
 /** The set of words that identify one product, including its synonyms. */
-export function termsFor(item: OrderItemRecord): ReadonlySet<string> {
+function termsFor(item: OrderItemRecord): ReadonlySet<string> {
   const terms = new Set<string>();
   for (const token of tokenize(item.name)) {
     const folded = canonical(token);
@@ -102,11 +102,11 @@ export function termsFor(item: OrderItemRecord): ReadonlySet<string> {
 }
 
 /** What the customer said, folded the same way. */
-export function messageTerms(message: string): ReadonlySet<string> {
+function messageTerms(message: string): ReadonlySet<string> {
   return new Set(tokenize(message).map(canonical));
 }
 
-export interface ItemMatch {
+interface ItemMatch {
   readonly item: OrderItemRecord;
   /** Distinctive terms from the customer's message found in this product's name. */
   readonly matchedTerms: readonly string[];

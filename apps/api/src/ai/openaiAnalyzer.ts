@@ -5,7 +5,7 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom } from './breaker.js';
 import { fallbackModels, presetFor, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildCaseSummaryUser, buildIntakeUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM } from './prompts.js';
+import { buildCaseSummaryUser, buildClarifyUser, buildIntakeUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, CLARIFY_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM } from './prompts.js';
 import { IntakeOutputSchema, PhraseReplySchema, parseCaseNote, type IntakeOutput } from './schemas.js';
 import type { AttemptOutcome } from './breaker.js';
 import { parseJson } from './json.js';
@@ -14,12 +14,18 @@ import {
   type AIAnalyzer,
   type IntakeInput,
   type CaseSummaryInput,
+  type ClarifyInput,
   type IntakeReply,
   type AnalyzerOrder,
   type AttemptObserver,
   type PhraseInput,
 } from './analyzer.js';
 import type { OrderRecord } from '../db/records.js';
+
+/** A currency-marked figure has no business in a clarifying question. */
+function hasMoneyFigure(text: string): boolean {
+  return /\$\s?\d/.test(text);
+}
 
 /**
  * The production analyzer: one HTTP client for every OpenAI-compatible endpoint
@@ -47,6 +53,23 @@ const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
  */
 const NO_THINKING = { chat_template_kwargs: { enable_thinking: false } };
 
+/**
+ * The thinking switch for the model actually being called.
+ *
+ * `chat_template_kwargs.enable_thinking` is a Qwen-template knob: gpt-oss
+ * reasons in Harmony instead, so it means nothing to it and the model spends
+ * the whole token budget thinking before emitting any JSON - which comes back
+ * `finish_reason: length` and escalates a readable claim. gpt-oss answers to
+ * its own documented knob, `reasoning_effort`, and `low` is enough for an
+ * extraction that only has to read a message, not solve anything.
+ */
+function thinkingExtras(model: string): Record<string, unknown> {
+  if (/gpt-oss/i.test(model)) {
+    return { reasoning_effort: 'low' };
+  }
+  return NO_THINKING;
+}
+
 /** Derived from the client, so an SDK restructure cannot break it. */
 /**
  * A non-streaming completion request, plus whatever the provider understands.
@@ -68,6 +91,10 @@ const MAX_REPAIRS = 1;
 const CASE_SUMMARY_TOKENS = 220;
 /** A chat answer is a few sentences. Longer is not friendlier, only slower. */
 const GENERAL_TOKENS = 300;
+/** A clarifying question is one sentence. Anything longer is a paragraph wearing a question mark. */
+const CLARIFY_TOKENS = 150;
+/** A model-written question must fit the ask exit it replaces. */
+const MAX_QUESTION_CHARS = 400;
 
 /** A failure message is for a human reading a drawer, not a log archive. */
 const MAX_ERROR_LENGTH = 500;
@@ -303,6 +330,76 @@ export class OpenAiAnalyzer implements AIAnalyzer {
     return result.value;
   }
 
+  /**
+   * Words one missing detail as a question.
+   *
+   * Same transport contract as phrasing: one candidate walk, and null on any
+   * failure - the caller falls back to the deterministic question, so a model
+   * that cannot ask plainly costs a round trip, never the turn. Content safety
+   * is structural here rather than validated: the prompt carries names and
+   * kinds but no figures, and the question guard still checks the result for
+   * repeats before anyone reads it.
+   */
+  async askClarification(input: ClarifyInput, observer: AttemptObserver): Promise<string | null> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildClarifyUser(input);
+    const result = await runCandidates<string>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'clarify',
+      attempt: async (model, attempt) => this.clarifyAttempt(model, attempt, user, budget, observer),
+    });
+    if (!result.ok) {
+      return null;
+    }
+    return result.value;
+  }
+
+  private async clarifyAttempt(
+    model: string,
+    attempt: number,
+    user: string,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<AttemptOutcome<string>> {
+    const startedAt = Date.now();
+    try {
+      const completion = await this.createCompletion(
+        {
+          model,
+          temperature: 0.7,
+          max_tokens: Math.min(this.env.AI_MAX_TOKENS, CLARIFY_TOKENS),
+          messages: [
+            { role: 'system', content: CLARIFY_SYSTEM },
+            { role: 'user', content: user },
+          ],
+        },
+        budget,
+      );
+      const text = firstMessage(completion).trim();
+      if (text.length === 0 || text.length > MAX_QUESTION_CHARS || hasMoneyFigure(text)) {
+        return { ok: false, error: 'clarify reply rejected by validation', retryable: false };
+      }
+      const usage = readUsage(completion.usage);
+      observer({ model, attempt, ok: true, latencyMs: Date.now() - startedAt, ...usage, error: null });
+      return { ok: true, value: text };
+    } catch (error: unknown) {
+      const failure = classifyProviderFailure(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      return { ok: false, ...failure };
+    }
+  }
+
   private async phraseAttempt(
     model: string,
     attempt: number,
@@ -419,9 +516,7 @@ export class OpenAiAnalyzer implements AIAnalyzer {
    * never heard of it.
    */
   private async createCompletion(body: CompletionRequest, budget: AbortSignal): Promise<CompletionReply> {
-    const withExtras = this.env.AI_DISABLE_THINKING
-      ? ({ ...body, ...NO_THINKING } as CompletionRequest)
-      : body;
+    const withExtras = this.env.AI_DISABLE_THINKING ? { ...body, ...thinkingExtras(body.model) } : body;
     try {
       // The cast is at a third-party typing boundary and is deliberate:
       // Both casts are at one third-party typing boundary and are deliberate.

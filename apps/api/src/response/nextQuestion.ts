@@ -127,12 +127,19 @@ export function alreadyAsked(question: string | null, askedText: readonly string
   if (question === null) {
     return false;
   }
-  const needle = question.toLowerCase();
+  // Compared without openers: the greeting is shared by every fresh-thread
+  // question, so leaving it in would merge two different questions about
+  // different lines into "already asked" and the second would never be put.
+  const needle = ungreeted(question).toLowerCase();
   return askedText.some(
-    (earlier) =>
-      earlier.toLowerCase().includes(needle) ||
-      needle.includes(earlier.toLowerCase()) ||
-      sameQuestion(needle, earlier.toLowerCase()),
+    (earlier) => {
+      const past = ungreeted(earlier).toLowerCase();
+      return (
+        past.includes(needle) ||
+        needle.includes(past) ||
+        sameQuestion(needle, past)
+      );
+    },
   );
 }
 
@@ -158,23 +165,79 @@ function significantWords(text: string): Set<string> {
   );
 }
 
+/**
+ * What opens a conversation that starts with a question.
+ *
+ * A question that opens a conversation carries a greeting; the same question
+ * mid-thread does not. "Is this about the lamp or the kettle?" is the right
+ * question in both places, but on "hello" without it the assistant reads as an
+ * interrogation - the customer said hi and got a multiple-choice quiz.
+ */
+const GREETING = 'Hello! Thanks for getting in touch. ';
+
+/**
+ * Whether this is the first thing the customer has said.
+ *
+ * `customerText` holds every customer turn including the newest message, so a
+ * single entry with nothing asked before it means the thread opened on this
+ * turn. Greeting anywhere else would repeat on every clarification.
+ */
+function isFreshThread(input: NextQuestionInput): boolean {
+  return input.customerText.length <= 1 && input.askedText.length === 0;
+}
+
+/** The question without its opener, for comparing questions with each other. */
+function ungreeted(text: string): string {
+  return text.startsWith(GREETING) ? text.slice(GREETING.length) : text;
+}
+
 const QUESTION: Record<MissingField, (input: NextQuestionInput) => string> = {
   order: () =>
     'Thanks for getting in touch. I could not find the order from that - could you tell me the ' +
     'product name, the date you ordered, or the email address you used?',
   item: (input) => {
     const lines = candidateLines(input).map((line) => `${line.name} (${money(line.unitPriceCents * line.quantity)})`);
-    return `Is this about ${joinList(lines)}, or a different one?`;
+    const question = `Is this about ${joinList(lines)}, or a different one?`;
+    return isFreshThread(input) ? `${GREETING}${question}` : question;
   },
-  reason: () =>
-    'Just so I check this properly - what has gone wrong with it? For example something broken, ' +
-    'something different from what you ordered, a delivery problem, or a charge you did not expect.',
+  reason: (input) => {
+    const question =
+      'Just so I check this properly - what has gone wrong with it? ' + reasonExamplesFor(input);
+    return isFreshThread(input) ? `${GREETING}${question}` : question;
+  },
   condition: (input) => {
     const line = candidateLines(input)[0];
     const subject = line === undefined ? 'it' : `the ${line.name}`;
-    return `In what condition did ${subject} arrive - damaged, or would you say it might have been damaged in transit?`;
+    const question = `In what condition did ${subject} arrive - damaged, or would you say it might have been damaged in transit?`;
+    return isFreshThread(input) ? `${GREETING}${question}` : question;
   },
 };
+
+/**
+ * The examples after the reason question, fitted to what the claim is about.
+ *
+ * A subscription asked "is something broken?" reads as if nobody heard them:
+ * billing problems need billing examples, and a download needs download
+ * examples. Resolved lines decide; with none resolved the whole basket does,
+ * and an empty basket keeps the default.
+ */
+function reasonExamplesFor(input: NextQuestionInput): string {
+  const resolved =
+    input.order === null
+      ? []
+      : input.order.items.filter((line) => input.resolvedItemIds.includes(line.id));
+  const scope = resolved.length > 0 ? resolved : (input.order?.items ?? []);
+  if (scope.some((line) => line.isSubscription)) {
+    return 'For example a charge you did not expect, cancelling, or changing the plan.';
+  }
+  if (scope.some((line) => line.digital)) {
+    return 'For example a download that will not open, missing access, or a charge you did not expect.';
+  }
+  return (
+    'For example something broken, something different from what you ordered, ' +
+    'a delivery problem, or a charge you did not expect.'
+  );
+}
 
 function candidateLines(input: NextQuestionInput): readonly OrderRecord['items'][number][] {
   if (input.order === null) {

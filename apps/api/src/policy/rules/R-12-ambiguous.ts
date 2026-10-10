@@ -24,6 +24,14 @@ export const R12AmbiguousRequest: PolicyRule = {
   policyRef: 'REFUND_POLICY.md §5.3',
   summary: 'A request with no verifiable reason escalates to a human.',
   evaluate(context) {
+    // A swap request is not an unreadable one. The customer named the remedy -
+    // "can I swap it instead?" - and the reason rules decide refunds, not
+    // remedies, so there is nothing here for them to object to. The resolver
+    // turns an eligible swap ask into an exchange; anything vaguer still
+    // escalates below, because an inferred remedy is not an asked one.
+    if (context.extraction?.intent === 'exchange') {
+      return pass(this, 'exchange request names its remedy; reason rules do not apply');
+    }
     const groundedLines = groundedClaimLineIds(context);
     return groundedLines === undefined ? legacyEscalation(this, context) : perLineEscalation(this, context, groundedLines);
   },

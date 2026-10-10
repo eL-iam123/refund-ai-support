@@ -28,7 +28,7 @@ import {
  * us" and "we worked it out from their history" are different claims and a
  * dispute turns on which one applies.
  */
-export type OrderBasis = 'supplied' | 'only_order' | 'matched_history' | 'unresolved';
+type OrderBasis = 'supplied' | 'only_order' | 'matched_history' | 'unresolved';
 
 export interface Identification {
   readonly order: OrderRecord | null;

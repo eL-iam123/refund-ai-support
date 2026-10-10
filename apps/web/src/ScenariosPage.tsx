@@ -42,18 +42,11 @@ async function runScenario(
       return;
     }
     if ('received' in reply) {
-      // A thread that is mid-takeover routes the scenario's message to a person
-      // instead of the pipeline, so there is no decision row to point at.
+      // A thread that is mid-takeover - or parked on an open case - routes the
+      // scenario's message to a person instead of the pipeline, so there is no
+      // decision row to point at.
       setRunning((previous) =>
         previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: 'routed to a customer agent' } : row)),
-      );
-      return;
-    }
-    if ('status' in reply) {
-      // The fixture's case is already open with a person: no new decision row,
-      // so the row points at the open case instead of a request that was never made.
-      setRunning((previous) =>
-        previous.map((row) => (row.id === scenario.id ? { id: row.id, requestId: `open case: ${reply.requestId}` } : row)),
       );
       return;
     }

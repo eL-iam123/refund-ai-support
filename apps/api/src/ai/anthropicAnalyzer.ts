@@ -4,7 +4,7 @@ import { breakerConfig } from '../config/env.js';
 import { ModelCircuitBreaker, runCandidates, unavailableFrom, type AttemptOutcome } from './breaker.js';
 import { fallbackModels, type Env, type ProviderPreset } from '../config/env.js';
 import { redactSecrets } from '../lib/redact.js';
-import { buildCaseSummaryUser, buildIntakeUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM } from './prompts.js';
+import { buildCaseSummaryUser, buildClarifyUser, buildIntakeUser, buildPhraseUser, CASE_SUMMARY_SYSTEM, CLARIFY_SYSTEM, INTAKE_SYSTEM, PHRASE_SYSTEM } from './prompts.js';
 import { AskItemsSchema, parseCaseNote, CompleteSchema, IntakeOutputSchema, PhraseReplySchema, type IntakeOutput } from './schemas.js';
 import { parseJson } from './json.js';
 import {
@@ -12,6 +12,7 @@ import {
   type AIAnalyzer,
   type IntakeInput,
   type CaseSummaryInput,
+  type ClarifyInput,
   type IntakeExit,
   type IntakeReply,
   type AttemptObserver,
@@ -54,6 +55,10 @@ const MAX_REPAIRS = 1;
 const CASE_SUMMARY_TOKENS = 220;
 /** A chat answer is a few sentences. Longer is not friendlier, only slower. */
 const GENERAL_TOKENS = 300;
+/** A clarifying question is one sentence. Anything longer is a paragraph wearing a question mark. */
+const CLARIFY_TOKENS = 150;
+/** A model-written question must fit the ask exit it replaces. */
+const MAX_QUESTION_CHARS = 400;
 
 const MAX_ERROR_LENGTH = 500;
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -224,6 +229,71 @@ export class AnthropicAnalyzer implements AIAnalyzer {
         error: null,
       });
       return { ok: true, value: parsed.data };
+    } catch (error: unknown) {
+      const failure = classify(error);
+      observer({
+        model,
+        attempt,
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: null,
+        completionTokens: null,
+        error: failure.error,
+      });
+      return { ok: false, ...failure };
+    }
+  }
+
+  /**
+   * Words one missing detail as a question.
+   *
+   * Same contract as phrasing: one candidate walk, null on any failure, and
+   * the caller falls back to the deterministic question. A question has no
+   * envelope to validate against, so the checks are shape only - non-empty,
+   * short, and carrying no figure - and the question guard still checks the
+   * result for repeats before anyone reads it.
+   */
+  async askClarification(input: ClarifyInput, observer: AttemptObserver): Promise<string | null> {
+    const budget = AbortSignal.timeout(this.env.AI_TOTAL_BUDGET_MS);
+    const user = buildClarifyUser(input);
+    const result = await runCandidates<string>({
+      candidates: this.candidates,
+      maxAttempts: this.env.AI_MAX_ATTEMPTS,
+      breaker: this.breaker,
+      budget,
+      purpose: 'clarify',
+      attempt: (model, attempt) => this.clarifyAttempt(model, attempt, user, budget, observer),
+    });
+    if (!result.ok) {
+      return null;
+    }
+    return result.value;
+  }
+
+  private async clarifyAttempt(
+    model: string,
+    attempt: number,
+    user: string,
+    budget: AbortSignal,
+    observer: AttemptObserver,
+  ): Promise<AttemptOutcome<string>> {
+    const startedAt = Date.now();
+    try {
+      const posted = await postProseMessage(this.baseUrl, this.apiKey, model, user, budget, CLARIFY_TOKENS, CLARIFY_SYSTEM);
+      const text = posted.text.trim();
+      if (text.length === 0 || text.length > MAX_QUESTION_CHARS || /\$\s?\d/.test(text)) {
+        return { ok: false, error: 'clarify reply rejected by validation', retryable: false };
+      }
+      observer({
+        model: posted.model,
+        attempt,
+        ok: true,
+        latencyMs: Date.now() - startedAt,
+        promptTokens: posted.promptTokens,
+        completionTokens: posted.completionTokens,
+        error: null,
+      });
+      return { ok: true, value: text };
     } catch (error: unknown) {
       const failure = classify(error);
       observer({

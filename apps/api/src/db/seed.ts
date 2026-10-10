@@ -16,7 +16,7 @@ export function daysAgo(now: Date, days: number): Date {
   return new Date(now.getTime() - days * DAY_MS);
 }
 
-export function wipe(db: Db): void {
+function wipe(db: Db): void {
   // audit_events has a trigger preventing deletion (append-only for production).
   // During seed we drop and recreate the table to get a clean state.
   db.exec(`

@@ -1,5 +1,4 @@
-import assert from 'node:assert/strict';
-import { ALLOWED_OUTCOMES, type RuleClass, type RuleEvaluation, type RuleOutcome } from '@refund/shared';
+import { ALLOWED_OUTCOMES, type RuleEvaluation, type RuleOutcome } from '@refund/shared';
 
 /**
  * Domain invariants (coding standard: use assertions).
@@ -44,14 +43,6 @@ export function assertEvaluationsAllowed(evaluations: readonly RuleEvaluation[])
   }
 }
 
-export function assertClassDeniesNothing(ruleClass: RuleClass, ruleId: string): void {
-  const allowed: readonly RuleOutcome[] = ALLOWED_OUTCOMES[ruleClass];
-  assertDomain(
-    !allowed.includes('deny'),
-    `rule ${ruleId} is class "${ruleClass}", which is not permitted to deny.`,
-  );
-}
-
 /** Rule 5/10: the money-side invariants. */
 export function assertAmountSane(amountCents: number, orderTotalCents: number | null): void {
   assertDomain(Number.isInteger(amountCents), `refund amount must be whole cents, got ${amountCents}`);
@@ -62,9 +53,4 @@ export function assertAmountSane(amountCents: number, orderTotalCents: number | 
       `refund amount ${amountCents} exceeds order total ${orderTotalCents}`,
     );
   }
-}
-
-/** Rule 2: bounded work. Every AI call path must be capped. */
-export function assertBounded(attempt: number, maxAttempts: number): void {
-  assert.ok(attempt <= maxAttempts, `attempt ${attempt} exceeded max ${maxAttempts}`);
 }

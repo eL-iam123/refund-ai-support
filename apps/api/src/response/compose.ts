@@ -1,7 +1,8 @@
-import type { RefundDecision } from '@refund/shared';
+import type { RefundDecision, RuleEvaluation } from '@refund/shared';
 import type { OrderRecord } from '../db/records.js';
 import { formatCents } from '../lib/money.js';
 import { acknowledgementFor } from './acknowledge.js';
+import { asksForSwap } from './intent.js';
 
 /**
  * The reply that always exists, with or without a model.
@@ -109,6 +110,21 @@ function partialExcluded(decision: RefundDecision): string {
 }
 
 /**
+ * Whether a blocked line belongs in the customer's reply.
+ *
+ * A denial that names whatever the policy excluded anywhere in the basket
+ * blames lines the customer never mentioned: asked about the subscription,
+ * told about the final-sale coat sitting beside it. An unnamed claim puts
+ * the whole order in scope, which is the only case where every line may be
+ * named - the resolver's `bearsOnClaim` twin, kept beside the words so the
+ * sentence cannot drift from the decision.
+ */
+function inClaimedScope(decision: RefundDecision, itemId: string): boolean {
+  const claimed = decision.claimedItemIds;
+  return claimed === undefined || claimed.length === 0 || claimed.includes(itemId);
+}
+
+/**
  * Splits the blocked lines into the two things they can be: a line the policy
  * refused ("not eligible") and a line R-12 sent for a person to read ("being
  * reviewed"). They must not share a sentence, because one says no and the other
@@ -135,7 +151,7 @@ export function composeDeterministicResponse(
   const acknowledgement = acknowledgementFor(message);
   const prefix = acknowledgement.length === 0 ? '' : `${acknowledgement} `;
   const reference = order === null ? '' : ` for order ${order.id}`;
-  return prefix + decisionBody(decision, reference, prefix, order);
+  return prefix + decisionBody(decision, reference, prefix, order, message);
 }
 
 /**
@@ -152,19 +168,55 @@ function orderSubject(order: OrderRecord | null): string {
 }
 
 /** The decision's own words, without the acknowledgement prefix. */
+function exchangeSentence(order: OrderRecord | null, message: string): string {
+  // An exchange usually answers a question the customer asked - "can I swap
+  // it?" - so the reply answers it back. A verdict sentence ("we have decided
+  // the outcome is exchange") states machinery instead of answering, and it is
+  // what the customer hears as brusque. When the message did not ask, the
+  // arrangement wording stands on its own.
+  if (asksForSwap(message)) {
+    return 'Yes - we will swap it instead.';
+  }
+  return `We have arranged an exchange for ${orderSubject(order)}.`;
+}
+
+/**
+ * The "these lines are not eligible" sentence, or empty.
+ *
+ * A refusal answers "why not", so on a denial it stays on the dispute:
+ * only claimed lines may be named. Payments are not narrowed - an approval
+ * names what is not coming too.
+ */
+function excludedSentence(
+  decision: RefundDecision,
+  ineligible: RefundDecision['blockedItems'],
+): string {
+  const scoped =
+    decision.decision === 'denied'
+      ? ineligible.filter((item) => inClaimedScope(decision, item.itemId))
+      : ineligible;
+  if (scoped.length === 0 || (decision.decision === 'denied' && refusedWholeOrder(decision))) {
+    return '';
+  }
+  return ` ${scoped.map((item) => item.name).join(' and ')} ${
+    scoped.length === 1 ? 'is' : 'are'
+  } not eligible for a refund on this order.`;
+}
+
 function decisionBody(
   decision: RefundDecision,
   reference: string,
   prefix: string,
   order: OrderRecord | null,
+  message: string,
 ): string {
   const { ineligible } = partitionBlocked(decision);
-  const excluded =
-    ineligible.length === 0 || (decision.decision === 'denied' && refusedWholeOrder(decision))
-      ? ''
-      : ` ${ineligible.map((item) => item.name).join(' and ')} ${
-          ineligible.length === 1 ? 'is' : 'are'
-        } not eligible for a refund on this order.`;
+  // A refusal answers "why not", so it stays on the dispute: asked about the
+  // subscription, the customer must not be told about the final-sale coat
+  // sitting beside it. Payments disclose more broadly - an approval names
+  // what is not coming too, because "approved" alone reads as the whole
+  // basket going back.
+  const excluded = excludedSentence(decision, ineligible);
 
   switch (decision.decision) {
     case 'approved':
@@ -185,7 +237,8 @@ function decisionBody(
     case 'exchange':
       return (
         prefix +
-        `We have arranged an exchange for ${orderSubject(order)}. A member of our team will ` +
+        exchangeSentence(order, message) +
+        ' A member of our team will ' +
         'confirm the details with you here - you do not need to do anything else.'
       );
     case 'store_credit':
@@ -293,8 +346,28 @@ const EXPECTATION_BY_RULE: Readonly<Record<string, string>> = {
 const DEFAULT_EXPECTATION = 'They will read the case from the start and reply here.';
 
 /** The rule that concluded the decision, if any rule did. */
-function decidingRuleId(decision: RefundDecision): string | undefined {
-  return decision.trace.find((rule) => rule.outcome !== 'pass')?.ruleId;
+function decidingEvaluation(decision: RefundDecision): RuleEvaluation | null {
+  const objected = decision.trace.filter((rule) => rule.outcome !== 'pass');
+  if (objected.length === 0) {
+    return null;
+  }
+  // Cited reasons stay on the dispute: an objection about a line the customer
+  // never claimed - the subscription sitting unmentioned in the same basket -
+  // is true of the order and false of the case, and citing it answers a
+  // question nobody asked. Order verdicts always bear; an unnamed claim puts
+  // the whole order in scope.
+  const claimed = decision.claimedItemIds ?? [];
+  if (claimed.length === 0) {
+    return objected[0] ?? null;
+  }
+  return (
+    objected.find(
+      (rule) =>
+        rule.scope === 'order' ||
+        rule.itemIds.length === 0 ||
+        rule.itemIds.some((id) => claimed.includes(id)),
+    ) ?? null
+  );
 }
 
 /**
@@ -309,13 +382,14 @@ function decidingRuleId(decision: RefundDecision): string | undefined {
  * escalation. Saying so is the truth, and a vague reassurance would be a small lie.
  */
 export function reasonFor(decision: RefundDecision): string {
-  const ruleId = decidingRuleId(decision);
-  const sentence = ruleId === undefined ? undefined : REASON_BY_RULE[ruleId];
+  const deciding = decidingEvaluation(decision);
+  const sentence = deciding === null ? undefined : REASON_BY_RULE[deciding.ruleId];
   return sentence ?? 'it needs a person to decide rather than a rule.';
 }
 
 /** The next-step sentence for whichever rule reached a conclusion. */
 function expectationFor(decision: RefundDecision): string {
-  const ruleId = decidingRuleId(decision);
+  const deciding = decidingEvaluation(decision);
+  const ruleId = deciding?.ruleId;
   return ruleId === undefined ? DEFAULT_EXPECTATION : (EXPECTATION_BY_RULE[ruleId] ?? DEFAULT_EXPECTATION);
 }

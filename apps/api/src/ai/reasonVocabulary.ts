@@ -15,7 +15,7 @@ import type { ClaimExtraction } from '@refund/shared';
  * First match wins.
  */
 
-export interface ReasonPattern {
+interface ReasonPattern {
   readonly reason: ClaimExtraction['reason'];
   readonly condition: ClaimExtraction['condition'];
   readonly confidence: number;
@@ -160,19 +160,6 @@ function splitSentences(message: string): string[] {
     .split(/(?<=[.!?])\s+|\n+/u)
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length > 0);
-}
-
-/**
- * Whether the customer has already said what went wrong.
- *
- * `other` and `none` mean the table did not recognise it, which is not the same as
- * "they told us nothing" - a complaint about a smell, a fee or a delay the table does
- * not cover would read as silence here. Deliberately optimistic, because the cost of
- * being wrong is asymmetric: assuming too much and staying quiet strands a customer,
- * while assuming too little asks one question they can answer.
- */
-export function hasReadableReason(message: string): boolean {
-  return detectedReason(message) !== null;
 }
 
 /**

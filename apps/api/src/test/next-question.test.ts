@@ -156,3 +156,52 @@ describe("the questions are read by a customer, not by the system", () => {
     }
   });
 });
+
+describe('an opening question greets first', () => {
+  it('greets on hello instead of opening with an interrogation', () => {
+    // The reported transcript: "hello" answered with "Is this about the lamp
+    // or the kettle?" - the right question with no hello in it, which reads
+    // as a multiple-choice quiz in reply to a greeting.
+    const question = questionForField('item', input({ customerText: ['hello'], askedText: [] }));
+    expect(question).toMatch(/^Hello!/);
+    expect(question).toContain('or a different one?');
+  });
+
+  it('does not greet mid-thread', () => {
+    const question = questionForField(
+      'item',
+      input({ customerText: ['hello', 'I need help with my order'], askedText: ['What has gone wrong with it?'] }),
+    );
+    expect(question).not.toMatch(/hello/i);
+    expect(question).toMatch(/^Is this about/);
+  });
+
+  it('greets a reason opener on a single-line order too', () => {
+    const question = questionForField(
+      'reason',
+      input({ order: { ...ORDER, items: [MUG] }, customerText: ['hello'], askedText: [] }),
+    );
+    expect(question).toMatch(/^Hello!/);
+    expect(question).toMatch(/what has gone wrong/i);
+  });
+
+  it('compares questions without their openers', () => {
+    // The greeting is shared, so the dedup must compare without it: the same
+    // question greeted and ungreeted is asked twice, while an item question
+    // and a reason question stay two different questions even greeted.
+    const mugOnly = questionForField(
+      'item',
+      input({ reportedItemIds: [LAMP.id], customerText: ['hello'], askedText: [] }),
+    ) as string;
+    expect(mugOnly).toMatch(/^Hello!/);
+    expect(alreadyAsked(mugOnly, [mugOnly])).toBe(true);
+    expect(
+      alreadyAsked(mugOnly, [mugOnly.replace(/^Hello! Thanks for getting in touch\. /, '')]),
+    ).toBe(true);
+    const reason = questionForField(
+      'reason',
+      input({ reportedItemIds: [MUG.id], customerText: ['hello'], askedText: [] }),
+    ) as string;
+    expect(alreadyAsked(mugOnly, [reason])).toBe(false);
+  });
+});

@@ -17,6 +17,7 @@ import type { DiscretionConfig, ItemPickerConfig } from './config/env.js';
 import { findCustomer, findDuplicateSibling } from './db/orderRepository.js';
 import { verifyGrounding } from './ai/index.js';
 import type { AIAnalyzer, AttemptObserver, DialogueLine, ProviderAttempt } from './ai/index.js';
+import type { ClarifyField } from './ai/analyzer.js';
 import { toAnalyzerOrder } from './ai/openaiAnalyzer.js';
 import { disputeCeiling, identifyOrder, type Identification } from './retrieval/identifyOrder.js';
 import { scanForInjection } from './security/injection.js';
@@ -307,6 +308,7 @@ async function decidedByGates(
     undefined,
     customerRequestedAgent,
     validItemIds,
+    input.message,
   );
   log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
   // Decided by a rule, without the model: the claim was never read, so the ladder
@@ -374,6 +376,7 @@ async function afterGates(
     deps.minConfidence,
     customerRequestedAgent,
     input.itemIds,
+    input.message,
   );
   log.record('resolve', `${decision.decision} ${formatCents(decision.refundAmountCents)}`);
 
@@ -1009,7 +1012,7 @@ async function analyseClaim(
   }
 
   if (reply.kind === 'ask_items') {
-    return itemPickOrNextQuestion(reply, db, deps, input, gates, retrieval, history, intake, log);
+    return itemPickOrNextQuestion(reply, db, deps, input, gates, retrieval, history, intake, log, observer);
   }
 
   if (reply.kind === 'question') {
@@ -1113,7 +1116,7 @@ const ITEM_PICKER_CAPTION = 'Which item is this about? Pick one and I will check
  * So: offer the picker when it is warranted, otherwise ask whatever is still missing,
  * and only escalate when there is nothing left to ask.
  */
-function itemPickOrNextQuestion(
+async function itemPickOrNextQuestion(
   reply: Extract<IntakeReply, { kind: 'ask_items' }>,
   db: Db,
   deps: PipelineDeps,
@@ -1123,18 +1126,21 @@ function itemPickOrNextQuestion(
   history: readonly DialogueLine[],
   intake: Intake,
   log: StageLog,
-): AnalyseOutcome {
+  observer: AttemptObserver,
+): Promise<AnalyseOutcome> {
   const offered = offerItemPicker(reply, db, deps, input, gates, retrieval, intake, log);
   if (offered !== null) {
     return offered;
   }
-  const asked = askedClarifyingQuestion(
+  const asked = await askedClarifyingQuestion(
     db,
+    deps,
     input,
     retrieval.order,
     retrieval.found.items.map((item) => item.id),
     history,
     log,
+    observer,
   );
   if (asked !== null) {
     return asked;
@@ -1169,25 +1175,33 @@ const PICKER_FALLBACK_QUESTION = 'Is this about';
  * being handed to a person. Deterministic, and refused if the thread has already
  * asked it - the guard that stops the loop.
  */
-function askedClarifyingQuestion(
+async function askedClarifyingQuestion(
   db: Db,
+  deps: PipelineDeps,
   input: ProcessInput,
   order: OrderRecord | null,
   resolvedItemIds: readonly string[],
   history: readonly DialogueLine[],
   log: StageLog,
-): AnalyseOutcome | null {
+  observer: AttemptObserver,
+): Promise<AnalyseOutcome | null> {
   const facts = threadFacts(db, input.customerId, order, history, input.message);
   const field = nextMissingField({ order, ...facts, resolvedItemIds, askedText: assistantLines(history) });
   if (field === null) {
     return null;
   }
-  const question = questionForField(field, { order, ...facts, resolvedItemIds, askedText: assistantLines(history) });
+  const askedInput = { order, ...facts, resolvedItemIds, askedText: assistantLines(history) };
+  const model = await clarifyWithModel(deps, observer, field, order, resolvedItemIds, input.message, log);
+  const question = model ?? questionForField(field, askedInput);
   if (question === null) {
     return null;
   }
   return respondToQuestion(
-    { kind: 'question', question, model: 'deterministic-clarification-v1' },
+    {
+      kind: 'question',
+      question,
+      model: model === null ? 'deterministic-clarification-v1' : deps.analyzer.model,
+    },
     order,
     history,
     facts,
@@ -1199,6 +1213,75 @@ function askedClarifyingQuestion(
     resolvedItemIds,
     log,
   );
+}
+
+/**
+ * Words the missing field with the model when one can ask, deterministically otherwise.
+ *
+ * The field derivation above stays deterministic - what is missing is a fact
+ * about the thread, not a judgement call. Only the wording goes to the model,
+ * with product names and kinds but never money, and the question guard still
+ * checks the result for repeats before anyone reads it. Null (no model, failed
+ * call, invalid text) means the deterministic question, so a model that cannot
+ * ask plainly costs a round trip, never the turn.
+ */
+const MAX_QUESTION_CHARS = 400;
+
+async function clarifyWithModel(
+  deps: PipelineDeps,
+  observer: AttemptObserver,
+  field: ClarifyField,
+  order: OrderRecord | null,
+  resolvedItemIds: readonly string[],
+  message: string,
+  log: StageLog,
+): Promise<string | null> {
+  if (deps.analyzer.askClarification === undefined) {
+    return null;
+  }
+  try {
+    const text = await deps.analyzer.askClarification(
+      {
+        field,
+        items: clarifyScope(order, resolvedItemIds).map((line) => ({ name: line.name, kind: clarifyKind(line) })),
+        message,
+      },
+      observer,
+    );
+    // Validated here as well as in the adapters: a custom analyzer can return
+    // anything, and an empty question would sail through the repeat guard
+    // (nothing asked yet) straight to the customer as a blank bubble.
+    if (text === null) {
+      log.record('ai_analysis', 'model clarification unavailable; deterministic question');
+      return null;
+    }
+    const wording = text.trim();
+    if (wording.length === 0 || wording.length > MAX_QUESTION_CHARS || /\$\s?\d/.test(wording)) {
+      log.record('ai_analysis', 'model clarification rejected by validation; deterministic question');
+      return null;
+    }
+    return wording;
+  } catch {
+    log.record('ai_analysis', 'model clarification failed; deterministic question');
+    return null;
+  }
+}
+
+/** The lines a clarification question may name: resolved if any, else the basket. */
+function clarifyScope(order: OrderRecord | null, resolvedItemIds: readonly string[]): readonly OrderRecord['items'][number][] {
+  const lines = order === null ? [] : order.items.filter((line) => resolvedItemIds.includes(line.id));
+  return lines.length > 0 ? lines : (order?.items ?? []);
+}
+
+/** What a line is, for fitting examples to it: billing, access, or a thing. */
+function clarifyKind(line: { readonly isSubscription: boolean; readonly digital: boolean }): 'subscription' | 'digital' | 'physical' {
+  if (line.isSubscription) {
+    return 'subscription';
+  }
+  if (line.digital) {
+    return 'digital';
+  }
+  return 'physical';
 }
 
 /**
@@ -1453,6 +1536,7 @@ function resolveDecision(
   minConfidence: number | undefined,
   customerRequestedAgent: boolean = false,
   claimedItemIds?: readonly string[],
+  customerMessage?: string,
 ): RefundDecision {
   const order = found.order;
   return resolve({
@@ -1472,6 +1556,7 @@ function resolveDecision(
     minConfidence,
     customerRequestedAgent,
     claimedItemIds,
+    customerMessage,
   });
 }
 

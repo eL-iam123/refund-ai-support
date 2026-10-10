@@ -36,7 +36,7 @@ import type { AgentMessage } from '../db/handoffs.js';
  * it can use.
  */
 
-export type ShopSocketEvent =
+type ShopSocketEvent =
   | { readonly type: 'agent.connected'; readonly customerId: string; readonly agentId: string; readonly since: string }
   | { readonly type: 'agent.message'; readonly customerId: string; readonly message: AgentMessage }
   | { readonly type: 'agent.left'; readonly customerId: string; readonly orderId: string | null }
@@ -54,7 +54,7 @@ export type ShopSocketEvent =
       readonly customerId: string;
     };
 
-export type StaffSocketEvent =
+type StaffSocketEvent =
   | {
       readonly type: 'handoff.started';
       readonly customerId: string;

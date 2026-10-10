@@ -67,7 +67,7 @@ export function hashPassword(password: string): { hash: string; salt: string } {
  * something the caller is told, so the timing channel would add little. The
  * point is to not make hash comparison itself the fast path.
  */
-export function verifyPassword(password: string, hash: string, salt: string): boolean {
+function verifyPassword(password: string, hash: string, salt: string): boolean {
   const expected = Buffer.from(hash, 'hex');
   const actual = scryptSync(password, salt, expected.length);
   if (actual.length !== expected.length) {

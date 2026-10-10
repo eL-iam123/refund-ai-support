@@ -11,7 +11,7 @@ import { shopApi, type ChatTurn as StoredTurn, type ItemPickerOffer } from './sh
  * endpoint that can return a request the caller did not just create is a sharp
  * edge, and this is the edge being declared rather than left to be discovered.
  */
-export interface DuplicateNotice {
+interface DuplicateNotice {
   /** The request that already existed. */
   readonly ofRequestId: string;
   readonly firstReportedAt: string;
@@ -153,23 +153,6 @@ export type Turn =
       readonly kind: 'handoff';
       readonly id: string;
       readonly text: string;
-    }
-  | {
-      /**
-       * The assistant answered from an already-open case instead of opening a
-       * second one.
-       *
-       * Ephemeral by design, unlike every other turn: there is no row behind
-       * it, because the whole point is that no new case was created. A reload
-       * drops the acknowledgement, but the open escalation it refers to is
-       * still drawn from storage - so nothing the customer was promised
-       * disappears, only the echo of words that needed no answer.
-       */
-      readonly kind: 'status';
-      readonly id: string;
-      readonly text: string;
-      readonly status: string;
-      readonly requestId: string;
     };
 
 export interface Conversation {
@@ -658,7 +641,7 @@ function settleReply(
   reply: SendReply,
   live: { settle: (order: string, id: string, turn: Turn) => void },
 ): void {
-  live.settle(orderId, localId, turnForReply(message, localId, itemIds, reply));
+  live.settle(orderId, localId, turnForReply(message, itemIds, reply));
 }
 
 /**
@@ -669,7 +652,7 @@ function settleReply(
  * `any`. Split out because the variant count outgrew the settler, and each
  * arm is one shape with no shared logic worth merging.
  */
-function turnForReply(message: string, localId: string, itemIds: readonly string[], reply: SendReply): Turn {
+function turnForReply(message: string, itemIds: readonly string[], reply: SendReply): Turn {
   if ('question' in reply) {
     return {
       kind: 'asked',
@@ -689,15 +672,6 @@ function turnForReply(message: string, localId: string, itemIds: readonly string
       createdAt: reply.message.createdAt,
       media: reply.message.media ?? null,
       waitingForPerson: !reply.agentConnected,
-    };
-  }
-  if ('status' in reply) {
-    return {
-      kind: 'status',
-      id: localId,
-      text: message,
-      status: reply.status,
-      requestId: reply.requestId,
     };
   }
   const { request, duplicate } = reply;

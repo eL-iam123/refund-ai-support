@@ -58,9 +58,7 @@ export interface ItemPickerOffer {
   readonly suggested: readonly string[];
 }
 
-export { ApiError };
-
-export interface AuditEvent {
+interface AuditEvent {
   readonly requestId: string;
   readonly at: string;
   readonly kind: string;
@@ -303,7 +301,7 @@ export interface ExchangeDto {
   readonly updatedAt: string;
 }
 
-export interface ExchangeItemDto {
+interface ExchangeItemDto {
   readonly id: string;
   readonly exchangeId: string;
   readonly itemId: string;
@@ -394,7 +392,6 @@ export const api = {
           notice: string | null;
         }
       | ({ received: true } & AgentRoutedReply)
-      | { status: string; requestId: string }
     >('/api/chat/messages', input),
 
   listRequests: (params: RequestFilter = {}) =>
@@ -535,7 +532,7 @@ export const api = {
   staffHandBack: (customerId: string, orderId?: string | null): Promise<{ ended: { id: string; customerId: string; orderId: string | null; agentId: string; startedAt: string } }> =>
     post(`/api/staff/conversations/${encodeURIComponent(customerId)}/hand-back`, { orderId }),
 
-  staffCloseChat: (customerId: string, orderId: string | null): Promise<{ closure: { id: string; customerId: string; orderId: string | null; requestId: string; closedAt: string; closedBy: string; finalState: Decision } }> =>
+  staffCloseChat: (customerId: string, orderId: string | null): Promise<{ closure: { id: string; customerId: string; orderId: string | null; requestId: string; closedAt: string; closedBy: string; finalState: Decision; closedItemIds: readonly string[] | null } }> =>
     post(`/api/staff/conversations/${encodeURIComponent(customerId)}/close`, { orderId }),
 
   staffAnalytics: (): Promise<{ analytics: { openHandoffs: number; escalatedAwaiting: number; awaitingReviewCents: number; decisionsToday: Record<Decision, number>; averageTakeoverMinutes: number | null; since: string } }> =>

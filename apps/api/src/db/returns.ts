@@ -23,7 +23,7 @@ import { RETURN_STATUSES, CARRIERS, type ReturnStatus, type Carrier } from '@ref
 
 // Re-exported so the rest of the API keeps importing return vocabulary from one
 // place, whichever module it happens to be reading.
-export { RETURN_STATUSES, CARRIERS };
+export { RETURN_STATUSES };
 export type { ReturnStatus, Carrier };
 
 /**
@@ -85,7 +85,7 @@ export interface ReturnItemRecord {
 }
 
 /** A line the customer asked to send back, before it is checked against the order. */
-export interface ReturnLineRequest {
+interface ReturnLineRequest {
   readonly itemId: string;
   readonly quantity: number;
 }

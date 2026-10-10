@@ -287,6 +287,16 @@ export interface RefundDecision {
   readonly overrides: readonly OverrideRecord[];
   readonly eligibleItemIds: readonly string[];
   /**
+   * The order lines the customer's request was about, when they named them.
+   *
+   * Carried so replies and citations can stay on the dispute: a denial that
+   * names whatever the policy excluded anywhere in the basket blames lines
+   * the customer never mentioned. Empty means the claim named nothing and the
+   * whole order is in scope, which is the only case where every line may be
+   * named. Resolver-filled, never model-derived.
+   */
+  readonly claimedItemIds?: readonly string[] | undefined;
+  /**
    * The order lines this decision's money is calculated from - the lines a
    * refund would cover. A per-line reading names exactly the approved lines;
    * a whole-order reading names the eligible lines whose value backs the

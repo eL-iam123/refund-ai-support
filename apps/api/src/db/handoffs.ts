@@ -299,7 +299,7 @@ export function takeoverForEscalated(
  * nobody has looked at onto a case file for a different order - quietly denying
  * a refund claim by burying it, which is worse than the escalation it replaced.
  */
-export function isThreadOf(_db: Db, handoff: ActiveHandoff, orderId: string | null): boolean {
+function isThreadOf(_db: Db, handoff: ActiveHandoff, orderId: string | null): boolean {
   if (handoff.orderId === null) {
     return true;
   }
@@ -435,6 +435,27 @@ export function listAgentMessagesForOrder(
  */
 export function handoffById(db: Db, handoffId: string): ActiveHandoff | null {
   const row = db.prepare('SELECT * FROM handoffs WHERE id = ?').get(handoffId) as HandoffRow | undefined;
+  return row === undefined ? null : toActive(row);
+}
+
+/**
+ * The newest takeover on a thread, live or ended.
+ *
+ * Parked follow-ups journal here so the agent who picks the case up reads the
+ * whole conversation, including what arrived while nobody held it. Live first
+ * is wrong for this: a handoff that was taken and handed back is still the
+ * thread's human side, and a follow-up filed onto a fresh marker instead
+ * would split one conversation across two threads.
+ */
+export function latestHandoffForThread(
+  db: Db,
+  customerId: string,
+  orderId: string | null,
+): ActiveHandoff | null {
+  const row = db.prepare(
+    `SELECT * FROM handoffs WHERE customer_id = ? AND order_id IS ?
+     ORDER BY started_at DESC, rowid DESC LIMIT 1`,
+  ).get(customerId, orderId) as HandoffRow | undefined;
   return row === undefined ? null : toActive(row);
 }
 

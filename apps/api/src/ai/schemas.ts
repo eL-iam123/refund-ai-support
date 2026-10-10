@@ -23,7 +23,7 @@ import { ClaimExtractionSchema } from '@refund/shared';
  * deterministic compose step - never from a model-written decision paragraph.
  */
 
-export const AskSchema = z.object({
+const AskSchema = z.object({
   action: z.literal('ask'),
   question: z.string().min(1).max(400),
 });
@@ -38,10 +38,10 @@ export const AskSchema = z.object({
 export const CompleteSchema = ClaimExtractionSchema.extend({
   action: z.literal('decide'),
 });
-export type CompleteOutput = z.infer<typeof CompleteSchema>;
+
 
 /** The most lines one offer can name. Bounded so the array cannot be a payload. */
-export const MAX_ITEM_CANDIDATES = 8;
+const MAX_ITEM_CANDIDATES = 8;
 
 /**
  * The model's request for the item picker.
@@ -66,7 +66,7 @@ export const IntakeOutputSchema = z.union([AskItemsSchema, AskSchema, CompleteSc
 export type IntakeOutput = z.infer<typeof IntakeOutputSchema>;
 
 /** The longest a phrased reply may be. Bounded so verbosity is a choice, not a bill. */
-export const MAX_GENERAL_CHARS = 600;
+const MAX_GENERAL_CHARS = 600;
 
 /**
  * A phrased decision reply, bounded like any other prose.
@@ -76,7 +76,7 @@ export const MAX_GENERAL_CHARS = 600;
  * cannot be expressed as a shape.
  */
 export const PhraseReplySchema = z.string().trim().min(1).max(MAX_GENERAL_CHARS);
-export type PhraseReplyOutput = z.infer<typeof PhraseReplySchema>;
+
 
 /** Compact schema description for the prompt. Not enforced by the provider. */
 export function describeOutput(shape: z.ZodType): string {

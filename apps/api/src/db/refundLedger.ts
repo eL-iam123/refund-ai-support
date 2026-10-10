@@ -295,7 +295,7 @@ export function findRefundById(db: Db, id: string): RefundRecord | null {
   return row === undefined ? null : hydrate(row);
 }
 
-export function findRefundByRequestId(db: Db, requestId: string): RefundRecord | null {
+function findRefundByRequestId(db: Db, requestId: string): RefundRecord | null {
   const row = db.prepare(`SELECT ${COLUMNS} FROM refunds WHERE request_id = ?`).get(requestId) as
     | RefundRow
     | undefined;

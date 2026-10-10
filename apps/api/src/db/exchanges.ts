@@ -23,7 +23,7 @@ import { EXCHANGE_STATUSES, CARRIERS, type ExchangeStatus, type Carrier } from '
 
 // Re-exported so the rest of the API keeps importing exchange vocabulary from
 // one place, whichever module it happens to be reading.
-export { EXCHANGE_STATUSES, CARRIERS };
+export { EXCHANGE_STATUSES };
 export type { ExchangeStatus, Carrier };
 
 /**
@@ -88,7 +88,7 @@ export interface ExchangeItemRecord {
 }
 
 /** A line the customer asked to swap, before it is checked against the order. */
-export interface ExchangeLineRequest {
+interface ExchangeLineRequest {
   readonly itemId: string;
   readonly quantity: number;
 }

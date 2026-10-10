@@ -53,15 +53,6 @@ export function addToCart(productId: string): void {
   emit();
 }
 
-export function setCartQuantity(productId: string, quantity: number): void {
-  if (quantity <= 0) {
-    removeFromCart(productId);
-    return;
-  }
-  lines = lines.map((line) => (line.productId === productId ? { ...line, quantity: capped(quantity) } : line));
-  emit();
-}
-
 export function removeFromCart(productId: string): void {
   lines = lines.filter((line) => line.productId !== productId);
   emit();

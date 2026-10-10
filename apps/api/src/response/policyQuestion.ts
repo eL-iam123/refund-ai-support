@@ -9,8 +9,6 @@ import type { BlockedItem } from '@refund/shared';
  * never consulted, exactly like the no-complaint floor.
  */
 
-export const POLICY_QUESTION_MODEL = 'deterministic-policy-answer-v1';
-
 /**
  * Phrasing that reads as "tell me what your policy allows" for some item.
  *

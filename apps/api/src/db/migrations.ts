@@ -926,6 +926,45 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 28,
+    name: 'chat_closures.closed_item_ids_json',
+    up: (db) => {
+      if (!hasTable(db, 'chat_closures') || hasColumn(db, 'chat_closures', 'closed_item_ids_json')) {
+        return;
+      }
+      // A closure finalises lines, not threads: closing the lamp's case must
+      // not bury the kettle on the same order. The column is nullable, and
+      // null keeps its old meaning - every row written before line-scoping
+      // closed the whole thread, and re-reading those as fully closed is what
+      // keeps a replayed migration from reopening cases an agent put away.
+      // New closures always write an explicit list, possibly empty.
+      db.exec('ALTER TABLE chat_closures ADD COLUMN closed_item_ids_json TEXT');
+    },
+  },
+  {
+    version: 29,
+    name: 'response_ratings',
+    up: (db) => {
+      // Verdicts on answers, one row per customer per request: a changed mind
+      // replaces the row rather than stacking beside it. No money, no policy,
+      // no ledger - just a record of which answers landed, for whoever tunes
+      // the wording next.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS response_ratings (
+          id          TEXT PRIMARY KEY,
+          request_id  TEXT NOT NULL REFERENCES refund_requests(id) ON DELETE CASCADE,
+          customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+          rating      TEXT NOT NULL CHECK (rating IN ('up', 'down')),
+          created_at  TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_response_ratings_request_customer
+          ON response_ratings(request_id, customer_id);
+        CREATE INDEX IF NOT EXISTS idx_response_ratings_customer
+          ON response_ratings(customer_id);
+      `);
+    },
+  },
 ];
 
 /**

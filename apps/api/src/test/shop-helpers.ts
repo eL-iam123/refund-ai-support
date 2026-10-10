@@ -34,7 +34,7 @@ export interface SignedIn {
  * lands on an escalated thread - one a person is already looking at - comes
  * back as a conversation instead, because the pipeline does not run again there.
  */
-export interface SendResult {
+interface SendResult {
   readonly decision: string | null;
   readonly duplicate: unknown;
   /** Set when the message went to a takeover rather than to the resolver. */

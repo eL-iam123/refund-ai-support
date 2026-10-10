@@ -361,7 +361,7 @@ export type Env = z.infer<typeof EnvSchema> & { AI_PROVIDER: AiProvider };
 
 export type AiProvider = NonNullable<z.infer<typeof EnvSchema>['AI_PROVIDER']>;
 
-export type ProviderApiKeyEnv =
+type ProviderApiKeyEnv =
   | 'GROQ_API_KEY'
   | 'OPENROUTER_API_KEY'
   | 'OPENAI_API_KEY'
@@ -380,7 +380,7 @@ export type ProviderApiKeyEnv =
  * genuinely misleading error to hand someone. So the wire format is part of the
  * configuration and picks the adapter.
  */
-export type ProviderKind = 'openai_compatible' | 'anthropic' | 'local';
+type ProviderKind = 'openai_compatible' | 'anthropic' | 'local';
 
 export interface ProviderPreset {
   readonly kind: ProviderKind;
@@ -685,7 +685,7 @@ const KNOWN_KEY_PREFIXES: readonly string[] = ['gsk_', 'nvapi-', 'AIza', 'sk-or-
  * produce a provider the operator's key is genuinely for. Nothing here grants
  * access to anything, it just saves the operator reading a table.
  */
-export function providerFromKey(key: string | undefined): AiProvider | null {
+function providerFromKey(key: string | undefined): AiProvider | null {
   if (key === undefined) {
     return null;
   }

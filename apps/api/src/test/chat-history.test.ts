@@ -22,16 +22,6 @@ async function historyFor(harness: AppHarness, session: SignedIn): Promise<{ awa
 }
 
 /** The newest decision row on an order, or how many rows it has. */
-function latestRequestId(db: Db, orderId: string): string {
-  const row = db
-    .prepare('SELECT id FROM refund_requests WHERE order_id = ? ORDER BY rowid DESC LIMIT 1')
-    .get(orderId) as { id: string } | undefined;
-  if (row === undefined) {
-    throw new Error(`no request stored for order ${orderId}`);
-  }
-  return row.id;
-}
-
 function countRequests(db: Db, orderId: string): number {
   const row = db
     .prepare('SELECT COUNT(*) AS total FROM refund_requests WHERE order_id = ?')
@@ -432,7 +422,6 @@ describe('per-order chat history', () => {
     // nothing can approve it and a person is asked to decide.
     const escalated = await session.send(session.orderId, 'The charger never arrived and I want my money back');
     expect(escalated.decision).toBe('escalated');
-    const escalatedId = latestRequestId(harness.db, session.orderId);
 
     const other = await session.buyAgain();
     expect(other).not.toBe(session.orderId);
@@ -462,9 +451,21 @@ describe('per-order chat history', () => {
       },
     });
     expect(stillEscalated.statusCode).toBe(200);
-    const openCase = stillEscalated.json<{ status: string; requestId: string }>();
-    expect(openCase.requestId).toBe(escalatedId);
+    const parked = stillEscalated.json<{ received?: boolean; status?: string }>();
+    // Journaled, not answered: the follow-up lands on the case's thread for
+    // the agent to read, and no parking paragraph is pasted into the chat.
+    expect(parked.received).toBe(true);
+    expect(parked).not.toHaveProperty('status');
     expect(countRequests(harness.db, session.orderId)).toBe(rowsBefore);
+    const noted = harness.db
+      .prepare(
+        `SELECT m.body FROM agent_messages m
+           JOIN handoffs h ON h.id = m.handoff_id
+          WHERE h.customer_id = ? AND m.sender = 'customer'
+          ORDER BY m.rowid DESC LIMIT 1`,
+      )
+      .get(session.customerId) as { body: string } | undefined;
+    expect(noted?.body).toContain('Still nothing');
   });
 
   it('treats a different item on an open-escalation thread as a new case, not a follow-up', async () => {

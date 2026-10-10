@@ -91,7 +91,7 @@ export function listProducts(db: Db): readonly Product[] {
   return rows.map(toProduct);
 }
 
-export function findProduct(db: Db, productId: string): Product | null {
+function findProduct(db: Db, productId: string): Product | null {
   const row = db.prepare('SELECT * FROM products WHERE id = ?').get(productId) as ProductRow | undefined;
   return row === undefined ? null : toProduct(row);
 }

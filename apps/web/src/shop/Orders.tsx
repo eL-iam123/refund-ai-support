@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, RefreshCw } from 'lucide-react';
-import { money, type ShopOrder } from './api';
+import { money, shopApi, type ShopOrder } from './api';
 import { REASONS, reasonFor } from './issueReasons';
 import type { CartLine } from './cartStore';
 
@@ -19,6 +19,8 @@ import type { CartLine } from './cartStore';
  * explanation. A URL survives that, and can be pasted to a colleague.
  */
 export function OrderDetails({ order, onBack, onReport }: { order: ShopOrder; onBack: () => void; onReport: () => void }): ReactNode {
+  const navigate = useNavigate();
+  const [lineItem, setLineItem] = useState<{ itemId: string; name: string } | null>(null);
   return (
     <div className="order-detail-page">
       <button type="button" className="btn-quiet order-back" onClick={onBack}>← Back to orders</button>
@@ -27,8 +29,106 @@ export function OrderDetails({ order, onBack, onReport }: { order: ShopOrder; on
         <div className="order-detail-card card"><p className="eyebrow">Delivery</p><h2>{order.trackingStatus.replace(/_/g, ' ')}</h2><p className="muted">Payment {order.paymentState}</p></div>
         <div className="order-detail-card card"><p className="eyebrow">Total paid</p><h2 className="num">{money(order.totalCents)}</h2><p className="muted">All taxes and delivery included</p></div>
       </section>
-      <section className="order-detail-card card"><div className="section-heading"><div><p className="eyebrow">Items</p><h2>What&apos;s in this order</h2></div><button type="button" className="btn-primary" onClick={onReport}>Get help</button></div><OrderLines items={order.items} /></section>
+      <section className="order-detail-card card"><div className="section-heading"><div><p className="eyebrow">Items</p><h2>What&apos;s in this order</h2></div><button type="button" className="btn-primary" onClick={onReport}>Get help</button></div><ReportLines order={order} onReportLine={setLineItem} /></section>
+      {lineItem !== null ? (
+        <IssuePicker
+          order={order}
+          line={lineItem}
+          onCancel={() => setLineItem(null)}
+          onSubmit={(issueId) => {
+            const itemId = lineItem.itemId;
+            setLineItem(null);
+            void navigate(`/help?order=${encodeURIComponent(order.id)}&item=${encodeURIComponent(itemId)}&issue=${encodeURIComponent(issueId)}`);
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+/**
+ * Each line with its own report state: the wizard.
+ *
+ * A closed line shows as finished and offers nothing; every other line offers
+ * a report that deep-links into the chat with the line already ticked. The
+ * closed set comes from the chat history, so a case an agent put away stays
+ * put away here too - while a line nobody has reported stays reportable even
+ * when its siblings are closed. A history read that fails leaves every line
+ * reportable rather than locking the order: failing closed would punish the
+ * customer for a network error.
+ */
+function ReportLines({
+  order,
+  onReportLine,
+}: {
+  order: ShopOrder;
+  onReportLine: (line: { itemId: string; name: string }) => void;
+}): ReactNode {
+  const [closed, setClosed] = useState<ReadonlySet<string> | null>(null);
+  useEffect(() => {
+    let live = true;
+    void shopApi.chatHistory(order.id).then(
+      (history) => {
+        if (live) {
+          setClosed(new Set(history.closedItemIds));
+        }
+      },
+      () => {
+        if (live) {
+          setClosed(new Set());
+        }
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [order.id]);
+  return (
+    <ul className="lines lines-report">
+      {order.items.map((item) => (
+        <ReportLine
+          key={item.itemId}
+          item={item}
+          closed={closed?.has(item.itemId) ?? false}
+          ready={closed !== null}
+          onReport={() => onReportLine({ itemId: item.itemId, name: item.name })}
+        />
+      ))}
+    </ul>
+  );
+}
+
+/** One line with its report state: finished lines show it, open lines offer a report. */
+function ReportLine({
+  item,
+  closed,
+  ready,
+  onReport,
+}: {
+  item: ShopOrder['items'][number];
+  closed: boolean;
+  /** False while the closed set is still loading, when no control shows yet. */
+  ready: boolean;
+  onReport: () => void;
+}): ReactNode {
+  let control: ReactNode = null;
+  if (ready) {
+    control = closed ? (
+      <span className="pill">Closed</span>
+    ) : (
+      <button type="button" className="chip" onClick={onReport}>
+        Report
+      </button>
+    );
+  }
+  return (
+    <li>
+      <span>
+        {item.name} <span className="muted">x{item.quantity}</span>
+      </span>
+      <span className="num">{money(item.unitPriceCents * item.quantity)}</span>
+      {control}
+    </li>
   );
 }
 
@@ -276,10 +376,13 @@ function OrderLines({ items }: { items: ShopOrder['items'] }): ReactNode {
  */
 function IssuePicker({
   order,
+  line,
   onCancel,
   onSubmit,
 }: {
   order: ShopOrder;
+  /** The line being reported, when the picker was opened from one. */
+  line?: { itemId: string; name: string };
   onCancel: () => void;
   onSubmit: (issueId: string) => void;
 }): ReactNode {
@@ -297,7 +400,7 @@ function IssuePicker({
         }
       }}
     >
-      <h2 className="label">Tell us what went wrong</h2>
+      <h2 className="label">Tell us what went wrong{line === undefined ? '' : ` with ${line.name}`}</h2>
       <p className="muted small">We’ll open your {order.id} thread so you can add more detail if needed.</p>
       <div className="issue-list">
         {REASONS.map((issue) => (

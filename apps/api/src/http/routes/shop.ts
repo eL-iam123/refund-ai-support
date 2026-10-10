@@ -20,8 +20,9 @@ import { recordCustomerUpdate } from '../../db/customerUpdates.js';
 import { conversationCounts, conversationForOrder } from '../../retrieval/conversation.js';
 import { followUpFor } from '../../response/followUp.js';
 import { AppealAlreadyPendingError, fileAppeal, openAppealForRequest } from '../../db/appeals.js';
+import { rateReply, ratingsForOrder, RatingError } from '../../db/ratings.js';
 import { FULLY_REFUNDED } from '../../policy/constants.js';
-import { isChatClosed } from '../../db/chatClosures.js';
+import { closedItemIdsForThread, isChatClosed } from '../../db/chatClosures.js';
 import { ESCALATION_AGENT, forkScopeForHandoff, handoffById, liveClaimedForks, liveHandoffForThread, messagesForHandoff, recordAgentMessage, type ActiveHandoff, type AgentMessage, type ForkScope } from '../../db/handoffs.js';
 import { scanForInjection } from '../../security/injection.js';
 import type { LiveHub } from '../hub.js';
@@ -238,6 +239,76 @@ function registerAppealRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.post('/api/shop/refunds/:requestId/appeal', (request, reply) => handleFileAppeal(request, reply, ctx));
 }
 
+/**
+ * Verdicts on answers: one upsert per customer per request, and the order's
+ * verdicts for seeding the thumbs.
+ *
+ * Ratings change nothing about the request - no money, no queue, no reopen -
+ * so the only checks are identity and ownership: signed in, and the answer
+ * being rated is the voter's own. Anything else is a 404, because confirming
+ * that someone else's request exists would turn the endpoint into an oracle.
+ */
+const RatingSchema = z.object({
+  requestId: z.string().trim().min(1).max(120),
+  rating: z.enum(['up', 'down']),
+});
+
+const RatingsQuerySchema = z.object({
+  orderId: z.string().trim().min(1).max(120),
+});
+
+function handleRateReply(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  ctx: AppContext,
+): { rating: { readonly requestId: string; readonly rating: 'up' | 'down' } } {
+  const body = parseBody(RatingSchema, request.body);
+  const user = requireUser(request, ctx);
+  try {
+    const record = rateReply(ctx.db, {
+      requestId: body.requestId,
+      customerId: user.customerId,
+      rating: body.rating,
+      now: ctx.now(),
+    });
+    reply.code(201);
+    return { rating: { requestId: record.requestId, rating: record.rating } };
+  } catch (error: unknown) {
+    if (error instanceof RatingError) {
+      throw new NotFoundError('refund request', body.requestId);
+    }
+    throw error;
+  }
+}
+
+function handleOrderRatings(
+  request: FastifyRequest,
+  ctx: AppContext,
+): { ratings: readonly { readonly requestId: string; readonly rating: 'up' | 'down' }[] } {
+  const user = requireUser(request, ctx);
+  const query = RatingsQuerySchema.safeParse(request.query);
+  if (!query.success) {
+    throw badRequest(
+      'invalid ratings filter',
+      query.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+    );
+  }
+  if (findOrder(ctx.db, user.customerId, query.data.orderId, ctx.now()) === null) {
+    throw new NotFoundError('order', query.data.orderId);
+  }
+  return {
+    ratings: ratingsForOrder(ctx.db, user.customerId, query.data.orderId).map((record) => ({
+      requestId: record.requestId,
+      rating: record.rating,
+    })),
+  };
+}
+
+function registerRatingRoutes(app: FastifyInstance, ctx: AppContext): void {
+  app.post('/api/shop/ratings', (request, reply) => handleRateReply(request, reply, ctx));
+  app.get('/api/shop/ratings', (request) => handleOrderRatings(request, ctx));
+}
+
 /** The request id from the path, as a string zod would not try to coerce. */
 function requestParm(request: FastifyRequest): string {
   return (request.params as { requestId?: unknown }).requestId as string;
@@ -445,6 +516,7 @@ export function registerShopRoutes(app: FastifyInstance, ctx: AppContext, hub: L
   app.post('/api/shop/checkout', (request, reply) => handleCheckout(request, reply, ctx));
 
   registerAppealRoutes(app, ctx);
+  registerRatingRoutes(app, ctx);
   registerChatHistoryRoutes(app, ctx, hub);
 }
 
@@ -476,6 +548,11 @@ function registerChatHistoryRoutes(app: FastifyInstance, ctx: AppContext, hub: L
     return {
       orderId: query.data.orderId,
       closed: isChatClosed(ctx.db, user.customerId, query.data.orderId),
+      // Which lines a closure already put away, for the per-item report state:
+      // the wizard offers every line outside this set, and a closed thread
+      // reports all of them. Derived here because only the server knows which
+      // rows predate line-scoping and count as fully closed.
+      closedItemIds: closedItemIdsForThread(ctx.db, user.customerId, query.data.orderId),
       // A person is holding the thread and has not answered yet: the composer waits
       // for them rather than collecting messages nobody is reading, and reopens the
       // moment they reply. Derived server-side, because only the server knows which

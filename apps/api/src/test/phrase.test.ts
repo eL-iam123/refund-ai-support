@@ -375,6 +375,10 @@ describe('phrased replies through the pipeline', () => {
 describe('phrase prompt', () => {
   it('tells the model it is not deciding and hands it only the envelope', () => {
     expect(PHRASE_SYSTEM).toMatch(/not deciding|not a decision maker/i);
+    // Verdict-speak ("the outcome is exchange") states machinery instead of
+    // answering the customer; the prompt bans it so the model says what
+    // happens next instead.
+    expect(PHRASE_SYSTEM).toMatch(/outcome is/);
     const user = buildPhraseUser({
       envelope: {
         outcome: 'approved',

@@ -49,12 +49,10 @@ export {
   type AIAnalyzer,
   type IntakeInput,
   type IntakeReply,
-  type AnalyzerItem,
   type AnalyzerOrder,
   type DialogueLine,
   type AttemptObserver,
   type ProviderAttempt,
-  type ConverseStyle,
 } from './analyzer.js';
 export { parseJson } from './json.js';
 export { verifyGrounding } from './grounding.js';

@@ -71,7 +71,7 @@ export function authenticate(secret: string, now: () => Date) {
  * by their own higher role. That direction is safe: every additional capability
  * an admin has is one the role was defined to include.
  */
-export function requireRole(role: Role) {
+function requireRole(role: Role) {
   return (request: FastifyRequest): void => {
     const principal = request.principal;
     if (principal === undefined) {

@@ -1,5 +1,4 @@
 import type { Db } from '../db/connection.js';
-import { formatCents } from '../lib/money.js';
 import type { ItemPickerConfig } from '../config/env.js';
 import type { OrderItemRecord, OrderRecord } from '../db/records.js';
 import type { GateResult } from '../policy/gates.js';
@@ -208,9 +207,4 @@ function offersAlreadyMade(db: Db, orderId: string, maxOffers: number): boolean 
     )
     .get(orderId) as { n: number };
   return row.n >= maxOffers;
-}
-
-/** What an operator sees when the floor is above the order: a reason, not a number. */
-export function pickerSkippedReason(gates: GateResult, config: ItemPickerConfig): string {
-  return `not offered: eligible ${formatCents(gates.eligibleAmountCents)} is below the ${formatCents(config.minCents)} floor`;
 }

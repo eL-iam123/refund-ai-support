@@ -36,7 +36,7 @@ function parseOrNull<T>(raw: string | null, column: string): T | null {
   return raw === null ? null : parse<T>(raw, column);
 }
 
-export function toDecisionDto(row: PersistedRequest): RefundDecisionDto {
+function toDecisionDto(row: PersistedRequest): RefundDecisionDto {
   return {
     decision: row.decision,
     refundAmountCents: row.refundAmountCents,
@@ -47,6 +47,7 @@ export function toDecisionDto(row: PersistedRequest): RefundDecisionDto {
     trace: parse<RuleEvaluationDto[]>(row.traceJson, 'trace_json'),
     overrides: parse<OverrideRecordDto[]>(row.overridesJson, 'overrides_json'),
     eligibleItemIds: parse<string[]>(row.eligibleItemIdsJson, 'eligible_item_ids_json'),
+    claimedItemIds: parse<string[]>(row.claimItemIdsJson, 'claim_item_ids_json'),
     blockedItems: parse<BlockedItemDto[]>(row.blockedItemsJson, 'blocked_items_json'),
     // Live-at-decision-time figures, deliberately not persisted. A replayed row
     // reports zero rather than a stale balance, because a number that was true

@@ -24,10 +24,12 @@ policy explanations, and escalation to a human when the issue needs review.
   their own orders; the customer's message is the only claim input
 - **Grounded extraction** — a model classifies the reason and quotes the customer;
   every quote is verified as a verbatim substring of their message
-- **17-rule policy engine** — windows, final sale, digital goods, payment state,
+- **18-rule policy engine** — windows, final sale, digital goods, payment state,
   refundable balance, chargebacks, abuse signals, duplicate charges, request
-  integrity
-- **Three-way outcomes** — approve, deny, escalate to a human
+  integrity, order-total ceiling
+- **Six outcomes** — approve, deny, escalate, plus partial refunds, exchanges and
+  store credit where the claim supports them; a stated swap ask with an eligible
+  claim resolves as an exchange rather than money
 - **Full audit trail** — every rule evaluation, every model attempt, every override
 - **Human override** — an agent can change any decision, with a reason
 - **Human payment approval** — an approved refund is *reserved*, not paid; an
@@ -240,7 +242,7 @@ and exercises the real policy engine, resolver, and database.
 ```
 packages/shared     Zod schemas, rule/outcome contracts, 18 conformance scenarios
 apps/api            Fastify 5 + SQLite (better-sqlite3)
-  src/policy/       the 17 rules, the gates, the resolver  <- authority lives here
+  src/policy/       the 18 rules, the gates, the resolver  <- authority lives here
   src/ai/           analyzer adapter, prompts, grounding   <- proposes only
   src/security/     injection scanner
   src/retrieval/    order identification and item scoping
@@ -327,6 +329,17 @@ scope that reaches the ledger comes from the model. The customer's tap is an
 ordinary `itemIds` on their next message, indistinguishable from a hand tick. See
 `docs/adr/0004-agent-invoked-item-picker.md`.
 
+### Reporting one line without burying the rest
+
+The order page lists every line with its own report state: a finished line shows
+as closed, any other line offers a report that deep-links into the chat with the
+line already ticked (`/help?order=&item=&issue=`). Closing a case finalises the
+decided lines only, so a later report on an untouched line opens a fresh case on
+the same thread instead of hitting a locked door; a later decision merges into
+the same closure row until every line is closed. The chat's line chips honour
+the same states, and the server still refuses ticks on decided lines, so a
+crafted URL cannot widen scope.
+
 ### Discretion, and why it is off
 
 `REFUND_POLICY.md` §10 adds a deterministic layer that resolves an escalation a
@@ -408,12 +421,15 @@ the pipeline.
   the pipeline — one escalation can no longer swallow their other orders. Status
   questions are answered, not filed: "where is my order" gets a status answer
   even with a person on the thread.
-- **Closing is permanent.** `POST /api/staff/conversations/:customerId/close`
-  locks the thread once nothing is owed: money settled, denial unappealed, or a
+- **Closing finalises lines, not threads.** `POST /api/staff/conversations/:customerId/close`
+  locks the decided lines once nothing is owed: money settled, denial unappealed, or a
   person having handled the case to its end — including an escalation they
-  resolved. Anything earlier is refused `409` with the reason. Closing is a
-  staff verb only: an automatic close would lock customers out of follow-ups
-  and appeals.
+  resolved. Anything earlier is refused `409` with the reason. A closure names the
+  order lines it put away, so closing the lamp's case leaves the kettle in the same
+  cart reportable; a later decision on the kettle merges into the same closure row
+  until every line is closed. Rows written before line-scoping count as fully
+  closed. Closing is a staff verb only: an automatic close would lock customers out
+  of follow-ups and appeals.
 - **The case file is built, not claimed.** Every takeover opens the same briefing,
   derived from the thread at read time: the customer's own words, the assistant's
   restatement of them, the questions it asked and the answers, the evidence it
@@ -549,11 +565,14 @@ invoke — NVIDIA's list includes several that answer `404 not found for account
 of the ids that do run, many ignore `response_format` and spend the token budget on
 prose instead of JSON.
 
-Measured against this pipeline:
+Measured against this pipeline, on the NVIDIA free tier unless stated:
 
 | Model | Result |
 |---|---|
-| `nvidia/nemotron-3-ultra-550b-a55b` | 3/3 valid, grounded |
+| `openai/gpt-oss-20b` (NVIDIA) | small, schema-valid under `response_format: json_object`; needs `reasoning_effort: low`, which the adapter sends, or it spends the token budget thinking and truncates |
+| `meta/llama-3.1-8b-instruct` (NVIDIA) | retired by NVIDIA 2026-08-26 — now answers `410 Gone` |
+| `mistralai/mistral-7b-instruct-v0.3` (NVIDIA) | advertised by `GET /v1/models` but answers `404` on invoke |
+| `nvidia/nemotron-3-ultra-550b-a55b` | 3/3 valid, grounded — but huge; superseded by the smaller default |
 | `llama-3.3-70b-versatile` (Groq) | fast, schema-valid |
 | `gpt-4o-mini` (OpenAI) | fast, schema-valid |
 
@@ -640,7 +659,13 @@ human instead. Neither setting can approve anything.
 | `GET`, `POST` | `/api/returns` | the signed-in customer's own returns; open one |
 | `GET` | `/api/returns/:id` | one of them, or `404` for anyone else's |
 | `GET` | `/api/admin/returns`, `/api/admin/returns/by-request/:requestId` | the warehouse queue, staff only |
+| `POST` | `/api/admin/returns` | open a return from the console for a case's customer and order, agent role |
 | `POST` | `/api/admin/returns/:id/label` \| `/ship` \| `/receive` \| `/process` \| `/deny` | drive a return, staff only |
+| `POST` | `/api/admin/requests/:requestId/authorise-refund` | reserve the full order total against a decided request, agent role; still settled by a person |
+| `GET` | `/api/staff/order?customerId=&orderId=` | one order with its lines for the console picker, agent role |
+| `GET` | `/api/staff/exchanges`, `/api/staff/exchanges/:id`, `/api/staff/exchanges/by-request/:requestId` | the exchange builds, agent role |
+| `POST` | `/api/staff/exchanges` | open an exchange from the console: replacement line, reason, optional note |
+| `POST` | `/api/staff/exchanges/:id/label` \| `/ship` \| `/receive` \| `/replace` \| `/deny` | walk an exchange to closure, agent role |
 | `GET` | `/api/staff/conversations`, `/api/staff/conversation?customerId=` | the live takeover queue and one conversation's case file + thread, staff only |
 | `POST` | `/api/staff/conversations/:customerId/take-over` | claim the thread; `409` if a colleague already holds it |
 | `POST` | `/api/staff/conversations/:customerId/message` | reply as the agent on behalf of the current holder |
@@ -972,10 +997,11 @@ one is like this.
   this is the most likely source of a wrong amount.
 - Refund decisions are recorded, not executed. There is no payment processor, so
   there is no idempotency key on an outbound transfer and no lock across processes.
-- **The returns API has no staff UI.** The endpoints in the table above are the
-  product surface for the warehouse steps; a staff page to drive them is not
-  built. The routes are tested and exercised, and the reasoning above is the
-  design, but the console does not yet render a returns queue.
+- **The returns API is driven from the live console.** The Actions panel beside each
+  case file opens returns and exchanges, walks them through label/ship/receive and
+  replace/deny, and reserves full refunds — all as the agent on the case, all
+  audited. There is no separate warehouse page; the case is where the goods are
+  discussed, so it is where they are moved.
 - Single-tenant, single-currency (USD), SQLite. Not a multi-merchant ledger.
 
 ## Licence

@@ -18,6 +18,7 @@ import type { DiscretionConfig } from '../config/env.js';
 import { precedenceFold } from './engine.js';
 import type { GateResult } from './gates.js';
 import { describeCeiling } from '../retrieval/identifyOrder.js';
+import { asksForSwap } from '../response/intent.js';
 import {
   recommendDiscretion,
   DEFAULT_DISCRETION,
@@ -78,6 +79,16 @@ export interface ResolveInput {
    * fold then ignores.
    */
   readonly claimedItemIds?: readonly string[] | undefined;
+  /**
+   * The customer's own words for this request, when the caller has them.
+   *
+   * Read only by the exchange branch, and only for the deterministic swap
+   * vocabulary: an exchange promises goods, and a remedy the customer did not
+   * ask for in so many words is a guess wearing a decision. Optional because
+   * most unit tests decide from evaluations alone, and without it no exchange
+   * is ever concluded.
+   */
+  readonly customerMessage?: string | undefined;
 }
 
 /**
@@ -129,7 +140,12 @@ export function resolve(input: ResolveInput): RefundDecision {
   // discretion layer proposes money. Gating only the base decision would leave the
   // obvious hole: an escalation that the layer would have softened into a partial
   // refund, on a claim the model does not stand behind.
-  const gated = confidenceGate(baseDecision, concluded, input, split);
+  // A swap the customer asked for is neither money nor a queue ticket: it is a
+  // different remedy, and answering it with a refund - or with "we could not
+  // read this" - is the wrong answer twice over. Mapped here, before the
+  // gates, so confidence, discretion and the agent hold all still apply to it.
+  const remedied = exchangeRemedy(baseDecision, evaluations, input);
+  const gated = confidenceGate(remedied, concluded, input, split);
   const softened = softenDecision(gated.decision, gated.winner, evaluations, input, split);
   // After discretion, not before it: a handoff to a person is not something
   // the softening layer may convert back into a payment.
@@ -167,6 +183,7 @@ export function resolve(input: ResolveInput): RefundDecision {
     trace: evaluations,
     overrides,
     eligibleItemIds: input.gateResult.eligibleItems.map((item) => item.id),
+    claimedItemIds: input.claimedItemIds ?? [],
     refundItemIds: refundItemIdsFor(input, payable, amount, split),
     blockedItems: [...input.gateResult.blockedItems, ...splitReviewBlocked(input, split)],
     ...outstandingFor(input),
@@ -416,6 +433,86 @@ function decisionFrom(winner: RuleEvaluation | null): Decision {
     return 'escalated';
   }
   return 'approved';
+}
+
+/**
+ * Turns an eligible swap ask into an exchange.
+ *
+ * Four locks, because a promised replacement is still a promise:
+ *
+ *  - **Nothing objected.** A denial or an escalation anywhere in the trace
+ *    stands - a swap promised over a risk hold would pay the customer twice,
+ *    once in goods and once in whatever the hold was for.
+ *  - **The reading says exchange.** The model's intent, not its reason: swap
+ *    asks usually carry reason `other`, which is exactly what R-12 used to
+ *    escalate them for.
+ *  - **The reading is confident and evidenced.** Same floor the money must
+ *    clear, plus at least one quote, so a vague message cannot become goods.
+ *  - **The customer said swap in so many words.** The deterministic
+ *    vocabulary, not the model's inference: an inferred remedy is not an
+ *    asked one, and without it the request stays wherever the rules put it.
+ *
+ * Runs before the gates, which pass an exchange through untouched - a swap
+ * moves no money - except the agent hold, which takes it back when the
+ * customer asked for a person instead.
+ */
+function exchangeRemedy(
+  baseDecision: Decision,
+  evaluations: readonly RuleEvaluation[],
+  input: ResolveInput,
+): Decision {
+  if (baseDecision !== 'approved' && baseDecision !== 'escalated') {
+    return baseDecision;
+  }
+  if (hasObjection(evaluations, input.claimedItemIds ?? [])) {
+    return baseDecision;
+  }
+  return swapAskIsActionable(input) ? 'exchange' : baseDecision;
+}
+
+/**
+ * A denial or an escalation that bears on this claim.
+ *
+ * Scope matters: an item objection about a line the customer never claimed -
+ * the subscription sitting unmentioned in the same basket - must not veto a
+ * swap of the line they did claim, and the citation layer below reuses this
+ * so the reply cannot blame it either. Order-scope verdicts always bear,
+ * item verdicts with no lines bear (there is nothing to exonerate them
+ * against), and an unnamed claim puts the whole order in scope.
+ */
+function hasObjection(evaluations: readonly RuleEvaluation[], claimedItemIds: readonly string[]): boolean {
+  return evaluations.some((rule) => bearsOnClaim(rule, claimedItemIds));
+}
+
+/** Whether one evaluation's verdict constrains this claim's remedy. */
+function bearsOnClaim(rule: RuleEvaluation, claimedItemIds: readonly string[]): boolean {
+  if (rule.outcome !== 'deny' && rule.outcome !== 'escalate') {
+    return false;
+  }
+  if (rule.scope === 'order' || rule.itemIds.length === 0 || claimedItemIds.length === 0) {
+    return true;
+  }
+  return rule.itemIds.some((id) => claimedItemIds.includes(id));
+}
+
+/**
+ * Whether the swap ask may be acted on.
+ *
+ * The model's intent is not enough on its own: an inferred remedy is not an
+ * asked one. So the claim must clear the same confidence floor money clears,
+ * carry at least one quote, and match the deterministic swap vocabulary in the
+ * customer's own words. Anything vaguer stays wherever the rules put it.
+ */
+function swapAskIsActionable(input: ResolveInput): boolean {
+  const extraction = input.extraction;
+  if (extraction?.intent !== 'exchange') {
+    return false;
+  }
+  const floor = input.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
+  if (extraction.confidence < floor || extraction.evidenceQuotes.length === 0) {
+    return false;
+  }
+  return input.customerMessage !== undefined && asksForSwap(input.customerMessage);
 }
 
 /** The result of consulting the discretion layer. */
@@ -840,14 +937,16 @@ function lowConfidenceRecord(
 }
 
 /**
- * Hands a payable decision to the person the customer asked for.
+ * Hands a promising decision to the person the customer asked for.
  *
  * Mirrors the confidence gate: it can only ever escalate, and a denial stands
  * untouched - refusing authorises nothing, and the appeal path is how a person
- * still hears a refusal. Runs after discretion so the softening layer cannot
- * convert the handoff back into a payment, and records even an already
- * escalated decision, because "the customer asked for a person" is a separate
- * event from "the policy had nothing to approve".
+ * still hears a refusal. An exchange is held like a payment: it promises the
+ * customer goods, and a customer who asked for a person must get one, not a
+ * parcel. Runs after discretion so the softening layer cannot convert the
+ * handoff back into a payment, and records even an already escalated decision,
+ * because "the customer asked for a person" is a separate event from "the
+ * policy had nothing to approve".
  */
 function agentGate(
   decision: Decision,
@@ -861,7 +960,7 @@ function agentGate(
     detail: 'the customer asked for a person in their own words; a person decides instead',
     aiProposal: input.aiProposal,
   };
-  if (decision === 'approved' || decision === 'partial_refund') {
+  if (decision === 'approved' || decision === 'partial_refund' || decision === 'exchange') {
     return { decision: 'escalated', overrides: [record] };
   }
   if (decision === 'escalated') {
@@ -989,6 +1088,28 @@ function overrideCodeFor(suggested: Decision, actual: Decision): OverrideCode {
   return 'ai_proposal_rejected';
 }
 
+/**
+ * The summary when no rule concluded the decision.
+ *
+ * An exchange concluded from the customer's own swap ask is not a default
+ * escalation: nothing objected, and "escalated by default" would describe a
+ * decision this is not.
+ */
+function summariseUnconcluded(
+  decision: Decision,
+  amount: number,
+  balanceWhy: string | null,
+  discretionApplied: boolean,
+  review: string,
+): string {
+  const balancePart = balanceWhy === null ? '' : ` ${balanceWhy}`;
+  if (decision === 'exchange') {
+    return `Resolved with an exchange: the customer asked to swap an item and no rule objected. ${formatCents(amount)}.${balancePart}${discretionPart(discretionApplied)}${review}`;
+  }
+  const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
+  return `${VERB[decision]}: no policy rule reached a conclusion, so the request escalated by default. ${amountPart}${balancePart}${discretionPart(discretionApplied)}${review}`;
+}
+
 function summarise(
   decision: Decision,
   winner: RuleEvaluation | null,
@@ -1001,8 +1122,7 @@ function summarise(
   const reviewPart = reviewSentence(input, split);
   const review = reviewPart === null ? '' : ` ${reviewPart}`;
   if (winner === null) {
-    const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;
-    return `${VERB[decision]}: no policy rule reached a conclusion, so the request escalated by default. ${amountPart}${balanceWhy === null ? '' : ` ${balanceWhy}`}${discretionPart(discretionApplied)}${review}`;
+    return summariseUnconcluded(decision, amount, balanceWhy, discretionApplied, review);
   }
   const rulePart = `${winner.ruleId} (${winner.policyRef}): ${winner.evidence}`;
   const amountPart = decision === 'denied' ? 'No refund will be issued.' : `${formatCents(amount)}.`;

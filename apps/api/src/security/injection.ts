@@ -145,11 +145,3 @@ export function scanForInjection(message: string): InjectionScan {
     obfuscationNoted: noteObfuscation(message),
   };
 }
-
-/** Documentation for the /policy endpoint and the admin UI. */
-export const INJECTION_LIMITS = [
-  'Patterns match English phrasing only; translated or obfuscated attempts are not detected (see scenario S-18).',
-  'A missed attempt cannot cause a payout: eligibility, amount and decision are owned by the policy engine.',
-  'Detection is high-precision by design. An unusual but honest message is flagged, never silently denied.',
-  'Obfuscation markers (zero-width characters, base64 blobs) are recorded for audit but do not affect the decision.',
-] as const;

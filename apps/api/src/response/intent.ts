@@ -41,6 +41,9 @@ const SAYS_YES: readonly RegExp[] = [
   /^\s*yes\b/i,
   /^\s*yep\b/i,
   /^\s*yeah\b/i,
+  /^\s*ok(ay)?\b/i,
+  /^\s*sounds good\b/i,
+  /^\s*that works\b/i,
   /^\s*that'?s right\b/i,
   /^\s*correct\b/i,
   /^\s*exactly\b/i,
@@ -49,11 +52,41 @@ const SAYS_YES: readonly RegExp[] = [
   /^\s*go ahead\b/i,
   /^\s*do it\b/i,
   /^\s*sure\b/i,
+  // An aggrieved restatement is still a yes: "i said okay" after repeating
+  // the question means the question was answered, not that a new claim was
+  // filed. The list after "said" stays affirmative-only - "i said no" must
+  // never read as consent. An "ok, but..." that smuggles a new complaint
+  // behind the acknowledgement misreads the same way "yeah, but..." always
+  // has; narrowing one without the other would trade a frustration for an
+  // inconsistency, so both stay prefix matches.
+  /\bi\s+said\s+(yes|yeah|yep|ok(ay)?|sure|correct|please)\b/i,
 ];
 
 /** Whether the customer's own words ask for money back. */
 export function asksForMoney(text: string): boolean {
   return ASKS_FOR_MONEY.some((pattern) => pattern.test(text));
+}
+
+/**
+ * The ways a customer asks for a swap instead of money back, in the words
+ * people actually use.
+ *
+ * "Can I swap it instead?" is the sentence this exists for: a customer who has
+ * just been offered a refund-or-agent choice and picks neither, naming the
+ * third remedy. "Replace" only counts with an object - "replace the policy"
+ * is not a swap, and neither is a bare verb floating without one.
+ */
+const ASKS_FOR_SWAP: readonly RegExp[] = [
+  /\bswap\b/i,
+  /\bexchange\b/i,
+  /\breplacement\b/i,
+  /\breplace (it|this|that|them|the item|my order)\b/i,
+  /\b(different|another)\s+(size|colour|color)\b/i,
+];
+
+/** Whether the customer's own words ask to swap rather than be refunded. */
+export function asksForSwap(text: string): boolean {
+  return ASKS_FOR_SWAP.some((pattern) => pattern.test(text));
 }
 
 /**
@@ -100,16 +133,4 @@ export function wantsAnAgent(text: string): boolean {
 /** Has the customer picked a refund out of the options we offered? */
 export function picksRefund(text: string): boolean {
   return /\brefund(ed)?\b/i.test(text) || /\bmoney back\b/i.test(text) || /\bmy money\b/i.test(text);
-}
-
-/**
- * The only thing that says "this answer was one of the options we offered".
- *
- * Deliberately strict: the previous question is what makes a short reply a choice
- * rather than a new complaint, and without it a bare "yes" would be read as agreeing
- * to a refund nobody had mentioned.
- */
-export function isChoiceAnswer(text: string): boolean {
-  const trimmed = text.trim();
-  return trimmed.length > 0 && trimmed.length <= 80;
 }

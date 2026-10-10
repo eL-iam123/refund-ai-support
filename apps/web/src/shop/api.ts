@@ -54,7 +54,7 @@ export interface ShopOrder {
 }
 
 /** The decision as the refund engine returns it, nested under `decision`. */
-export interface Decision {
+interface Decision {
   readonly decision: 'approved' | 'denied' | 'escalated' | 'partial_refund' | 'exchange' | 'store_credit';
   readonly refundAmountCents: number;
   readonly eligibleAmountCents: number;
@@ -72,12 +72,6 @@ export interface RefundRequest {
   readonly responseText: string;
 }
 
-
-/** One line of a return, as the server names it: an order line and a count. */
-export interface CartLineInput {
-  readonly productId: string;
-  readonly quantity: number;
-}
 
 export const shopApi = {
   products: (): Promise<{ products: readonly Product[] }> => request('/api/shop/products'),
@@ -129,6 +123,8 @@ export const shopApi = {
   chatHistory: (orderId: string): Promise<{
     orderId: string;
     closed: boolean;
+    /** Order lines a closure already put away; everything outside this set is still reportable. */
+    closedItemIds: readonly string[];
     /** A person is holding the thread and has not answered yet. */
     awaitingPerson: boolean;
     turns: readonly ChatTurn[];
@@ -149,6 +145,20 @@ export const shopApi = {
    */
   fileAppeal: (requestId: string, reason: string): Promise<{ appeal: { id: string; requestId: string; createdAt: string; reason: string } }> =>
     post(`/api/shop/refunds/${encodeURIComponent(requestId)}/appeal`, { reason }),
+
+  /**
+   * One customer's verdict on one answer, upserted.
+   *
+   * Fire-and-forget from the widget's point of view: the thumb flips locally
+   * first, and the thread's next read reconciles it, so a slow vote never
+   * blocks the conversation.
+   */
+  rateReply: (requestId: string, rating: 'up' | 'down'): Promise<{ rating: { requestId: string; rating: 'up' | 'down' } }> =>
+    post('/api/shop/ratings', { requestId, rating }),
+
+  /** This order's verdicts, for seeding the thumbs on reload. */
+  orderRatings: (orderId: string): Promise<{ ratings: readonly { requestId: string; rating: 'up' | 'down' }[] }> =>
+    request(`/api/shop/ratings?orderId=${encodeURIComponent(orderId)}`),
 
   /**
    * Uploads a photo during a live takeover.

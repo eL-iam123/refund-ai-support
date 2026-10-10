@@ -9,7 +9,7 @@ import { pendingCentsForOrder } from '../db/refundLedger.js';
 import { appHarness, TEST_NOW, decided } from './helpers.js';
 import { shopHarness, signIn } from './shop-helpers.js';
 import { FakeAnalyzer } from './fakeAnalyzer.js';
-import { composeDeterministicResponse } from '../response/compose.js';
+import { composeDeterministicResponse, reasonFor } from '../response/compose.js';
 import type { OrderRecord } from '../db/records.js';
 
 /**
@@ -435,5 +435,108 @@ describe('through the ledger, end to end', () => {
     // reservation is bound to persistence rather than to the decision.
     expect(result.decision.decision).toBe('approved');
     expect(pendingCentsForOrder(db, 'ORD-1001')).toBe(0);
+  });
+});
+
+describe('an exchange reply answers the ask', () => {
+  function exchanged(message: string): string {
+    return composeDeterministicResponse(
+      {
+        decision: 'exchange',
+        refundAmountCents: 0,
+        eligibleAmountCents: 2400,
+        currency: 'USD',
+        summary: '',
+        policyRef: 'REFUND_POLICY.md §9',
+        trace: [],
+        overrides: [],
+        eligibleItemIds: [],
+        refundItemIds: [],
+        blockedItems: [],
+        outstandingAmountCents: 0,
+        outstandingState: 'none',
+      },
+      null,
+      message,
+    );
+  }
+
+  it('answers a swap ask with yes instead of a verdict', () => {
+    // The reported transcript: "can i swap it?" answered with "we have decided
+    // the outcome is exchange" - machinery stated instead of the question
+    // answered, which is what the customer hears as brusque.
+    const text = exchanged('can i swap it instead?');
+    expect(text).toMatch(/^Yes/);
+    expect(text).not.toMatch(/outcome is|decision is|arranged an exchange/);
+    expect(text).toContain('confirm the details');
+  });
+
+  it('states the arrangement when nobody asked for a swap', () => {
+    const text = exchanged('the mug arrived broken');
+    expect(text).toContain('arranged an exchange');
+  });
+});
+
+describe('citations stay on the dispute', () => {
+  const SUB = 'ITM-SUB';
+  const COAT = 'ITM-COAT';
+
+  function deniedDecision(claimed: readonly string[]): RefundDecision {
+    return {
+      decision: 'denied',
+      refundAmountCents: 0,
+      eligibleAmountCents: 0,
+      currency: 'USD',
+      summary: '',
+      policyRef: 'REFUND_POLICY.md §2',
+      trace: [
+        {
+          ruleId: 'R-10',
+          ruleClass: 'eligibility',
+          scope: 'item',
+          outcome: 'deny',
+          evidence: 'subscription line',
+          policyRef: 'REFUND_POLICY.md §2.4',
+          itemIds: [SUB],
+        },
+      ],
+      overrides: [],
+      eligibleItemIds: [],
+      claimedItemIds: [...claimed],
+      refundItemIds: [],
+      blockedItems: [
+        { itemId: COAT, name: 'Meridian Wool Coat', priceCents: 24800, ruleId: 'R-02', reason: 'final sale' },
+        { itemId: SUB, name: 'Coffee Subscription', priceCents: 4200, ruleId: 'R-10', reason: 'subscription' },
+      ],
+      outstandingAmountCents: 0,
+      outstandingState: 'none',
+    };
+  }
+
+  it('cites the rule behind the claimed line', () => {
+    const decision = deniedDecision([SUB]);
+    expect(reasonFor(decision)).toContain('billing');
+    const text = composeDeterministicResponse(decision, null, 'cancel my subscription');
+    expect(text).toContain('Coffee Subscription');
+    expect(text).not.toContain('Meridian Wool Coat');
+  });
+
+  it('does not blame an unclaimed line for the refusal', () => {
+    // The reported transcript: asked about the subscription, refused with the
+    // coat standing beside it. The coat is truly ineligible, but it is not
+    // what the customer asked about, so the reply must not name it.
+    const decision = deniedDecision(['ITM-UNMENTIONED']);
+    expect(reasonFor(decision)).toContain('needs a person to decide');
+    const text = composeDeterministicResponse(decision, null, 'cancel my subscription');
+    expect(text).not.toContain('Meridian Wool Coat');
+    expect(text).not.toContain('Coffee Subscription');
+  });
+
+  it('keeps the old wording when the claim named nothing', () => {
+    const decision = deniedDecision([]);
+    expect(reasonFor(decision)).toContain('billing');
+    const text = composeDeterministicResponse(decision, null, 'cancel my subscription');
+    expect(text).toContain('Coffee Subscription');
+    expect(text).toContain('Meridian Wool Coat');
   });
 });
