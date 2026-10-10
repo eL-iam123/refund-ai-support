@@ -16,9 +16,9 @@
   --no-soft: #fff0ef;
   --wait: #9a6700;
   --wait-soft: #fff7df;
-  --radius: 10px;
-  --shadow-sm: none;
-  --shadow-md: none;
+  --radius: 14px;
+  --shadow-sm: 0 1px 2px rgb(28 25 23 / 6%), 0 8px 22px rgb(28 25 23 / 5%);
+  --shadow-md: 0 16px 36px rgb(28 25 23 / 10%);
   --font: "Fira Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono: "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --space-1: 4px;
@@ -61,8 +61,11 @@ ul { margin: 0; padding: 0; list-style: none; }
 .shop-search { display: flex; align-items: center; gap: 9px; flex: 1; max-width: 500px; min-height: 44px; padding: 0 14px; color: var(--ink-faint); background: rgb(243 241 237 / 80%); border: 1px solid var(--line); border-radius: 12px; }
 .shop-search span { font-size: .88rem; }
 .topbar nav { display: flex; align-items: center; gap: 2px; margin-left: auto; }
-.topbar nav a, button.linkish { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 10px; border: 0; border-radius: 6px; color: var(--ink-soft); background: transparent; font-size: .84rem; font-weight: 600; }
-.topbar nav a:hover, .topbar nav a.active, button.linkish:hover { color: var(--brand-deep); background: var(--brand-soft); }
+.topbar nav a, button.linkish { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 11px; border: 0; border-radius: 10px; color: var(--ink-soft); background: transparent; font-size: .84rem; font-weight: 650; transition: color .16s ease, background .16s ease, transform .16s ease; }
+.topbar nav a:hover, .topbar nav a.active, button.linkish:hover { color: var(--brand-deep); background: var(--brand-soft); transform: translateY(-1px); }
+.topbar-admin { min-height: 68px; background: rgb(255 253 250 / 94%); }
+.topbar-admin .brand-mark { width: 34px; height: 34px; border-radius: 10px; }
+.topbar-admin nav { gap: 3px; }
 .cart-link b { display: grid; min-width: 18px; height: 18px; place-items: center; border-radius: 99px; color: white; background: var(--brand); font-size: .68rem; }
 .main { width: min(1280px, 100%); flex: 1; margin: 0 auto; padding: 20px 20px 28px; }
 .footer { width: min(1280px, 100%); margin: 0 auto; padding: 0 20px 18px; }
@@ -84,8 +87,8 @@ ul { margin: 0; padding: 0; list-style: none; }
 .two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .section-heading h2 { margin-top: 2px; }
-.shop-hero { display: flex; align-items: end; justify-content: space-between; min-height: 210px; padding: clamp(24px, 5vw, 54px); color: #fff; background: #202020; border-radius: var(--radius); border-left: 6px solid var(--brand); }
-.shop-hero .lede { margin-top: 12px; color: #d4d4d4; }
+.shop-hero { display: flex; align-items: end; justify-content: space-between; min-height: 220px; padding: clamp(26px, 5vw, 58px); color: #fff; background: radial-gradient(circle at 90% 15%, rgb(249 115 22 / 24%), transparent 34%), linear-gradient(135deg, #292524, #171412); border-radius: var(--radius); border-left: 6px solid var(--brand); box-shadow: var(--shadow-md); }
+.shop-hero .lede { margin-top: 12px; color: #e7e5e4; }
 .hero-stat { display: grid; gap: 2px; min-width: 145px; padding: 14px 0 14px 20px; border-left: 1px solid #525252; }
 .hero-stat strong { color: #fff; font-size: 2rem; line-height: 1; }
 .hero-stat span { color: #d4d4d4; font-size: .82rem; }
@@ -115,8 +118,8 @@ label { color: var(--ink-soft); font-size: .84rem; font-weight: 600; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
 .grid .card { display: flex; flex-direction: column; padding: 0; overflow: hidden; transition: border-color .16s ease, box-shadow .16s ease; }
-.grid .card:hover { border-color: #bdbdbd; box-shadow: 0 6px 18px rgb(0 0 0 / 8%); }
-.product-visual { display: grid; min-height: 178px; place-items: center; color: hsl(var(--hue) 35% 42%); background: hsl(var(--hue) 55% 94%); border-bottom: 1px solid var(--line); }
+.grid .card:hover { border-color: #f0a36d; box-shadow: var(--shadow-md); transform: translateY(-2px); }
+.product-visual { display: grid; min-height: 178px; place-items: center; color: hsl(var(--hue) 35% 42%); background: linear-gradient(145deg, hsl(var(--hue) 55% 96%), hsl(var(--hue) 48% 91%)); border-bottom: 1px solid var(--line); }
 .grid .card-body { flex: 1; padding: 15px; }
 .grid .card-body button { width: 100%; margin-top: auto; }
 .blurb { color: var(--ink-soft); font-size: .84rem; }
@@ -735,3 +738,25 @@ button:hover:not(:disabled), .btn:hover, .btn-primary:hover { background: var(--
   .order-delivery div { align-items: start; flex-direction: column; gap: 1px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
+
+/* Final visual pass: improve hierarchy and interaction feedback without changing layout. */
+.section-heading, .orders-heading, .admin-page-heading, .live-page-heading { letter-spacing: -.01em; }
+.section-heading h2, .orders-heading h1, .admin-page-heading h1, .live-page-heading h1 { letter-spacing: -.025em; }
+.card, .panel, .order-card, .live-row, .case-head, .case-brief, .thread-stack { transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.card:hover, .panel:hover { border-color: #e8b18a; }
+.panel-head { letter-spacing: -.01em; }
+.note, .error, .error-note, .response-toast { border-radius: 10px; }
+.pill, .badge, .outcome, .tag, .flag-warn, .flag-info, .class-tag { padding-inline: 9px; }
+.footer { color: var(--ink-faint); }
+.footer p { justify-content: center; text-align: center; }
+@media (max-width: 680px) {
+  .topbar { gap: 12px; padding-inline: 14px; }
+  .brand small { display: none; }
+  .topbar-admin { min-height: 62px; }
+  .topbar-admin .brand { font-size: .9rem; }
+  .topbar-admin nav a, .topbar-admin button.linkish { min-height: 36px; padding-inline: 7px; font-size: .76rem; }
+  .shop-hero { min-height: 250px; padding: 26px 22px; }
+  .hero-stat { display: none; }
+  .card { padding: 16px; }
+  .panel-head { padding-inline: 16px; }
+}
