@@ -738,3 +738,25 @@ button:hover:not(:disabled), .btn:hover, .btn-primary:hover { background: var(--
   .order-delivery div { align-items: start; flex-direction: column; gap: 1px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
+
+/* Final visual pass: improve hierarchy and interaction feedback without changing layout. */
+.section-heading, .orders-heading, .admin-page-heading, .live-page-heading { letter-spacing: -.01em; }
+.section-heading h2, .orders-heading h1, .admin-page-heading h1, .live-page-heading h1 { letter-spacing: -.025em; }
+.card, .panel, .order-card, .live-row, .case-head, .case-brief, .thread-stack { transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.card:hover, .panel:hover { border-color: #e8b18a; }
+.panel-head { letter-spacing: -.01em; }
+.note, .error, .error-note, .response-toast { border-radius: 10px; }
+.pill, .badge, .outcome, .tag, .flag-warn, .flag-info, .class-tag { padding-inline: 9px; }
+.footer { color: var(--ink-faint); }
+.footer p { justify-content: center; text-align: center; }
+@media (max-width: 680px) {
+  .topbar { gap: 12px; padding-inline: 14px; }
+  .brand small { display: none; }
+  .topbar-admin { min-height: 62px; }
+  .topbar-admin .brand { font-size: .9rem; }
+  .topbar-admin nav a, .topbar-admin button.linkish { min-height: 36px; padding-inline: 7px; font-size: .76rem; }
+  .shop-hero { min-height: 250px; padding: 26px 22px; }
+  .hero-stat { display: none; }
+  .card { padding: 16px; }
+  .panel-head { padding-inline: 16px; }
+}
